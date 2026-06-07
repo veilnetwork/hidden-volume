@@ -1,0 +1,44 @@
+[package]
+name = "hidden-volume-async"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.89"
+description = "Tokio-based async wrapper around the hidden-volume sync core"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "hidden_volume_async"
+path = "src/lib.rs"
+
+[dependencies]
+# Path + version: cargo-deny requires a version constraint on
+# path dependencies (RUSTSEC-style wildcard ban).
+hidden-volume = { path = "../hidden-volume", version = "1.0.0" }
+# Audit pass 8 (E5+E6 full): shared internal helpers — `OwnedSpace`
+# self-referential pattern + `run_blocking` adapter. Used to be
+# duplicated between this crate and `hidden-volume-ffi`.
+hidden-volume-rt = { path = "../hidden-volume-rt", version = "1.0.0" }
+# Tokio runtime + spawn_blocking. The sync core (hidden-volume) does
+# NOT depend on tokio; this wrapper layer is the only place tokio
+# enters the dependency graph. Using `rt` + `sync` features keeps
+# the binary footprint minimal.
+tokio = { version = "1", features = ["rt", "sync"] }
+# `Stream` trait only. Tiny crate, zero transitive deps.
+futures-core = { version = "0.3", default-features = false, features = ["std"] }
+# Ergonomic `try_stream!` macro for the paginated log-iteration
+# wrappers. Pulls only futures-core.
+async-stream = "0.3"
+# Audit pass 17 E: scrub `Vec<u8>` password copies on `AsyncSpace`
+# entry points. Same role + same pinned version as the FFI crate's
+# pass-16 dependency.
+zeroize = "1.8"
+
+[dev-dependencies]
+tempfile = "3.10"
+# `#[tokio::test]` macros + multi-thread runtime for tests.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync"] }
+# `StreamExt::next` / `StreamExt::collect` for consuming streams in tests.
+# Test-only — production callers can use any executor with a `StreamExt`
+# implementation (futures, tokio-stream, etc.).
+futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }

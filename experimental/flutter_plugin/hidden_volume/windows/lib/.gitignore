@@ -1,0 +1,3 @@
+# cdylib staged here by scripts/build-windows.sh — regenerate locally,
+# do not commit (matches the bindings/ rule for Kotlin/Swift/etc).
+hidden_volume_ffi.dll

@@ -1,0 +1,39 @@
+name: hidden_volume
+description: >
+  Flutter plugin wrapping the `hidden-volume` Rust crate — deniable
+  multi-space encrypted append-only container, suitable as the local
+  storage layer of a decentralized messenger.
+version: 0.0.1
+homepage: https://github.com/example/hidden-volume
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+  flutter: '>=3.10.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # uniffi runtime helpers for Dart bindings (added once
+  # `uniffi-dart` 0.4+ stabilizes). Until then we use the manual
+  # `dart:ffi` skeleton in `lib/src/bindings.dart`.
+  ffi: ^2.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+# Plugin platform support. `cdylib` (Android) is loaded by the
+# generated Kotlin binding; `staticlib` (iOS) is bundled into the
+# xcframework consumed by CocoaPods.
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: dev.hidden_volume.hidden_volume
+        pluginClass: HiddenVolumePlugin
+      ios:
+        pluginClass: HiddenVolumePlugin
+      windows:
+        pluginClass: HiddenVolumePluginCApi

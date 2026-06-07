@@ -1,0 +1,343 @@
+# hidden-volume — public API baseline snapshot
+#
+# This file is language-neutral: it is a verbatim listing of Rust public-API
+# identifiers and signatures. There is no separate Russian version because
+# the content is code, not prose. Canonical path: this file.
+#
+# Этот файл нейтрален по языку: это дословный листинг идентификаторов и
+# сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
+# является кодом, а не прозой. Канонический путь: этот файл.
+#
+# Captured: 2026-05-29T13:10:14Z
+# Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
+#           src/. cargo public-api would be more rigorous but its rustdoc-
+#           json dependency requires nightly Rust; this project's MSRV is
+#           1.89 stable. The grep snapshot is sufficient for drift-detection
+#           in CI.
+# Format:   <crate>: <module-path> :: <pub item declaration>
+#
+# Regenerate with: scripts/dump-public-api.sh
+# Drift-check (CI):  scripts/dump-public-api.sh --check
+#
+# This snapshot includes:
+#   - top-level items (pub fn/struct/enum/trait/const/static/type/mod/use)
+#   - methods inside impl blocks (pub fn within impl)
+# It does NOT include:
+#   - re-exports expanded to canonical paths
+#   - generic-bound details beyond the line
+#   - private items (we only care about pub surface)
+#
+
+==========================================
+crate: hidden-volume
+==========================================
+
+cancel.rs:  58:pub struct CancelToken(Arc<AtomicBool>);
+cancel.rs:  63:    pub fn new() -> Self {
+cancel.rs:  70:    pub fn cancel(&self) {
+cancel.rs:  79:    pub fn is_cancelled(&self) -> bool {
+cancel.rs:  85:    pub fn check(&self) -> Result<()> {
+chunk/format.rs:  24:pub const MAGIC: [u8; 4] = *b"HVC1";
+chunk/format.rs:  27:pub const PLAINTEXT_HEADER_LEN: usize = 4 + 1 + 1 + 8 + 2;
+chunk/format.rs:  30:pub const PAYLOAD_CAP: usize = PLAINTEXT_LEN - PLAINTEXT_HEADER_LEN;
+chunk/format.rs:  47:pub struct Plaintext {
+chunk/format.rs:  61:    pub fn encode(&self) -> Result<[u8; PLAINTEXT_LEN]> {
+chunk/format.rs:  91:    pub fn decode(buf: &[u8]) -> Result<Self> {
+chunk/kind.rs:  19:pub enum ChunkKind {
+chunk/kind.rs:  37:    pub fn from_u8(b: u8) -> Result<Self> {
+chunk/mod.rs:  3:pub mod format;
+chunk/mod.rs:  4:pub mod kind;
+chunk/mod.rs:  11:pub use format::Plaintext;
+chunk/mod.rs:  12:pub use kind::ChunkKind;
+container/file.rs:  121:pub const DEFAULT_SUPERBLOCK_REPLICAS: u8 = 3;
+container/file.rs:  125:pub enum LockMode {
+container/file.rs:  142:pub struct ContainerFile {
+container/file.rs:  187:    pub fn create<P: AsRef<Path>>(path: P, params: Argon2Params) -> Result<Self> {
+container/file.rs:  226:    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+container/file.rs:  257:    pub fn open_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
+container/file.rs:  306:    pub fn append_garbage_chunks(&mut self, n: u64) -> Result<()> {
+container/file.rs:  339:    pub fn slot_count(&self) -> u64 {
+container/file.rs:  344:    pub fn read_slot(&mut self, i: u64) -> Result<[u8; CHUNK_SIZE]> {
+container/file.rs:  366:    pub fn read_slot_concurrent(&self, i: u64) -> Result<[u8; CHUNK_SIZE]> {
+container/file.rs:  385:    pub fn raw_file(&self) -> &File {
+container/file.rs:  395:    pub fn append_slot(&mut self, chunk: &[u8; CHUNK_SIZE]) -> Result<u64> {
+container/file.rs:  416:    pub fn scrub_slot(&mut self, slot: u64) -> Result<()> {
+container/file.rs:  430:    pub fn fsync(&mut self) -> Result<()> {
+container/header.rs:  31:pub struct Header {
+container/header.rs:  45:    pub fn new_random(params: Argon2Params) -> Result<Self> {
+container/header.rs:  55:    pub fn decode(bytes: &[u8]) -> Result<Self> {
+container/header.rs:  77:    pub fn encode_first_chunk(&self) -> Result<[u8; CHUNK_SIZE]> {
+container/mod.rs:  4:pub mod file;
+container/mod.rs:  5:pub mod header;
+container/mod.rs:  9:pub use file::{ContainerFile, DEFAULT_SUPERBLOCK_REPLICAS};
+container/mod.rs:  10:pub use header::Header;
+container/mod.rs:  40:pub struct ContainerOptions {
+container/mod.rs:  84:pub struct RepackOptions {
+container/mod.rs:  128:pub struct Container {
+container/mod.rs:  137:    pub fn create<P: AsRef<Path>>(path: P, params: Argon2Params) -> Result<Self> {
+container/mod.rs:  157:    pub fn create_with_options<P: AsRef<Path>>(path: P, options: ContainerOptions) -> Result<Self> {
+container/mod.rs:  217:    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+container/mod.rs:  245:    pub fn open_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
+container/mod.rs:  258:    pub fn is_readonly(&self) -> bool {
+container/mod.rs:  265:    pub fn set_padding_policy(&mut self, policy: PaddingPolicy) -> Result<()> {
+container/mod.rs:  275:    pub fn padding_policy(&self) -> PaddingPolicy {
+container/mod.rs:  282:    pub fn set_superblock_replicas(&mut self, replicas: u8) -> Result<()> {
+container/mod.rs:  292:    pub fn superblock_replicas(&self) -> u8 {
+container/mod.rs:  300:    pub fn header(&self) -> &Header {
+container/mod.rs:  306:    pub fn params(&self) -> Argon2Params {
+container/mod.rs:  318:    pub fn create_space(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  347:    pub fn open_space(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  402:    pub fn open_space_verified(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  411:    pub fn open_space_with_keys_verified(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
+container/mod.rs:  453:    pub fn derive_space_keys(&self, password: &[u8]) -> Result<SpaceKeys> {
+container/mod.rs:  469:    pub fn open_space_with_keys(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
+container/mod.rs:  482:    pub fn open_space_cancellable(
+container/mod.rs:  496:    pub fn open_space_with_keys_cancellable(
+container/mod.rs:  562:    pub fn open_space_parallel(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  570:    pub fn open_space_with_keys_parallel(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
+container/mod.rs:  600:    pub fn open_space_mmap(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  608:    pub fn open_space_with_keys_mmap(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
+container/mod.rs:  656:    pub fn open_space_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  665:    pub fn open_space_with_keys_constant_time(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
+container/mod.rs:  690:    pub fn open_space_parallel_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  698:    pub fn open_space_with_keys_parallel_constant_time(
+container/mod.rs:  723:    pub fn open_space_mmap_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  731:    pub fn open_space_with_keys_mmap_constant_time(
+container/mod.rs:  809:    pub fn repack(
+container/mod.rs:  831:    pub fn repack_cancellable(
+container/mod.rs:  1040:    pub fn compact_known(
+container/mod.rs:  1051:    pub fn compact_known_cancellable(
+container/mod.rs:  1109:    pub fn change_passwords(
+container/mod.rs:  1120:    pub fn change_passwords_cancellable(
+crypto/aead.rs:  21:pub struct ChunkAead {
+crypto/aead.rs:  36:    pub fn new(key: &[u8; 32]) -> Self {
+crypto/aead.rs:  46:    pub fn seal(&self, plaintext: &[u8], aad: [u8; AAD_LEN]) -> Result<([u8; NONCE_LEN], Vec<u8>)> {
+crypto/aead.rs:  78:    pub fn open(
+crypto/aead.rs:  173:pub fn make_aad(container_id: &[u8; 32], slot: u64) -> [u8; AAD_LEN] {
+crypto/derive.rs:  48:pub struct SpaceKeys {
+crypto/derive.rs:  72:    pub fn from_master(versioned_master: &Zeroizing<[u8; 32]>) -> Self {
+crypto/derive.rs:  142:pub fn derive_chunk_key(
+crypto/kdf.rs:  41:pub struct Argon2Params {
+crypto/kdf.rs:  82:pub const PARAMS_VERSION: u16 = 3;
+crypto/kdf.rs:  87:    pub const DEFAULT: Self = Self {
+crypto/kdf.rs:  117:    pub const MIN: Self = Self {
+crypto/kdf.rs:  127:    pub const LIGHT: Self = Self {
+crypto/kdf.rs:  137:    pub const HEAVY: Self = Self {
+crypto/kdf.rs:  149:    pub fn format_version(&self) -> u16 {
+crypto/kdf.rs:  157:    pub fn padding_policy_index(&self) -> u8 {
+crypto/kdf.rs:  170:    pub fn with_padding_policy_index(self, idx: u8) -> Self {
+crypto/kdf.rs:  188:    pub const MAX_M_COST_KIB: u32 = 1024 * 1024;
+crypto/kdf.rs:  192:    pub const MAX_T_COST: u32 = 100;
+crypto/kdf.rs:  197:    pub const MAX_P_COST: u32 = 64;
+crypto/kdf.rs:  202:    pub fn validate(&self) -> Result<()> {
+crypto/kdf.rs:  244:    pub fn encode(&self) -> [u8; HEADER_PARAMS_LEN] {
+crypto/kdf.rs:  256:    pub fn decode(bytes: &[u8]) -> Result<Self> {
+crypto/kdf.rs:  297:pub fn derive_master_key(
+crypto/mod.rs:  3:pub mod aead;
+crypto/mod.rs:  4:pub mod derive;
+crypto/mod.rs:  5:pub mod kdf;
+crypto/mod.rs:  6:pub mod rng;
+crypto/mod.rs:  8:pub use aead::ChunkAead;
+crypto/mod.rs:  9:pub use derive::{SpaceKeys, derive_chunk_key};
+crypto/mod.rs:  10:pub use kdf::{Argon2Params, derive_master_key};
+crypto/rng.rs:  8:pub fn fill(buf: &mut [u8]) -> Result<()> {
+crypto/rng.rs:  13:pub fn random_array<const N: usize>() -> Result<[u8; N]> {
+error.rs:  10:pub type Result<T, E = Error> = core::result::Result<T, E>;
+error.rs:  17:pub enum Error {
+lib.rs:  153:pub mod cancel;
+lib.rs:  154:pub mod chunk;
+lib.rs:  155:pub mod container;
+lib.rs:  156:pub mod crypto;
+lib.rs:  157:pub mod error;
+lib.rs:  163:pub mod padding;
+lib.rs:  164:pub mod space;
+lib.rs:  165:pub mod tx;
+lib.rs:  167:pub use container::Container;
+lib.rs:  168:pub use error::{Error, Result};
+lib.rs:  169:pub use open::MAX_OPEN_SCAN_CHUNKS;
+lib.rs:  170:pub use space::Space;
+lib.rs:  174:pub const CHUNK_SIZE: usize = 4096;
+lib.rs:  200:pub const HEADER_PARAMS_OFFSET: usize = 32;
+lib.rs:  203:pub const HEADER_PARAMS_LEN: usize = 16;
+lib.rs:  209:pub const NONCE_LEN: usize = 24;
+lib.rs:  212:pub const TAG_LEN: usize = 16;
+lib.rs:  215:pub const PLAINTEXT_LEN: usize = CHUNK_SIZE - NONCE_LEN - TAG_LEN;
+open/mod.rs:  67:pub const MAX_OPEN_SCAN_CHUNKS: u64 = 16 * 1024 * 1024;
+padding/mod.rs:  36:pub enum PaddingPolicy {
+padding/mod.rs:  69:    pub const DEFAULT: Self = Self::BucketGrowth { bucket_chunks: 256 };
+padding/mod.rs:  91:    pub fn from_persisted_index(idx: u8) -> Self {
+padding/mod.rs:  108:    pub fn to_persisted_index(&self) -> Option<u8> {
+padding/mod.rs:  133:    pub fn garbage_after_commit(
+space/index.rs:  58:pub struct Namespace(pub u8);
+space/index.rs:  62:    pub const SETTINGS: Self = Self(1);
+space/index.rs:  64:    pub const CONTACTS: Self = Self(2);
+space/index.rs:  66:    pub const MESSAGE_LOG: Self = Self(3);
+space/index.rs:  68:    pub const MEDIA: Self = Self(4);
+space/index.rs:  70:    pub const RESERVED: Self = Self(0);
+space/index.rs:  74:    pub fn as_u8(self) -> u8 {
+space/index.rs:  87:pub const MAX_KEY_LEN: usize = 256;
+space/index.rs:  89:pub const MAX_VALUE_LEN: usize = 2048;
+space/index.rs:  145:pub struct ChildPointer {
+space/index.rs:  163:pub struct LeafNode {
+space/index.rs:  175:pub struct InternalNode {
+space/index.rs:  184:pub enum IndexNode {
+space/index.rs:  194:    pub fn encode(&self) -> Result<Vec<u8>> {
+space/index.rs:  203:    pub fn decode(bytes: &[u8]) -> Result<Self> {
+space/index.rs:  218:    pub fn new(namespace: Namespace) -> Self {
+space/index.rs:  228:    pub fn encoded_len(&self) -> usize {
+space/index.rs:  241:    pub fn encode(&self) -> Result<Vec<u8>> {
+space/index.rs:  281:    pub fn decode(bytes: &[u8]) -> Result<Self> {
+space/index.rs:  358:    pub fn get(&self, key: &[u8]) -> Option<&[u8]> {
+space/index.rs:  372:    pub fn new(namespace: Namespace) -> Self {
+space/index.rs:  382:    pub fn encoded_len(&self) -> usize {
+space/index.rs:  395:    pub fn encode(&self) -> Result<Vec<u8>> {
+space/index.rs:  439:    pub fn decode(bytes: &[u8]) -> Result<Self> {
+space/index.rs:  519:    pub fn child_index_for(&self, key: &[u8]) -> usize {
+space/integrity.rs:  52:    pub fn verify_integrity(&mut self) -> Result<IntegrityReport> {
+space/log.rs:  58:pub const MAX_RECORDS_PER_BATCH: usize = 1024;
+space/log.rs:  62:pub const MAX_LOG_PAYLOAD_LEN: usize = 8 * 1024;
+space/log.rs:  71:pub const MAX_DECODED_BATCH_LEN: usize = 4 + MAX_RECORDS_PER_BATCH * (12 + MAX_LOG_PAYLOAD_LEN);
+space/log.rs:  88:pub fn encode_batch(records: &[(u64, Vec<u8>)]) -> Result<Vec<u8>> {
+space/log.rs:  150:pub fn encode_batches_split(records: &[(u64, Vec<u8>)]) -> Result<Vec<(Vec<u64>, Vec<u8>)>> {
+space/log.rs:  196:pub fn decode_batch(compressed: &[u8]) -> Result<Vec<(u64, Vec<u8>)>> {
+space/log.rs:  268:pub fn find_in_batch(records: &[(u64, Vec<u8>)], log_id: u64) -> Option<&Vec<u8>> {
+space/log.rs:  278:pub fn log_id_key(log_id: u64) -> [u8; 8] {
+space/log.rs:  288:pub fn parse_batch_slot_value(value: &[u8]) -> Result<u64> {
+space/log.rs:  301:pub fn encode_batch_slot_value(batch_slot: u64) -> [u8; 8] {
+space/log_iter.rs:  27:    pub fn iter_log(&mut self, namespace: Namespace) -> Result<Vec<(u64, Vec<u8>)>> {
+space/log_iter.rs:  46:    pub fn iter_log_after(
+space/log_iter.rs:  81:    pub fn iter_log_before(
+space/log_iter.rs:  130:    pub fn iter_log_range(
+space/log_iter.rs:  210:    pub fn read_log(&mut self, namespace: Namespace, log_id: u64) -> Result<Option<Vec<u8>>> {
+space/mod.rs:  3:pub mod index;
+space/mod.rs:  4:pub mod log;
+space/mod.rs:  5:pub mod superblock;
+space/mod.rs:  44:pub struct SpaceStats {
+space/mod.rs:  76:    pub fn total_entries(&self) -> usize {
+space/mod.rs:  100:    pub fn utilization_ratio(&self) -> f64 {
+space/mod.rs:  122:pub struct IntegrityReport {
+space/mod.rs:  189:pub struct Space<'f> {
+space/mod.rs:  307:    pub fn commit_seq(&self) -> u64 {
+space/mod.rs:  345:    pub fn commit_history(&self) -> &[u64] {
+space/mod.rs:  365:    pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
+space/mod.rs:  376:    pub fn padding_policy(&self) -> crate::padding::PaddingPolicy {
+space/mod.rs:  388:    pub fn last_padding_error(&self) -> Option<&crate::Error> {
+space/mod.rs:  397:    pub fn audit_owned_chunk_count(&self) -> usize {
+space/mod.rs:  413:    pub fn stats(&mut self) -> Result<SpaceStats> {
+space/mod.rs:  431:    pub fn begin_tx<'s>(&'s mut self) -> Tx<'s, 'f> {
+space/mod.rs:  443:    pub fn get(&mut self, namespace: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>> {
+space/mod.rs:  477:    pub fn list(&mut self, namespace: Namespace) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+space/mod.rs:  490:    pub fn count(&mut self, namespace: Namespace) -> Result<usize> {
+space/mod.rs:  542:    pub fn erase_namespace(&mut self, namespace: Namespace) -> Result<usize> {
+space/mod.rs:  567:    pub fn list_namespaces(&mut self) -> Result<Vec<Namespace>> {
+space/mod.rs:  579:    pub fn list_namespaces_with_kind(
+space/superblock.rs:  15:pub const NO_RECORD: u64 = u64::MAX;
+space/superblock.rs:  22:pub struct Superblock {
+space/superblock.rs:  37:    pub const ENCODED_LEN: usize = 8 + 8 + 32;
+space/superblock.rs:  41:    pub fn encode(&self) -> [u8; Self::ENCODED_LEN] {
+space/superblock.rs:  59:    pub fn decode(bytes: &[u8]) -> Result<Self> {
+space/vacuum.rs:  42:    pub fn vacuum_orphans(&mut self) -> Result<usize> {
+space/vacuum.rs:  154:    pub fn vacuum_data_batches(&mut self) -> Result<usize> {
+tx/commit.rs:  39:pub const MAX_NAMESPACES_PER_TX: usize = (PAYLOAD_CAP - 2 - 32) / (1 + 1 + 8 + 32);
+tx/commit.rs:  54:pub enum NamespaceKind {
+tx/commit.rs:  68:    pub fn as_u8(self) -> u8 {
+tx/commit.rs:  74:    pub fn from_u8(b: u8) -> Result<Self> {
+tx/commit.rs:  85:pub struct IndexRoot {
+tx/commit.rs:  100:pub struct CommitPayload {
+tx/commit.rs:  110:    pub fn encoded_len(&self) -> usize {
+tx/commit.rs:  116:    pub fn encode(&self) -> Result<Vec<u8>> {
+tx/commit.rs:  142:    pub fn decode(bytes: &[u8]) -> Result<Self> {
+tx/commit.rs:  202:    pub fn compute_tx_root_hash(roots: &[IndexRoot]) -> [u8; 32] {
+tx/commit.rs:  215:pub fn blake3_of(payload: &[u8]) -> [u8; 32] {
+tx/mod.rs:  28:pub mod commit;
+tx/mod.rs:  37:pub use commit::{CommitPayload, IndexRoot, MAX_NAMESPACES_PER_TX, NamespaceKind};
+tx/mod.rs:  54:pub struct Tx<'s, 'f> {
+tx/mod.rs:  135:    pub fn put(&mut self, namespace: Namespace, key: &[u8], value: &[u8]) -> Result<()> {
+tx/mod.rs:  158:    pub fn delete(&mut self, namespace: Namespace, key: &[u8]) -> Result<()> {
+tx/mod.rs:  248:    pub fn append_log(&mut self, namespace: Namespace, log_id: u64, payload: &[u8]) -> Result<()> {
+tx/mod.rs:  268:    pub fn touched_namespaces(&self) -> usize {
+tx/mod.rs:  278:    pub fn is_empty(&self) -> bool {
+tx/mod.rs:  283:    pub fn commit(self) -> Result<u64> {
+
+==========================================
+crate: hidden-volume-rt
+==========================================
+
+lib.rs:  86:pub struct OwnedSpace {
+lib.rs:  98:    pub fn wrap_open(
+lib.rs:  118:    pub fn wrap_create(
+lib.rs:  144:    pub fn space_mut<'a>(&'a mut self) -> &'a mut Space<'a> {
+lib.rs:  202:pub enum BlockingFailure {
+lib.rs:  233:pub async fn run_blocking<F, T, E>(
+
+==========================================
+crate: hidden-volume-async
+==========================================
+
+lib.rs:  72:pub struct AsyncContainer {
+lib.rs:  85:    pub async fn create(path: impl AsRef<Path>, params: Argon2Params) -> Result<Self> {
+lib.rs:  95:    pub async fn create_with_options(
+lib.rs:  108:    pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
+lib.rs:  123:    pub async fn run<F, R>(&self, f: F) -> Result<R>
+lib.rs:  141:    pub async fn set_padding_policy(&self, policy: PaddingPolicy) -> Result<()> {
+lib.rs:  148:    pub async fn set_superblock_replicas(&self, replicas: u8) -> Result<()> {
+lib.rs:  189:    pub async fn run_cancellable<F, R>(
+lib.rs:  280:pub struct AsyncSpace {
+lib.rs:  295:    pub async fn create(
+lib.rs:  323:    pub async fn open(path: impl AsRef<Path>, password: Vec<u8>) -> Result<Self> {
+lib.rs:  380:    pub async fn run<F, R>(&self, f: F) -> Result<R>
+lib.rs:  411:    pub fn stream_log_pages_after(
+lib.rs:  441:    pub fn stream_log_pages_before(
+lib.rs:  472:    pub fn stream_log_pages_range(
+
+==========================================
+crate: hidden-volume-ffi
+==========================================
+
+lib.rs:  106:pub enum HvError {
+lib.rs:  206:pub enum ArgonPreset {
+lib.rs:  242:pub enum PaddingPreset {
+lib.rs:  279:pub struct HeaderInfo {
+lib.rs:  297:pub fn header_info(path: String) -> HvResult<HeaderInfo> {
+lib.rs:  344:pub struct PasswordRotation {
+lib.rs:  367:pub fn compact_known(path: String, passwords: Vec<Vec<u8>>) -> HvResult<()> {
+lib.rs:  392:pub fn change_passwords(path: String, rotations: Vec<PasswordRotation>) -> HvResult<()> {
+lib.rs:  431:pub enum WriteOp {
+lib.rs:  464:pub struct LogEntry {
+lib.rs:  476:pub struct StatsInfo {
+lib.rs:  502:    pub fn utilization_ratio(&self) -> f64 {
+lib.rs:  513:pub struct NamespaceCount {
+lib.rs:  522:pub struct IntegrityResult {
+lib.rs:  545:pub struct SpaceHandle {
+lib.rs:  585:    pub fn create(
+lib.rs:  624:    pub fn open(path: String, password: Vec<u8>) -> HvResult<std::sync::Arc<Self>> {
+lib.rs:  638:    pub fn commit_seq(&self) -> HvResult<u64> {
+lib.rs:  645:    pub fn commit_history(&self) -> HvResult<Vec<u64>> {
+lib.rs:  660:    pub fn set_padding_policy(&self, preset: PaddingPreset) -> HvResult<()> {
+lib.rs:  668:    pub fn list_namespaces(&self) -> HvResult<Vec<u8>> {
+lib.rs:  675:    pub fn count(&self, namespace: u8) -> HvResult<u64> {
+lib.rs:  683:    pub fn get(&self, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
+lib.rs:  690:    pub fn read_log(&self, namespace: u8, log_id: u64) -> HvResult<Option<Vec<u8>>> {
+lib.rs:  699:    pub fn iter_log_range(
+lib.rs:  719:    pub fn commit(&self, ops: Vec<WriteOp>) -> HvResult<u64> {
+lib.rs:  753:    pub fn stats(&self) -> HvResult<StatsInfo> {
+lib.rs:  776:    pub fn verify_integrity(&self) -> HvResult<IntegrityResult> {
+lib.rs:  803:    pub fn vacuum_data_batches(&self) -> HvResult<u64> {
+lib.rs:  825:    pub fn erase_namespace(&self, namespace: u8) -> HvResult<u64> {
+lib.rs:  883:pub struct AsyncSpaceHandle {
+lib.rs:  898:    pub async fn create(
+lib.rs:  933:    pub async fn open(path: String, password: Vec<u8>) -> HvResult<Arc<Self>> {
+lib.rs:  948:    pub async fn commit_seq(&self) -> HvResult<u64> {
+lib.rs:  958:    pub async fn commit_history(&self) -> HvResult<Vec<u64>> {
+lib.rs:  970:    pub async fn set_padding_policy(&self, preset: PaddingPreset) -> HvResult<()> {
+lib.rs:  981:    pub async fn list_namespaces(&self) -> HvResult<Vec<u8>> {
+lib.rs:  992:    pub async fn count(&self, namespace: u8) -> HvResult<u64> {
+lib.rs:  1004:    pub async fn get(&self, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
+lib.rs:  1015:    pub async fn read_log(&self, namespace: u8, log_id: u64) -> HvResult<Option<Vec<u8>>> {
+lib.rs:  1026:    pub async fn iter_log_range(
+lib.rs:  1049:    pub async fn commit(&self, ops: Vec<WriteOp>) -> HvResult<u64> {
+lib.rs:  1084:    pub async fn stats(&self) -> HvResult<StatsInfo> {
+lib.rs:  1110:    pub async fn verify_integrity(&self) -> HvResult<IntegrityResult> {
+lib.rs:  1127:    pub async fn vacuum_data_batches(&self) -> HvResult<u64> {
+lib.rs:  1139:    pub async fn erase_namespace(&self, namespace: u8) -> HvResult<u64> {
+

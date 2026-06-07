@@ -1,0 +1,100 @@
+[package]
+name = "hidden-volume"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.89"
+description = "Deniable multi-space encrypted append-only container"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "hidden_volume"
+path = "src/lib.rs"
+
+[features]
+# `hv` command-line utility (binary target). Pulls in clap for argument
+# parsing. Useful for debugging, migration, scripted compaction.
+cli = ["dep:clap"]
+# Parallelizes the open-time discovery scan via rayon. Optional because:
+# (a) on single-core mobile (Cortex-A53) rayon adds no value while
+# pulling ~6 MB of dependency code, (b) the sequential streaming scan
+# is already O(N) AEAD-decrypts dominated; parallel only wins on
+# multi-core hosts. cfg(unix) only — relies on `pread` for
+# concurrent positional reads from a shared `&File` handle.
+parallel-scan = ["dep:rayon"]
+# Zero-copy memory-mapped read path for the open-time discovery scan.
+# Optional because: (a) it adds an unsafe surface (memmap2's Mmap is
+# `unsafe` to construct — concurrent file mutation by another process
+# would violate Rust aliasing rules; we rely on the LOCK_EX / LOCK_SH
+# flock to exclude that case), (b) on small containers there is no
+# measurable win over the streaming `pread` path. cfg(unix) only.
+mmap = ["dep:memmap2"]
+
+[dependencies]
+# AEAD: XChaCha20-Poly1305 — 192-bit nonce safe for random generation.
+# `getrandom` and `rand_core` enable random nonce generation; the
+# implementation also implements ZeroizeOnDrop on its cipher state via
+# its dependencies (chacha20 + aead crates), so per-chunk keys are
+# wiped when the ChunkAead drops.
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc", "rand_core"] }
+# Direct chacha20 for the TM1 constant-time-scan timing-equalizer
+# (see `crypto::aead::equalize_timing_via_chacha20`). Already a
+# transitive dep via chacha20poly1305 0.10; pinning here makes the
+# direct use explicit and version-aligned.
+chacha20 = { version = "0.9", default-features = false }
+# Password-based KDF.
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
+# Fast keyed hash for per-chunk subkey derivation and Merkle nodes.
+blake3 = { version = "1.5", default-features = false }
+# Zero-on-drop wrappers for key material.
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
+# RNG. We use `getrandom` directly for nonce / salt / container_id
+# generation; `rand_core` is a transitive dep via chacha20poly1305's
+# `rand_core` feature (no direct use site in this crate).
+getrandom = "0.2"
+# Error plumbing.
+thiserror = "1"
+# In-memory chunk encoding (fixed-size, deterministic).
+byteorder = "1.5"
+# DataBatch compression for the message log namespace (DESIGN §11.4).
+zstd = "0.13"
+# Optional: argument parsing for the `hv` CLI binary.
+clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"], optional = true }
+# Optional: data-parallelism for the open-time discovery scan. Uses
+# rayon's work-stealing pool. Only pulled in by `parallel-scan` feature.
+rayon = { version = "1", optional = true }
+# Optional: zero-copy mmap-backed scan path. Only pulled in by `mmap`
+# feature.
+memmap2 = { version = "0.9", optional = true }
+
+# Android-only direct lock implementation. Rust std's `File::try_lock`
+# returns `Unsupported "try_lock() not supported"` on Android since
+# 1.89; we call `flock(2)` directly via libc instead. Pre-v1.0 the
+# Android path was a no-op (audit pass 18 M4 documented this as
+# "safe only on app-private storage"), but v1.0 hardens it by
+# acquiring a real flock so cross-process races on
+# `android:process=":subname"` configurations are correctly
+# serialized.
+[target.'cfg(target_os = "android")'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+proptest = "1.4"
+hex-literal = "0.4"
+tempfile = "3.10"
+criterion = { version = "0.5", default-features = false }
+
+[[bench]]
+name = "throughput"
+harness = false
+
+[[bench]]
+# TM1 — open-time scan timing-oracle micro-bench. See bench
+# header for what passing looks like. Audit pass 8.
+name = "timing_oracle"
+harness = false
+
+[[bin]]
+name = "hv"
+path = "src/bin/hv.rs"
+required-features = ["cli"]

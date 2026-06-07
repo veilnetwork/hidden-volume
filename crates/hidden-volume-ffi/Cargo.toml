@@ -1,0 +1,67 @@
+[package]
+name = "hidden-volume-ffi"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.89"
+description = "uniffi-based FFI bindings for the hidden-volume container library — generates Kotlin/Swift/Python bindings."
+license = "Apache-2.0"
+repository = "https://github.com/hidden-volume/hidden-volume"
+publish = false
+
+[lib]
+name = "hidden_volume_ffi"
+# `cdylib` for Android (.so) / iOS (linked into xcframework) / desktop dynamic.
+# `staticlib` for iOS xcframework's static linkage path.
+# `lib`       so we can run `cargo test` against the FFI surface from Rust
+#             without spinning up the Kotlin/Swift toolchains.
+crate-type = ["cdylib", "staticlib", "lib"]
+
+[[bin]]
+# In-tree `uniffi-bindgen` invocation, recommended approach for uniffi
+# 0.28+. Run `cargo run --bin uniffi-bindgen -- generate ...` to produce
+# Kotlin / Swift / Python / Ruby bindings against the compiled cdylib.
+# Avoids depending on a globally-installed `uniffi-bindgen-cli` which
+# evolves independently and has had breaking changes between releases.
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen-cli"]
+
+[features]
+# Pulls uniffi's bindgen CLI helpers. Off by default so production
+# builds of the cdylib don't include the bindgen code.
+bindgen-cli = ["uniffi/cli"]
+
+[dependencies]
+# Path + version: cargo-deny requires a version constraint on path
+# dependencies (wildcards = "deny").
+hidden-volume = { path = "../hidden-volume", version = "1.0.0" }
+# Audit pass 8 (E5+E6 full): shared self-referential OwnedSpace +
+# run_blocking helpers. Used to be duplicated locally as SpaceInner.
+hidden-volume-rt = { path = "../hidden-volume-rt", version = "1.0.0" }
+uniffi = { version = "0.31", features = ["build", "tokio", "scaffolding-ffi-buffer-fns"] }
+thiserror = "1"
+# Required by the async FFI surface: every `async fn` exported via uniffi
+# offloads to `tokio::task::spawn_blocking`. Host-app must run the
+# foreign-side calls on a Tokio runtime (Kotlin: tokio-rs/Kotlin runtime
+# bridge, Swift: tokio runtime started inside the Rust dylib). See
+# `docs/en/reference/ffi.md` §"Decision 6" for the runtime story.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync"] }
+# Audit pass 16: scrub the FFI-side password copies on function
+# return. Foreign-side buffers are still the caller's hygiene
+# responsibility (documented at the crate level), but our heap
+# copies now zeroize deterministically rather than dropping into
+# uninitialized reuse. Pinned to the same version as the core crate.
+zeroize = "1.8"
+
+[dev-dependencies]
+tempfile = "3.10"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync"] }
+# `libloading` is used by the FFI smoke-test in `tests/ffi_smoke.rs`,
+# which dlopens the host-target cdylib and probes the uniffi C ABI to
+# confirm the symbols downstream Flutter / Kotlin / Swift bindings
+# expect actually exist. Catches FFI-surface drift without needing a
+# foreign-language toolchain.
+libloading = "0.8"
+
+[build-dependencies]
+uniffi = { version = "0.31", features = ["build"] }

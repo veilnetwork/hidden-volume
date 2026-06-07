@@ -1,0 +1,161 @@
+name: CI (branch)
+
+# Lightweight per-push / per-PR gate. Runs on push to master and on
+# pull-requests; mirrors the local pre-tag gate in CLAUDE.md §4.
+#
+# This complements [`ci.yml`](ci.yml) which runs only on SemVer tag
+# push + manual dispatch and exercises the full multi-OS matrix.
+# `ci-branch.yml` is the cheap fast-feedback signal: every commit on
+# master gets a fmt/clippy/test/audit/doc-drift sanity check within
+# ~3-5 minutes, so the v3-style drift that audit pass 19 caught only
+# at tag-time would have been caught at push-time.
+#
+# Scope (intentionally narrow):
+#   - Ubuntu only (the heavy macOS/Windows matrix lives in ci.yml).
+#   - Default features only (the feature-gated parallel-scan / mmap
+#     paths are exercised in ci.yml).
+#   - No release-build, no FFI bindings regeneration, no Python
+#     smoke (those are tag-time concerns).
+#
+# Anything fast enough to keep this workflow under ~5 minutes is in
+# scope. Anything slower stays in `ci.yml`.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy (workspace, all features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    name: cargo test (workspace, default features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --all-targets
+      - run: cargo test --workspace --tests --no-fail-fast
+      - run: cargo test --workspace --doc
+
+  doc:
+    name: rustdoc (-D warnings)
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Both configurations must be docs-clean. Audit pass 19 round 6
+      # found that `cargo doc --no-default-features` (the default
+      # behaviour of `cargo doc` invoked with no flags) was failing
+      # with `broken-intra-doc-links` because cfg-gated CT companion
+      # methods (`open_space_parallel_constant_time` /
+      # `open_space_mmap_constant_time`) don't exist when their
+      # features are off. CI must gate both modes so this class of
+      # bug doesn't escape to integrators running `cargo doc` locally.
+      - run: cargo doc --no-deps --workspace --all-features
+      - run: cargo doc --no-deps --workspace --no-default-features
+
+  audit:
+    name: cargo audit (deps vulnerability scan)
+    runs-on: ubuntu-latest
+    # Release-blocking on branch CI: a new RUSTSEC advisory must be
+    # surfaced and either fixed or explicitly accepted via
+    # `deny.toml` `ignore = [...]` before the change can land on
+    # master. Audit pass 19 round 5 dropped the dead `paste 1.0.15`
+    # ignore — the gate worked locally; making it a CI signal too
+    # closes the loop.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install --locked cargo-audit
+      - run: cargo audit
+
+  deny:
+    name: cargo deny (licenses + advisories + bans)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  api-surface:
+    name: api-surface drift check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/dump-public-api.sh --check
+
+  docs-drift:
+    name: docs version-drift check
+    runs-on: ubuntu-latest
+    # Pre-tag gate from `scripts/check-docs-version-drift.sh` —
+    # PARAMS_VERSION (currently 3) must match what docs say, and the
+    # v2-era patterns (`80-byte cleartext`, `uniffi 0.X` for older
+    # X, `containerIdHex` in Dart bindings) must be absent.
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/check-docs-version-drift.sh
+
+  android-cross-check:
+    name: cross-compile check (aarch64-linux-android)
+    runs-on: ubuntu-latest
+    # Verifies the `cfg(target_os = "android")` code paths
+    # (notably `android_flock` + direct libc dep) build cleanly
+    # on the Android target. v1.0 added a real `flock(2)` Android
+    # lock; this gate catches regressions to that code path on
+    # every push to master without waiting for the full
+    # `flutter-build.yml` matrix to run at tag time.
+    #
+    # NDK r26d matches `flutter-build.yml`'s install — keep them
+    # in lockstep so the cross-check here reflects what the
+    # release-build slice would actually compile against.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+          link-to-sdk: true
+      - uses: Swatinem/rust-cache@v2
+      - name: install cargo-ndk
+        run: cargo install cargo-ndk --locked
+      - name: cargo-ndk build --target aarch64
+        # `cargo-ndk` wraps `cargo build` with the NDK CC env vars
+        # (CC_aarch64_linux_android=...) that the cc-rs build of
+        # zstd-sys / blake3 needs. Plain `cargo check` doesn't run
+        # cc-rs so it would skip the meaningful link step; build
+        # is the gate that actually proves the flock impl compiles
+        # against bionic libc.
+        run: cargo ndk -t aarch64-linux-android -- build -p hidden-volume

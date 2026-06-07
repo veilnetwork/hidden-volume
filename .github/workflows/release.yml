@@ -1,0 +1,278 @@
+name: release
+
+# Signed release pipeline. Trigger policy matches the rest of the
+# workspace (CLAUDE.md §4, ci.yml):
+# - Push of a SemVer tag `v*.*.*` (e.g. `v1.0.0`, `v0.5.2-rc1`) — runs
+#   the full pipeline: build → sign (cosign keyless) → publish to
+#   GitHub Releases → cargo publish for non-`publish = false` crates.
+# - Manual `workflow_dispatch` — supports a `dry_run` flag (default
+#   `true`) so the pipeline can be exercised on a branch without
+#   cutting a tag, touching crates.io, or creating a GitHub Release.
+#
+# `cargo publish` requires the `CARGO_REGISTRY_TOKEN` repo secret to be
+# set AND the target crate's `publish = false` to be removed/flipped
+# in `Cargo.toml`. As of 2026-05-28 every workspace crate has
+# `publish = false`; the `cargo-publish` job auto-detects that and
+# skips all crates by design. To enable publish for a crate, edit its
+# `Cargo.toml` (and re-run `dump-public-api.sh`).
+#
+# Verification of the signed artifacts is documented in
+# `docs/en/contributing/verifying-release.md` (RU: same path under
+# `docs/ru/`).
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry-run: build + sign locally, skip GitHub Release creation and run `cargo publish --dry-run` instead of real publish.'
+        type: boolean
+        default: true
+
+# Default least-privilege; jobs that need more declare it explicitly.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    # Mirrors `ci.yml::release-build` matrix so this workflow is
+    # self-contained (no cross-workflow artifact passing). The
+    # duplicated build is intentional — the `ci.yml` job is the
+    # unsigned smoke test, this one is the signing source of truth.
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+      # Cross-linker for aarch64-linux on x86_64 hosts.
+      - if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          cat >> .cargo/config.toml <<EOF
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
+      - name: Build hv CLI
+        run: cargo build -p hidden-volume --release --features cli --target ${{ matrix.target }} --locked
+      - name: Build FFI cdylib
+        run: cargo build -p hidden-volume-ffi --release --target ${{ matrix.target }} --locked
+
+      - name: Stage release artifacts
+        shell: bash
+        run: |
+          # Per-target artifact names encode the target triple so the
+          # final SHA256SUMS unambiguously identifies each binary, and
+          # so files from different targets don't collide when
+          # download-artifact merges them under one directory.
+          mkdir -p dist
+          prefix="${{ matrix.target }}"
+          tdir="target/${{ matrix.target }}/release"
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            cp "$tdir/hv.exe" "dist/hv-${prefix}.exe"
+            cp "$tdir/hidden_volume_ffi.dll" "dist/hidden_volume_ffi-${prefix}.dll"
+          elif [[ "${{ matrix.target }}" == *darwin* ]]; then
+            cp "$tdir/hv" "dist/hv-${prefix}"
+            cp "$tdir/libhidden_volume_ffi.dylib" "dist/libhidden_volume_ffi-${prefix}.dylib"
+          else
+            cp "$tdir/hv" "dist/hv-${prefix}"
+            cp "$tdir/libhidden_volume_ffi.so" "dist/libhidden_volume_ffi-${prefix}.so"
+          fi
+          ls -la dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stage-${{ matrix.target }}
+          path: dist/
+          retention-days: 1
+
+  sign-and-release:
+    name: sign + GitHub Release
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create GitHub Release
+      id-token: write   # cosign keyless OIDC token
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: stage-*
+          path: dist/
+          merge-multiple: true
+
+      - name: Generate global SHA256SUMS
+        run: |
+          cd dist
+          # `sort -k 2` makes the file deterministic regardless of
+          # which per-target shard arrived first.
+          sha256sum * | sort -k 2 > SHA256SUMS
+          echo "=== SHA256SUMS ==="
+          cat SHA256SUMS
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: cosign sign-blob (keyless OIDC)
+        # Signs the SHA256SUMS file with a short-lived certificate
+        # whose subject = the OIDC token of this workflow run. The
+        # signature + cert chain + Rekor transparency-log entry are
+        # bundled into a single self-contained file; verifiers do
+        # NOT need to contact Sigstore servers at verify time.
+        run: |
+          cd dist
+          cosign sign-blob --yes \
+            --bundle SHA256SUMS.cosign.bundle \
+            SHA256SUMS
+          ls -la SHA256SUMS.cosign.bundle
+
+      - name: Create GitHub Release
+        # Always create on tag push; skip on workflow_dispatch+dry_run.
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            ## Verifying this release
+
+            Every release publishes a `SHA256SUMS` file plus a
+            `SHA256SUMS.cosign.bundle` keyless-signed by this
+            workflow's GitHub Actions OIDC identity (no long-lived
+            signing keys — verifiable against the Sigstore Rekor
+            transparency log).
+
+            ```sh
+            cosign verify-blob \
+              --bundle SHA256SUMS.cosign.bundle \
+              --certificate-identity-regexp 'https://github.com/${{ github.repository }}/\.github/workflows/release\.yml@refs/tags/v.*' \
+              --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+              SHA256SUMS
+
+            # Then verify each downloaded artifact matches its line in SHA256SUMS:
+            sha256sum --ignore-missing -c SHA256SUMS    # Linux
+            shasum -a 256 -c SHA256SUMS                 # macOS / BSD
+            ```
+
+            Full procedure (and what each step proves) lives in
+            [`docs/en/contributing/verifying-release.md`](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/en/contributing/verifying-release.md).
+
+      - name: Upload signed bundle for dry-run inspection
+        # In dry-run we don't create a GitHub Release, but we still
+        # surface the signed bundle as a workflow artifact so the
+        # maintainer can inspect / smoke-verify locally.
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: dry-run-signed
+          path: |
+            dist/SHA256SUMS
+            dist/SHA256SUMS.cosign.bundle
+          retention-days: 7
+
+  cargo-publish:
+    name: cargo publish
+    needs: [sign-and-release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Detect publishable crates
+        # `publish = false` in a crate's Cargo.toml is an explicit
+        # opt-out. The crate is silently skipped; flip the flag (or
+        # remove the line) to enable publish for the next tag.
+        #
+        # As of 2026-05-28 every workspace crate has `publish = false`:
+        # the project is pre-1.0 and intentionally not on crates.io yet
+        # (gated on external crypto-review — see TASKS.md v1.0). When
+        # that gate clears, the maintainer flips the flag for the
+        # crates that should ship publicly and the next tag publishes
+        # them in dependency order.
+        #
+        # Order matters: a crate's deps must already be on crates.io
+        # before it can be published. Workspace dependency graph:
+        #
+        #   hidden-volume    (no internal deps)
+        #     └─ hidden-volume-rt
+        #         ├─ hidden-volume-async
+        #         └─ hidden-volume-ffi   (uniffi-internal; usually stays publish=false)
+        id: detect
+        shell: bash
+        run: |
+          PUBLISHABLE=()
+          for crate in hidden-volume hidden-volume-rt hidden-volume-async hidden-volume-ffi; do
+            f="crates/${crate}/Cargo.toml"
+            if grep -qE '^publish[[:space:]]*=[[:space:]]*false' "$f"; then
+              echo "SKIP   $crate (publish = false)"
+            else
+              PUBLISHABLE+=("$crate")
+              echo "QUEUE  $crate"
+            fi
+          done
+          echo "list=${PUBLISHABLE[*]}" >> "$GITHUB_OUTPUT"
+
+      - name: cargo publish (real or --dry-run)
+        if: steps.detect.outputs.list != ''
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        shell: bash
+        run: |
+          DRY=""
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.dry_run }}" == "true" ]]; then
+            DRY="--dry-run"
+            echo "Running in dry-run mode: no crates will be uploaded to crates.io."
+          else
+            if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
+              echo "::error::CARGO_REGISTRY_TOKEN secret is not set. Add it under repo Settings → Secrets and variables → Actions, or run this workflow with dry_run=true."
+              exit 1
+            fi
+          fi
+          for crate in ${{ steps.detect.outputs.list }}; do
+            echo "::group::cargo publish $DRY -p $crate --locked"
+            cargo publish $DRY -p "$crate" --locked
+            # Real publishes need ~30-60s for crates.io to index the
+            # new version before the next crate (which depends on it)
+            # can resolve. Skip the wait on dry-run.
+            if [[ -z "$DRY" ]]; then
+              echo "Waiting 60s for crates.io to index $crate before the next publish..."
+              sleep 60
+            fi
+            echo "::endgroup::"
+          done
+
+      - name: Nothing to publish
+        if: steps.detect.outputs.list == ''
+        run: |
+          echo "All workspace crates have publish = false; cargo-publish job is a no-op for this tag."
+          echo "To enable publish for a crate, remove or set 'publish = true' in its Cargo.toml,"
+          echo "then push a new tag."
