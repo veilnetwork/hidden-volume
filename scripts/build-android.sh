@@ -33,7 +33,7 @@ ABIS="${ABIS:-$ABIS_DEFAULT}"
 case "${1:-}" in
     --debug)  PROFILE=debug; shift ;;
     --help|-h)
-        sed -n '2,/^set -euo/p' "$0" | sed 's/^# \?//' | head -n -1
+        sed -n '2,/^set -euo/p' "$0" | sed 's/^# \?//' | sed '$d'
         exit 0
         ;;
 esac

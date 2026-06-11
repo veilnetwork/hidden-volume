@@ -34,7 +34,7 @@
 //! ## Why an in-tree bin instead of `cargo install uniffi-bindgen-cli`?
 //!
 //! uniffi-bindgen versions are tightly coupled to the runtime crate
-//! version. Pinning the bin to the same `uniffi = "0.28"` we use for
+//! version. Pinning the bin to the same `uniffi = "0.31"` we use for
 //! exports prevents version-skew bugs. Recommended by uniffi upstream
 //! since 0.25.
 

@@ -108,11 +108,11 @@ impl SpaceStats {
 
 /// Result of a successful [`Space::verify_integrity`] walk.
 ///
-/// All counts are over chunks reachable from the current Superblock —
+/// All counts are over chunks reachable from the current Superblock;
 /// older Superblock or Commit chunks (kept on disk as crash-recovery
-/// fallbacks) and DataBatch chunks (whose hash chain is implicit
-/// through their KV-index pointers, not stored as Merkle siblings)
-/// are excluded.
+/// fallbacks) are excluded. Since the M2 audit fix (2026-05-10)
+/// `DataBatch` chunks of log namespaces ARE covered — see
+/// [`Self::data_batches_verified`].
 ///
 /// Marked `#[non_exhaustive]` — only the library constructs this;
 /// future fields (e.g. integrity walk duration, branch factor stats)
@@ -361,7 +361,7 @@ impl<'f> Space<'f> {
     /// RO handles, contradicting `Container::set_padding_policy`'s
     /// `Err(ReadOnly)` behaviour and breaking the asymmetry that
     /// async / FFI wrappers depend on (they route through
-    /// `space_mut()`).
+    /// `with_space_mut()`).
     pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
         if self.file.lock_mode == crate::container::file::LockMode::Shared {
             return Err(Error::ReadOnly);
@@ -448,24 +448,28 @@ impl<'f> Space<'f> {
         // Walk down to the leaf containing `key`. `depth` caps a
         // pathological cyclic Internal→Internal chain that would
         // otherwise loop forever; the writer-side invariant
-        // guarantees depth ≤ 2. The strict-greater comparison
-        // (`depth > MAX_TREE_DEPTH`) matches every other walker —
-        // see `index::MAX_TREE_DEPTH` rustdoc for the locked-down
-        // semantics. `read_index_node_at_expected` additionally
-        // gates `IndexNode.namespace == namespace` (audit pass 19
-        // round 6 root-relabel closure).
+        // guarantees depth ≤ 2. The check is performed on *entry* to
+        // each node — BEFORE matching Leaf vs Internal — so that a
+        // forged tree presenting a `Leaf` at depth > MAX is rejected
+        // identically to `collect_leaves_at` / `count_leaves_at`
+        // (audit pass 20: the prior placement inside the `Internal`
+        // arm let `get` accept a Leaf one level deeper than every
+        // other walker, contradicting the `index::MAX_TREE_DEPTH`
+        // "identical across read paths" invariant).
+        // `read_index_node_at_expected` additionally gates
+        // `IndexNode.namespace == namespace` (audit pass 19 round 6
+        // root-relabel closure).
         let mut depth: u8 = 0;
-        let mut node = self.read_index_node_at_expected(root_slot, namespace)?;
+        let mut slot = root_slot;
         loop {
-            match node {
+            if depth > index::MAX_TREE_DEPTH {
+                return Err(Error::Malformed("tree depth exceeded MAX_TREE_DEPTH"));
+            }
+            match self.read_index_node_at_expected(slot, namespace)? {
                 IndexNode::Leaf(l) => return Ok(l.get(key).map(|v| v.to_vec())),
                 IndexNode::Internal(i) => {
-                    if depth > index::MAX_TREE_DEPTH {
-                        return Err(Error::Malformed("tree depth exceeded MAX_TREE_DEPTH"));
-                    }
                     let idx = i.child_index_for(key);
-                    let slot = i.children[idx].child_slot;
-                    node = self.read_index_node_at_expected(slot, namespace)?;
+                    slot = i.children[idx].child_slot;
                     depth += 1;
                 },
             }
@@ -671,6 +675,24 @@ impl<'f> Space<'f> {
             .map(|r| r.index_slot))
     }
 
+    /// Like [`Self::find_root_slot`] but returns the whole
+    /// [`crate::tx::commit::IndexRoot`] — in particular its persisted
+    /// [`crate::tx::NamespaceKind`] byte. The log read paths
+    /// (`iter_log_*`, `read_log`) use this to enforce the kind
+    /// contract from the persisted byte instead of inferring "this is
+    /// a log namespace" from the 8-byte-key / DataBatch-pointer shape
+    /// downstream (audit pass 20: R-NSKIND parity — vacuum/repack were
+    /// already kind-driven; the read iterators still relied on the
+    /// shape heuristic, giving an unpredictable error taxonomy when a
+    /// KV namespace happened to hold 8-byte keys *and* values).
+    pub(super) fn find_root(
+        &mut self,
+        namespace: Namespace,
+    ) -> Result<Option<crate::tx::commit::IndexRoot>> {
+        let prior_roots = self.load_prior_roots()?;
+        Ok(prior_roots.into_iter().find(|r| r.namespace == namespace))
+    }
+
     // --- internals ---
 
     /// Decode the current commit's `CommitPayload` and return its
@@ -819,5 +841,3 @@ impl<'f> Space<'f> {
         Plaintext::decode(&pt_bytes)
     }
 }
-
-// --- free helpers ---

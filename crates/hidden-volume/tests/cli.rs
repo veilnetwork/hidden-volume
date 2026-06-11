@@ -8,7 +8,6 @@
 
 #![cfg(feature = "cli")]
 
-use std::path::Path;
 use std::process::{Command, Stdio};
 
 fn hv() -> Command {
@@ -394,5 +393,3 @@ fn dump_stats_after_writes() {
 
     let _ = std::fs::remove_file(&path);
 }
-
-fn _ensure_path_unused(_p: &Path) {}

@@ -128,25 +128,37 @@ impl OwnedSpace {
         })
     }
 
-    /// Borrow the inner `Space` for a callback-style operation.
-    /// The borrow is extended via `'static` internally; this method
-    /// re-narrows it to the borrow of `&mut self`.
+    /// Borrow the inner `Space` for a callback-style operation. The
+    /// stored `Space<'static>` is re-narrowed to a fresh, caller-un-
+    /// nameable lifetime and handed to `f`; the result is returned.
     ///
-    /// **Reborrow safety (audit pass 10 L3).** The signature
-    /// `&'a mut self -> &'a mut Space<'a>` is enforced by the
-    /// compiler's standard borrow checker: calling `space_mut`
-    /// twice with overlapping borrows is a compile error.
-    /// `Space<'f>` contains `&'f mut ContainerFile`, which makes it
-    /// **invariant** in `'f` — there is no covariant subtyping path
-    /// downstream that could re-extend the lifetime without `unsafe`
-    /// of its own.
-    #[allow(clippy::needless_lifetimes, reason = "explicit lifetimes for clarity")]
-    pub fn space_mut<'a>(&'a mut self) -> &'a mut Space<'a> {
-        // SAFETY: the stored `Space<'static>` is actually only valid
-        // for as long as `self.container` is alive at its current
-        // heap address. Re-narrowing the lifetime to `'a` (bound by
-        // `&'a mut self`) is the correct safe surface.
-        unsafe { std::mem::transmute::<&mut Space<'static>, &mut Space<'a>>(&mut *self.space) }
+    /// **Reborrow safety (audit pass 10 L3 + pass 20 soundness fix).**
+    /// The earlier signature `&'a mut self -> &'a mut Space<'a>` was
+    /// **unsound**: region inference could unify the inner `'a` across
+    /// two independent `OwnedSpace` values to one common lifetime,
+    /// yielding two `&mut Space<'0>` of *identical* type. `mem::swap`
+    /// could then exchange the two `Space`s between containers — in
+    /// 100% safe code — and dropping one `OwnedSpace` would free the
+    /// `Box<Container>` the other now borrows (use-after-free).
+    /// Invariance does NOT prevent this: a swap needs no lifetime
+    /// *extension*, only two borrows of the *same* `Space<'0>` type.
+    ///
+    /// The higher-ranked bound `for<'a> FnOnce(&mut Space<'a>) -> R`
+    /// closes the hole: `'a` is universally quantified per call, so
+    /// the `&mut Space<'a>` cannot be named by the caller, cannot
+    /// escape the closure, and cannot be unified with the `Space`
+    /// lifetime of a second `with_space_mut` invocation. This is the
+    /// same shape `ouroboros`/`self_cell` expose as `with_dependent_mut`.
+    pub fn with_space_mut<R>(&mut self, f: impl for<'a> FnOnce(&mut Space<'a>) -> R) -> R {
+        // SAFETY: the stored `Space<'static>` is only actually valid
+        // while `self.container` is alive at its current heap address.
+        // We re-narrow the faked `'static` to the bound lifetime `'a`
+        // the closure is invoked with; `'a` cannot outlive the `&mut
+        // self` borrow, so the reference is never used past the
+        // container's lifetime.
+        let space: &mut Space<'_> =
+            unsafe { std::mem::transmute::<&mut Space<'static>, &mut Space<'_>>(&mut *self.space) };
+        f(space)
     }
 }
 
@@ -194,7 +206,7 @@ impl std::fmt::Debug for OwnedSpace {
 
 // SAFETY: `Container` and `Space<'_>` are both `Send`; `Box<Container>`
 // is `Send`; `ManuallyDrop<Space<'static>>` is `Send`. The fake `'static`
-// lifetime doesn't escape this struct — `space_mut()` re-narrows it.
+// lifetime doesn't escape this struct — `with_space_mut()` re-narrows it.
 unsafe impl Send for OwnedSpace {}
 
 /// Reason a [`run_blocking`] call did not produce a result.

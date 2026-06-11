@@ -1201,6 +1201,15 @@ where
             return Err(Error::Io(e));
         },
     };
+    // The tmp-handle lock pin is gated off on Android: std's
+    // `File::try_lock` returns `Err(Unsupported)` there (the v1.x
+    // Android-flock hardening routed the *container* locks through
+    // `libc` flock for exactly this reason, but this third lock site
+    // was never wired to that helper — audit pass 20). On Android the
+    // pin is therefore ABSENT; the substitute-tmp race is bounded only
+    // by the header-validate + inode-pin checks below and by the
+    // threat model's trusted-parent-directory precondition. Wiring it
+    // through `android_flock` is tracked as follow-up.
     #[cfg(not(target_os = "android"))]
     {
         // Best-effort exclusive lock pin. WouldBlock would mean an
@@ -1213,9 +1222,9 @@ where
                 return Err(Error::Busy);
             },
             Err(std::fs::TryLockError::Error(_)) => {
-                // Filesystem doesn't support flock — proceed (Android
-                // skip path goes through the `cfg(target_os="android")`
-                // arm; this branch is for exotic non-Unix FS).
+                // Filesystem doesn't support flock (e.g. an exotic
+                // non-Unix FS) — proceed; the header-validate + inode
+                // pin below remain the active substitution guards.
             },
         }
     }

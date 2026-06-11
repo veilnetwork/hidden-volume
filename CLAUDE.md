@@ -29,8 +29,9 @@ Crates (in dependency order):
 - [`crates/hidden-volume-async`](crates/hidden-volume-async/) —
   Tokio async wrapper around the sync core via `spawn_blocking`.
 - [`crates/hidden-volume-ffi`](crates/hidden-volume-ffi/) — uniffi
-  0.28 FFI surface. Generates Kotlin / Swift / Python / Ruby
-  bindings. Flutter integration is in
+  0.31 FFI surface. Generates Kotlin / Swift / Python / Ruby
+  bindings. Flutter integration (fully implemented typed Dart API)
+  is in
   [`experimental/flutter_plugin/`](experimental/flutter_plugin/).
 
 Authoritative sources of truth:
@@ -158,20 +159,24 @@ If a session OOMs mid-build / mid-test:
 
 ### CI trigger policy (2026-05-09)
 
-[`.github/workflows/`](.github/workflows/) has three workflows
-with two trigger tiers (updated 2026-05-28 after v1.0.0):
+[`.github/workflows/`](.github/workflows/) has four workflows
+(`ci.yml`, `ci-branch.yml`, `flutter-build.yml`, `release.yml`).
+The canonical gate is **tag-time CI**; branch/PR CI is
+**intentionally not wired** (resource saving — see below):
 
 - **Branch / PR CI** ([`ci-branch.yml`](.github/workflows/ci-branch.yml)) —
-  fires on push to `master` and on pull requests targeting
-  `master`. Lightweight Ubuntu-only matrix: fmt, clippy, test
-  (default features), rustdoc, cargo-audit (release-blocking,
-  no `continue-on-error`), cargo-deny, api-surface drift,
-  docs-version drift. Goal: ~3-5 minutes feedback on every push,
-  catches the v3-style drift that audit pass 19 caught only at
-  tag-time.
+  **deliberately disabled.** It is authored to fire on push to
+  `master` and on PRs targeting `master`, but the project's default
+  branch is `main`, so in practice it never runs. This is on
+  purpose (it saves CI minutes on every push); do NOT "fix" the
+  branch name to re-enable it without a deliberate decision. Its
+  lightweight Ubuntu-only matrix (fmt, clippy, test, rustdoc,
+  cargo-audit, cargo-deny, api-surface drift, docs-version drift)
+  is covered instead by the local pre-tag gate below.
 - **Tag-release CI** ([`ci.yml`](.github/workflows/ci.yml),
-  [`flutter-build.yml`](.github/workflows/flutter-build.yml)) —
-  fires only on:
+  [`flutter-build.yml`](.github/workflows/flutter-build.yml),
+  [`release.yml`](.github/workflows/release.yml)) — the canonical
+  release gate. Fires only on:
   - Push of a SemVer tag `v*.*.*` (the canonical release trigger).
   - Manual `workflow_dispatch` from the Actions UI.
 
@@ -179,8 +184,8 @@ with two trigger tiers (updated 2026-05-28 after v1.0.0):
   Flutter artifact build, Python FFI smoke, release-build slices,
   and fuzz-smoke live here.
 
-Even with branch CI in place, the pre-tag local gate is still
-useful for fast feedback before pushing:
+Because branch CI does not run, the pre-tag local gate is the
+primary fast-feedback mechanism before pushing a tag:
 
 ```sh
 cargo fmt --all -- --check
@@ -267,12 +272,14 @@ Audit passes 1–19 closed. Highlights:
 
 Open work (from `TASKS.md`):
 
-1. **Flutter integration** — `experimental/flutter_plugin/` Dart
-   typed API is the active workstream (replaces the
-   `UnimplementedError` stubs). Native artifact build pipeline
-   already shipped (`scripts/build-android.sh`,
-   `scripts/build-ios.sh`,
-   `.github/workflows/flutter-build.yml`).
+1. **Flutter integration** — **implemented.** The
+   `experimental/flutter_plugin/` typed Dart FFI API (~1116 + 518
+   lines, 18 tests) is done; the `UnimplementedError` stubs are
+   gone. Native artifact build pipeline already shipped
+   (`scripts/build-android.sh`, `scripts/build-ios.sh`,
+   `.github/workflows/flutter-build.yml`). Remaining work is
+   native-artifact packaging on all target ABIs and graduating out
+   of `experimental/`.
 2. **Release engineering** (gated on external review): cosign /
    minisign for release artifacts (audit pass 17 F-1), TM1 CI
    threshold gate (pass 17 F-3), external crypto review.

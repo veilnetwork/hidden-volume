@@ -114,10 +114,22 @@ hidden_volume::Container::change_passwords(
 )?;
 ```
 
-Mechanics: writes a fresh container at `path.hv-rotate-tmp`, then
-`rename(2)` over `path`. On any failure the temp is removed and
-the original `path` is untouched. See [`Container::change_passwords`]
+Mechanics: writes a fresh container at a sibling temp file named
+`.{stem}.hv-rotate.{16hex}.tmp` (the random 16-hex suffix avoids
+collisions; the leading dot keeps it out of casual listings), then
+`rename(2)`s it over `path` under the source `LOCK_EX` with a
+parent-dir `fsync`. On any failure the temp is removed and the
+original `path` is untouched. See [`Container::change_passwords`]
 for the full contract.
+
+**Data-loss-by-design warning.** Spaces NOT listed in the password
+mapping are **silently and permanently dropped** — see §2.2 and the
+boxed warning there. This applies equally to `change_passwords` and
+`compact_known`. The library cannot enumerate deniable spaces (that
+is the whole point of the format), so it has no way to detect "you
+forgot a space" and cannot warn you. The host-app is solely
+responsible for confirming the password set is complete before
+calling.
 
 ### 2.2 Multi-space — change one, preserve others
 
@@ -135,9 +147,16 @@ hidden_volume::Container::change_passwords(
 )?;
 ```
 
-Spaces NOT mentioned in the mapping are **dropped** (same
-destructive semantics as `compact_known`). To preserve a space,
-list it as a no-op `(p, p)` pair.
+> **⚠ DATA LOSS BY DESIGN.** Spaces NOT mentioned in the mapping
+> are **silently and permanently dropped** — same destructive
+> semantics as `compact_known`. An empty or incomplete password
+> list drops *every* unlisted space. This is a **deniability
+> property, not a bug**: the library cannot and must not enumerate
+> deniable spaces, so it has no way to know a space exists that you
+> forgot to list, and therefore cannot detect or warn about the
+> data loss. The host-app MUST confirm the password set is complete
+> before calling. To preserve a space, list it as a no-op `(p, p)`
+> pair.
 
 ### 2.3 After rotation
 
@@ -157,25 +176,38 @@ Argon2id parameters live in the cleartext header (set at create
 time). The library refuses to open a container with parameters
 below `Argon2Params::MIN`; you cannot DOWNGRADE a container in
 place. To re-tune (e.g., user upgraded from a Cortex-A53 phone to
-a flagship and the unlock budget is now larger), use
-[`Container::repack`]:
+a flagship and the unlock budget is now larger), perform a no-op
+password rotation with new Argon2 params via
+[`Container::change_passwords`]:
 
 ```rust,ignore
 use hidden_volume::container::RepackOptions;
 use hidden_volume::crypto::kdf::Argon2Params;
 
-let dest = path.with_extension("hv-rotate-tmp");
-hidden_volume::Container::repack(
+// A no-op-mapping rotation (each password mapped to itself) drives
+// the parameter migration through the safe IN-PLACE primitive
+// (atomic_rewrite_under_source_lock): source LOCK_EX held across
+// the rename, parent-dir fsync, temp removed on error.
+hidden_volume::Container::change_passwords(
     path,
-    &dest,
-    &[password],
+    &[(password, password)],   // identity map = migrate params only
     RepackOptions {
         argon2: Argon2Params::HEAVY,   // was DEFAULT
         ..Default::default()
     },
 )?;
-std::fs::rename(&dest, path)?;
 ```
+
+> **⚠** List EVERY space's password in the identity map. Any space
+> whose password is omitted is dropped (see §2.2 data-loss warning).
+
+Do NOT roll your own `Container::repack(path, dest, ..)` +
+`std::fs::rename(dest, path)`: that re-introduces the M1
+lost-update race the library fixes internally — no source lock is
+held across the rename, there is no parent-dir fsync, and a failed
+repack leaves the partial `dest` for the caller to clean up.
+`change_passwords` (and `compact_known`) route through the
+in-place primitive that closes all three gaps.
 
 Same anchor / verify caveats as §2.
 
@@ -189,10 +221,15 @@ structurally bounded by the 2-level B+ tree cap.
 
 **File-size cap.** Repack destination growth is gated by
 `MAX_OPEN_SCAN_CHUNKS = 16M` chunks ≈ 64 GiB (audit pass 17 B);
-exceeding it surfaces as `Error::ContainerTooLarge { extra, cap }`
-before any partial dest is left on disk. The cap is symmetric
-with the open-side scan budget — a successfully-repacked file
-is guaranteed to be re-openable.
+exceeding it surfaces as `Error::ContainerTooLarge { extra, cap }`.
+Note this fires **mid-copy**, not before any write — when you call
+the raw `Container::repack(path, dest, ..)` primitive directly, a
+partial `dest` may already exist on disk at the point the error is
+returned, and it is **caller-owned**: you must remove it yourself.
+The in-place `change_passwords` / `compact_known` wrappers handle
+this cleanup for you (the temp is removed on any error). The cap is
+symmetric with the open-side scan budget — a successfully-repacked
+file is guaranteed to be re-openable.
 
 **Choosing parameters.** See `DESIGN.md` §11.1:
 
@@ -263,10 +300,13 @@ Truncate-at-chunk-boundary: recovery picks the last fully-written
 Superblock and rolls back. No special action needed beyond
 re-opening the file.
 
-Truncate-mid-chunk (file size not aligned to 4 KiB): library
-returns `Error::Malformed` and refuses to open. Restore from
-backup, OR use a hex editor to truncate down to the nearest 4 KiB
-boundary (effectively rolling back to the prior aligned state).
+Truncate-mid-chunk (file size not aligned to 4 KiB): the library
+**tolerates** the unaligned trailing tail — the chunk grid is
+`N = (file_size / CHUNK_SIZE) - 1` (rounding down), so the partial
+final chunk is ignored and treated as reclaimable free space (see
+`docs/en/reference/format.md` §1). Recovery then picks the last
+fully-written Superblock, exactly as in the aligned case. No
+hex-editor truncation is needed; re-opening the file is sufficient.
 
 ---
 
@@ -393,10 +433,22 @@ unlocked space (one fresh derivation against the new salt). Audit
 pass 16 made memory ≈ 4 MiB per page regardless of total size —
 no host-RSS babysitting required.
 
-**Atomicity.** `compact_known` is in-place: writes a tmp file in
-the same dir, `fsync`s it, then `rename`s over the source under
-`LOCK_EX` + `fsync_parent_dir`. Crash mid-rename either keeps the
-old file intact or atomically replaces it; never partial state.
+**Atomicity.** `compact_known` is in-place: writes a sibling tmp
+file named `.{stem}.hv-compact.{16hex}.tmp` (rotation uses
+`.{stem}.hv-rotate.{16hex}.tmp`), `fsync`s it, then `rename`s over
+the source under `LOCK_EX` + `fsync_parent_dir`. Crash mid-rename
+either keeps the old file intact or atomically replaces it; never
+partial state.
+
+**Stale temp cleanup.** A crash *before* the rename can leave a
+sibling `.{stem}.hv-rotate.{16hex}.tmp` or `.{stem}.hv-compact.{16hex}.tmp`
+file behind. These are inert (they never replaced the live
+container) but they consume disk and leak nothing. Host apps should
+glob the container's directory for `.{stem}.hv-*.{hex}.tmp`
+siblings and delete them at startup, **while the container is not
+open** (deleting a temp that a concurrent in-progress rotate/compact
+is actively writing would corrupt that operation — only sweep when
+you hold, or know no one holds, the container).
 
 Use this recipe when:
 - Live-ratio drops below threshold (see triggers above).
@@ -548,7 +600,7 @@ Interpret:
 |---|---|---|
 | `Error::AuthFailed` on every space | Wrong password OR wrong file OR header corruption | Try other passwords; verify `container_id` in header is unchanged from a known-good backup; if all fail, restore from backup |
 | `Error::Busy` | Another writer holds `LOCK_EX` | Wait; retry once after a delay; do NOT loop tightly — it's almost always a stuck process or a stale lock from a crashed peer |
-| `Error::Malformed` on open | Header corrupted or file truncated mid-chunk | Restore from backup |
+| `Error::Malformed` on open | Header corrupted (a mid-chunk-truncated *tail* is tolerated, not rejected — see §4.4) | Restore from backup |
 | `Error::IntegrityFailure { slot, detail }` | Specific chunk has wrong hash; AEAD passed but Merkle didn't | §4.3 |
 | `Error::ReadOnly` from a write call | Container was opened via `open_readonly` | Reopen via `Container::open` (acquires `LOCK_EX`) |
 | `Error::Cancelled` | A `CancelToken` was fired during the operation | Operation aborted; safe to retry (no partial state on disk) |

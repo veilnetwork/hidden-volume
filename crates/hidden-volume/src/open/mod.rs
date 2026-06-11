@@ -201,17 +201,28 @@ fn scan_and_recover_inner(
             // same-seq-different-payload SBs would silently mask
             // first-wins; the `debug_assert!` catches it in tests.
             // Release builds keep first-wins semantics with no cost.
-            use std::collections::btree_map::Entry;
-            match sb_candidates.entry(pt.seq) {
-                Entry::Vacant(e) => {
-                    e.insert(pt.payload);
-                },
-                Entry::Occupied(e) => {
-                    debug_assert!(
-                        e.get() == &pt.payload,
-                        "same-seq Superblock replicas must be bit-equal"
-                    );
-                },
+            //
+            // Only retain payloads that are exactly a Superblock's
+            // encoded length. `Superblock::decode` rejects any other
+            // length downstream, so this is behaviour-preserving — but
+            // it bounds memory: without it, a key-holder could forge
+            // up to MAX_OPEN_SCAN_CHUNKS distinct-seq Superblock-kind
+            // chunks each carrying a PAYLOAD_CAP-sized payload and make
+            // `open` retain tens of GiB (audit pass 20). Non-matching
+            // payloads still counted toward `commit_history` above.
+            if pt.payload.len() == Superblock::ENCODED_LEN {
+                use std::collections::btree_map::Entry;
+                match sb_candidates.entry(pt.seq) {
+                    Entry::Vacant(e) => {
+                        e.insert(pt.payload);
+                    },
+                    Entry::Occupied(e) => {
+                        debug_assert!(
+                            e.get() == &pt.payload,
+                            "same-seq Superblock replicas must be bit-equal"
+                        );
+                    },
+                }
             }
         }
         // pt is consumed (payload moved or dropped at end-of-iter
@@ -410,17 +421,20 @@ fn scan_and_recover_parallel_inner(
                     if pt.kind == ChunkKind::Superblock {
                         acc.commit_history.push(pt.seq);
                         // Audit pass 7 (D4): see sequential variant for rationale.
+                        // Audit pass 20: length-gate the candidate (memory bound).
                         use std::collections::btree_map::Entry;
-                        match acc.sb_candidates.entry(pt.seq) {
-                            Entry::Vacant(e) => {
-                                e.insert(pt.payload);
-                            },
-                            Entry::Occupied(e) => {
-                                debug_assert!(
-                                    e.get() == &pt.payload,
-                                    "same-seq Superblock replicas must be bit-equal"
-                                );
-                            },
+                        if pt.payload.len() == Superblock::ENCODED_LEN {
+                            match acc.sb_candidates.entry(pt.seq) {
+                                Entry::Vacant(e) => {
+                                    e.insert(pt.payload);
+                                },
+                                Entry::Occupied(e) => {
+                                    debug_assert!(
+                                        e.get() == &pt.payload,
+                                        "same-seq Superblock replicas must be bit-equal"
+                                    );
+                                },
+                            }
                         }
                     }
                 }

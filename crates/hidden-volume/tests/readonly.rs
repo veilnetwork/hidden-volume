@@ -165,7 +165,7 @@ fn set_padding_policy_on_readonly_returns_readonly_error() {
 /// `Container::set_padding_policy`'s strict-RO behaviour. Previously
 /// it silently mutated `ContainerFile::padding_policy` regardless of
 /// the lock mode, which broke the strict-RO contract relied on by the
-/// async + FFI wrappers (they reach the policy via `space_mut()`,
+/// async + FFI wrappers (they reach the policy via `with_space_mut()`,
 /// not via the Container method).
 #[test]
 fn set_padding_policy_on_readonly_space_returns_readonly_error() {

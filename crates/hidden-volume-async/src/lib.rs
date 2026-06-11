@@ -387,10 +387,13 @@ impl AsyncSpace {
             let mut guard = inner
                 .lock()
                 .map_err(|_| Error::Internal("AsyncSpace mutex poisoned by prior panicked task"))?;
-            // `space_mut()` re-narrows the stored `Space<'static>` to
-            // a borrow of `&mut guard`; the `MutexGuard` keeps the
-            // `OwnedSpace` alive for the closure's duration.
-            f(guard.space_mut())
+            // `with_space_mut` re-narrows the stored `Space<'static>`
+            // to a borrow handed to `f`; the `MutexGuard` keeps the
+            // `OwnedSpace` alive for the closure's duration. The
+            // higher-ranked bound on `f` (and on `with_space_mut`)
+            // makes the `&mut Space` un-nameable by the caller, so it
+            // cannot escape or be swapped between spaces.
+            guard.with_space_mut(f)
         })
         .await
     }
@@ -423,7 +426,7 @@ impl AsyncSpace {
                     let mut guard = inner
                         .lock()
                         .map_err(|_| Error::Internal("AsyncSpace mutex poisoned by prior panicked task"))?;
-                    guard.space_mut().iter_log_after(Namespace(namespace), cursor, page_size)
+                    guard.with_space_mut(|s| s.iter_log_after(Namespace(namespace), cursor, page_size))
                 }).await?;
                 let Some(last) = page.last() else { break };
                 cursor = Some(last.0);
@@ -453,7 +456,7 @@ impl AsyncSpace {
                     let mut guard = inner
                         .lock()
                         .map_err(|_| Error::Internal("AsyncSpace mutex poisoned by prior panicked task"))?;
-                    guard.space_mut().iter_log_before(Namespace(namespace), cursor, page_size)
+                    guard.with_space_mut(|s| s.iter_log_before(Namespace(namespace), cursor, page_size))
                 }).await?;
                 let Some(last) = page.last() else { break };
                 cursor = Some(last.0);
@@ -524,9 +527,9 @@ impl AsyncSpace {
                     let mut guard = inner
                         .lock()
                         .map_err(|_| Error::Internal("AsyncSpace mutex poisoned by prior panicked task"))?;
-                    guard
-                        .space_mut()
-                        .iter_log_range(Namespace(namespace), inclusive_start, cursor_upper, page_size)
+                    guard.with_space_mut(|s| {
+                        s.iter_log_range(Namespace(namespace), inclusive_start, cursor_upper, page_size)
+                    })
                 }).await?;
                 let Some(last) = page.last() else { break };
                 // Advance the exclusive lower-bound cursor past the

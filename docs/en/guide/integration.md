@@ -460,16 +460,22 @@ Each mapping entry is `(open_with, write_as)`:
 - `open_with == write_as` → preserve verbatim.
 - `open_with != write_as` → rotate to the new password.
 
-Spaces NOT mentioned in the mapping are **dropped** (same destructive
-semantics as `compact_known`). To preserve a space whose password
-isn't being rotated, list it as a no-op `(p, p)` pair.
+> **⚠ DATA LOSS BY DESIGN.** Spaces NOT mentioned in the mapping
+> are **silently and permanently dropped** (same destructive
+> semantics as `compact_known`). An empty / incomplete password
+> list drops *every* unlisted space. This is a deniability property:
+> the library cannot enumerate deniable spaces, so it cannot detect
+> or warn about the loss — the host-app MUST confirm the password
+> set is complete before calling. To preserve a space whose password
+> isn't being rotated, list it as a no-op `(p, p)` pair.
 
-Mechanics: writes a fresh container at `path.hv-rotate-tmp`, then
-atomic-renames over `path`. On any failure the temp is removed and
-the original `path` is untouched. The cancellable variant
-(`change_passwords_cancellable`) honours a `CancelToken` at every
-namespace / Tx boundary; on cancel the temp is removed and
-`Error::Cancelled` is returned.
+Mechanics: writes a fresh container at a sibling temp file named
+`.{stem}.hv-rotate.{16hex}.tmp`, then atomic-renames over `path`
+under the source `LOCK_EX` with a parent-dir `fsync`. On any
+failure the temp is removed and the original `path` is untouched.
+The cancellable variant (`change_passwords_cancellable`) honours a
+`CancelToken` at every namespace / Tx boundary; on cancel the temp
+is removed and `Error::Cancelled` is returned.
 
 **Forward-secrecy note.** After rotation, the old container's blocks
 are released to the filesystem. The allocator may reuse them; for
@@ -556,14 +562,29 @@ A: Yes — `Tx::delete(MESSAGE_LOG, log_id_key)`. Forward-secrecy via
 at it. The DataBatch chunk containing the message bytes is scrubbed
 on the next `compact_known` call.
 
+**Q: What happens if I `delete` a key that isn't there?**
+A: It is **intentionally not a no-op**: deleting an absent key still
+writes a commit and advances the sequence number. This is by design,
+not a wasted write. If a missing-key delete short-circuited (skipped
+the commit), then *whether the file grew / whether `commit_seq`
+moved* would observably reveal "that key existed" vs "it did not" to
+a multi-snapshot adversary (T2') watching the container — a key-
+existence oracle. Writing the commit unconditionally makes a delete
+an **intentional tombstone-anchor**: present-key and absent-key
+deletes are indistinguishable from the outside. Host apps should not
+treat the extra commit as a bug or try to elide it.
+
 **Q: How do I know an unlock attempt failed?**
 A: `open_space` returns `Error::AuthFailed`. The same error covers
 "wrong password" and "no such space" — by design (D2). Don't try to
 distinguish them; surface a generic "unlock failed" to the user.
 
 **Q: Is the file format stable?**
-A: Until v1.0 the on-disk format may change between v0.x releases.
-After v1.0 it freezes. See `TASKS.md` v1.0 milestone.
+A: Yes. v1.0.0 shipped and froze the on-disk format at generation
+v3. A reader refuses any `format_version != 3`. Any future layout
+change requires a new generation (v4) plus a migration tool; it will
+not silently re-interpret a v3 file. See `docs/en/reference/format.md`
+§7 (cross-version policy).
 
 **Q: Do I need a special filesystem?**
 A: ext4 / APFS / NTFS all work. Networked filesystems must honor
@@ -580,7 +601,7 @@ intermediate-snapshot deniability is weakened (see DESIGN §1 T2').
 | Canonical wire-format spec (v1.0-frozen byte layout) | `docs/en/reference/format.md` |
 | Formal threat model (adversaries, audit history, review request) | `docs/en/security/threat-model.md` |
 | Backup / restore / key rotation / recovery / scrub recipes | `docs/en/guide/operations.md` |
-| Format-version migration (v1 → v2 — empty shell until v2 lands) | `docs/en/guide/migration.md` |
+| Cross-generation migration (export/re-import; no in-place vN → vM) | `docs/en/guide/migration.md` |
 | Semver coverage policy (what's covered, what's not, post-v1.0) | `docs/en/reference/semver.md` |
 | P2P-sync contract, anchor strategy | `docs/en/guide/multi-device.md` |
 | Constant-time audit | `docs/en/security/audits/constant-time.md` |

@@ -102,10 +102,12 @@ multi-handle use anyway.
 
 ### Self-referential implementation
 
-Internally `SpaceHandle` holds:
+Internally `SpaceHandle` holds a `hidden_volume_rt::OwnedSpace` —
+the shared self-referential helper (see the `hidden-volume-rt`
+crate), shaped as:
 
 ```rust
-struct SpaceInner {
+struct OwnedSpace {
     container: Box<Container>,           // stable address
     space: ManuallyDrop<Space<'static>>, // borrow with lifetime extended
 }
@@ -115,16 +117,17 @@ The `'static` is a lie — the `Space` is only valid while `container`
 lives at its current heap address. Safety:
 
 1. `container` is `Box`-allocated; address is stable for the lifetime
-   of `SpaceInner`.
+   of `OwnedSpace`.
 2. After `transmute`-ing the lifetime, we never move `container`.
-3. `Drop for SpaceInner` drops `space` first (it borrows from
+3. `Drop for OwnedSpace` drops `space` first (it borrows from
    `container`), then `container`. Without `ManuallyDrop`, Rust's
    automatic field-drop order would drop `container` first — UB.
 
 This is the standard self-referential FFI pattern; `self_cell` and
 `ouroboros` crates exist to abstract it but we use the direct form
 to avoid an extra dep for ~30 lines of code. The unsafe block is
-documented in `src/lib.rs:SpaceInner::new`.
+documented in `hidden_volume_rt::OwnedSpace::new`; both the FFI and
+async wrappers reuse it.
 
 ## Decision 4 — batch `commit(Vec<WriteOp>)` over per-op auto-commit
 
@@ -210,8 +213,8 @@ A messenger's storage layer faces two distinct integrator profiles:
 | Embedded ARM with no Tokio | sync calls | **Sync** — async pulls Tokio (~700 KB binary) |
 
 Shipping both lets each integrator pick the right tool. The two
-handles **share the same internal `SpaceInner`** (boxed Container +
-ManuallyDrop'd Space behind Mutex) — code duplication is only the
+handles **share the same internal `hidden_volume_rt::OwnedSpace`**
+(boxed Container + ManuallyDrop'd Space behind Mutex) — code duplication is only the
 method shells, not the storage logic. There is no "async vs sync"
 runtime split in the format or in the sync core; the async surface is
 a pure offload wrapper, identical to what `hidden-volume-async` does
@@ -330,8 +333,8 @@ The Rust side is done; what remains is **platform packaging**:
 | **Android `.aar` / `.so` per ABI** | Needs Android NDK; cargo-ndk + uniffi-bindgen-kotlin scripts in CI. | First Android integrator request. |
 | **Linux/macOS/Windows desktop binaries** | Cross-compile via `cargo` is straightforward but no consumer yet. | First desktop messenger fork that wants to embed. |
 | **CI matrix for all targets** | Costs CI minutes; skip until binaries are actually published. | Same trigger as the binary tasks above. |
-| **Flutter sample app** | Needs Dart-side generator (`uniffi-dart` 0.4+, currently in beta). Real Flutter integration work has just begun (2026-05-09); the `experimental/flutter_plugin/` scaffold under [`experimental/`](../../../experimental/) is being filled in. | Track progress in `experimental/flutter_plugin/`; graduates out of `experimental/` once the Dart-side typed API replaces the `UnimplementedError` stubs. |
-| **`docs/en/guide/flutter.md`** | Currently documents the experimental scaffold + uniffi-dart gate. Will be expanded as the Flutter integration ships. | After the typed Dart API graduates from `experimental/`. |
+| **Flutter typed Dart API** | **Implemented.** The hand-written `dart:ffi` typed API (~1116 + 518 lines, 18 tests) lives in [`experimental/flutter_plugin/hidden_volume/`](../../../experimental/flutter_plugin/); the `UnimplementedError` stubs are gone. Still under `experimental/` pending native-artifact packaging on all target ABIs. | — (done) |
+| **`docs/en/guide/flutter.md`** | Documents the implemented plugin + quick-start recipe. | — |
 
 The Rust-side scaffolding does NOT depend on any of these — they are
 pure deployment / packaging work. An integrator who wants Kotlin
@@ -349,9 +352,9 @@ repo because they evolve independently of the FFI surface.
 ## Threading model — Mutex per handle
 
 uniffi generates `Arc<SpaceHandle>` — multiple foreign-side references
-share one Rust object. We wrap the inner state in `Mutex<SpaceInner>`
-to satisfy `Sync`. Concurrent FFI calls from foreign threads serialize
-on the lock.
+share one Rust object. We wrap the inner state in
+`Mutex<hidden_volume_rt::OwnedSpace>` to satisfy `Sync`. Concurrent
+FFI calls from foreign threads serialize on the lock.
 
 This is the same pattern as `hidden-volume-async`'s `AsyncContainer`.
 Per the sync core's design, only one `Tx` may be active per `Space` at
@@ -366,8 +369,8 @@ uniffi handles object lifecycle via reference-counted handles:
   language-native ref-counted handle (`AutoCloseable` in Kotlin,
   ARC-managed class in Swift).
 - When the foreign-side handle drops to zero refs, uniffi calls the
-  Rust `Drop`. Our `Drop for SpaceInner` releases the `LOCK_EX` on the
-  underlying file.
+  Rust `Drop`. Our `Drop for hidden_volume_rt::OwnedSpace` releases
+  the `LOCK_EX` on the underlying file.
 - Bytes (`Vec<u8>`) cross the FFI boundary by **copying** in both
   directions. This is the only safe choice — the foreign side may
   outlive any single Rust call. For typical messenger payloads

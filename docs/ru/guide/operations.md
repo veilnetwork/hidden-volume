@@ -117,10 +117,22 @@ hidden_volume::Container::change_passwords(
 )?;
 ```
 
-Механика: пишет свежий контейнер в `path.hv-rotate-tmp`, затем
-`rename(2)` поверх `path`. При любой ошибке temp удаляется, а
-оригинальный `path` остаётся нетронутым. Полный contract см. в
-[`Container::change_passwords`].
+Механика: пишет свежий контейнер в sibling-temp с именем
+`.{stem}.hv-rotate.{16hex}.tmp` (случайный 16-hex суффикс
+избегает коллизий; ведущая точка убирает файл из обычных
+листингов), затем `rename(2)`-ит его поверх `path` под source
+`LOCK_EX` с `fsync` родительской директории. При любой ошибке
+temp удаляется, а оригинальный `path` остаётся нетронутым. Полный
+contract см. в [`Container::change_passwords`].
+
+**Предупреждение: потеря данных by design.** Spaces, НЕ
+перечисленные в password-mapping, **молча и безвозвратно
+отбрасываются** — см. §2.2 и врезку там. Это в равной мере
+относится к `change_passwords` и `compact_known`. Библиотека не
+может перечислить deniable spaces (в этом весь смысл формата),
+поэтому она не способна обнаружить «вы забыли space» и не может
+предупредить. Host-app единолично отвечает за подтверждение того,
+что набор паролей полон, перед вызовом.
 
 ### 2.2 Multi-space — изменить один, сохранить остальные
 
@@ -138,9 +150,17 @@ hidden_volume::Container::change_passwords(
 )?;
 ```
 
-Spaces, НЕ упомянутые в mapping, **отбрасываются** (та же
-деструктивная семантика, что и у `compact_known`). Чтобы сохранить
-space, перечислите его как no-op пару `(p, p)`.
+> **⚠ ПОТЕРЯ ДАННЫХ BY DESIGN.** Spaces, НЕ упомянутые в mapping,
+> **молча и безвозвратно отбрасываются** — та же деструктивная
+> семантика, что и у `compact_known`. Пустой или неполный список
+> паролей отбросит *каждый* непереисленный space. Это **свойство
+> deniability, а не баг**: библиотека не может и не должна
+> перечислять deniable spaces, поэтому она не способна узнать о
+> существовании space, который вы забыли перечислить, и
+> следовательно не может обнаружить или предупредить о потере
+> данных. Host-app ОБЯЗАН подтвердить полноту набора паролей перед
+> вызовом. Чтобы сохранить space, перечислите его как no-op пару
+> `(p, p)`.
 
 ### 2.3 После ротации
 
@@ -161,25 +181,40 @@ space, перечислите его как no-op пару `(p, p)`.
 создании). Библиотека отказывается открывать контейнер с параметрами
 ниже `Argon2Params::MIN`; нельзя DOWNGRADE контейнер на месте.
 Чтобы re-tune (например, пользователь обновился с Cortex-A53
-на флагман и unlock-бюджет теперь больше), используйте
-[`Container::repack`]:
+на флагман и unlock-бюджет теперь больше), выполните no-op
+ротацию паролей с новыми параметрами Argon2 через
+[`Container::change_passwords`]:
 
 ```rust,ignore
 use hidden_volume::container::RepackOptions;
 use hidden_volume::crypto::kdf::Argon2Params;
 
-let dest = path.with_extension("hv-rotate-tmp");
-hidden_volume::Container::repack(
+// Ротация с identity-mapping (каждый пароль отображён сам на себя)
+// проводит миграцию параметров через безопасный IN-PLACE-примитив
+// (atomic_rewrite_under_source_lock): source LOCK_EX удерживается
+// весь rename, fsync родительской директории, temp удаляется при
+// ошибке.
+hidden_volume::Container::change_passwords(
     path,
-    &dest,
-    &[password],
+    &[(password, password)],   // identity map = мигрируем только параметры
     RepackOptions {
         argon2: Argon2Params::HEAVY,   // было DEFAULT
         ..Default::default()
     },
 )?;
-std::fs::rename(&dest, path)?;
 ```
+
+> **⚠** Перечислите пароль КАЖДОГО space в identity-map. Любой
+> space, чей пароль опущен, отбрасывается (см. §2.2 предупреждение
+> о потере данных).
+
+НЕ изобретайте свой `Container::repack(path, dest, ..)` +
+`std::fs::rename(dest, path)`: это снова вносит M1 lost-update
+race, который библиотека чинит внутри — source-lock не
+удерживается через rename, нет fsync родительской директории, а
+упавший repack оставляет partial `dest` на cleanup вызывающему.
+`change_passwords` (и `compact_known`) идут через in-place-
+примитив, закрывающий все три бреши.
 
 Те же anchor / verify оговорки, что и в §2.
 
@@ -193,10 +228,16 @@ repack; KV-namespaces всё ещё собираются целиком на nam
 
 **File-size cap.** Рост destination в repack ограничен
 `MAX_OPEN_SCAN_CHUNKS = 16M` чанков ≈ 64 ГиБ (audit pass 17 B);
-превышение surface'ится как `Error::ContainerTooLarge { extra, cap }`
-до того, как partial-dest останется на диске. Cap симметричен
-с open-side scan-budget'ом — успешно отрепакнутый файл гарантированно
-можно открыть.
+превышение surface'ится как `Error::ContainerTooLarge { extra, cap }`.
+Учтите, что это срабатывает **посреди копирования**, а не до
+первой записи — когда вы вызываете сырой примитив
+`Container::repack(path, dest, ..)` напрямую, partial `dest` уже
+может существовать на диске в момент возврата ошибки, и он
+**принадлежит вызывающему**: вы должны удалить его сами. In-place
+обёртки `change_passwords` / `compact_known` делают эту очистку за
+вас (temp удаляется при любой ошибке). Cap симметричен с open-side
+scan-budget'ом — успешно отрепакнутый файл гарантированно можно
+открыть.
 
 **Выбор параметров.** См. `DESIGN.md` §11.1:
 
@@ -271,10 +312,14 @@ Truncate-at-chunk-boundary: recovery выбирает последний
 не нужно, кроме повторного открытия файла.
 
 Truncate-mid-chunk (размер файла не выровнен до 4 KiB):
-библиотека возвращает `Error::Malformed` и отказывается открыть.
-Восстановите из бэкапа, ИЛИ используйте hex-редактор, чтобы
-truncate'нуть до ближайшей 4 KiB границы (фактически откат
-к предыдущему выровненному состоянию).
+библиотека **допускает** невыровненный хвост в конце — сетка
+chunk'ов считается как `N = (file_size / CHUNK_SIZE) - 1` (с
+округлением вниз), поэтому частичный последний chunk игнорируется
+и трактуется как переиспользуемое свободное место (см.
+`docs/ru/reference/format.md` §1). Recovery затем выбирает
+последний полностью записанный Superblock, ровно как в выровненном
+случае. Hex-редактор для truncate не нужен; достаточно повторно
+открыть файл.
 
 ---
 
@@ -403,10 +448,21 @@ space (одна свежая деривация против нового salt).
 никакого babysitting'а RSS хоста не требуется.
 
 **Атомарность.** `compact_known` работает in-place: записывает
-tmp-файл в той же директории, делает `fsync`, затем `rename` поверх
-source под `LOCK_EX` + `fsync_parent_dir`. Crash посреди rename
-либо оставляет старый файл нетронутым, либо атомарно его заменяет;
-никогда partial-state.
+sibling tmp-файл с именем `.{stem}.hv-compact.{16hex}.tmp` (ротация
+использует `.{stem}.hv-rotate.{16hex}.tmp`), делает `fsync`, затем
+`rename` поверх source под `LOCK_EX` + `fsync_parent_dir`. Crash
+посреди rename либо оставляет старый файл нетронутым, либо атомарно
+его заменяет; никогда partial-state.
+
+**Очистка stale-temp.** Crash *до* rename может оставить sibling
+`.{stem}.hv-rotate.{16hex}.tmp` или `.{stem}.hv-compact.{16hex}.tmp`.
+Эти файлы инертны (они никогда не заменяли живой контейнер), но
+занимают место и ничего не утекают. Host-app'ам стоит при старте
+проходить директорию контейнера по маске `.{stem}.hv-*.{hex}.tmp`
+и удалять такие siblings, **пока контейнер не открыт** (удаление
+temp, который активно пишет конкурентная in-progress
+rotate/compact, повредит ту операцию — подметайте только когда
+держите контейнер сами или знаете, что его никто не держит).
 
 Используйте этот рецепт когда:
 - Live-ratio упало ниже порога (см. триггеры выше).
@@ -561,7 +617,7 @@ println!(
 |---|---|---|
 | `Error::AuthFailed` на каждом space | Неверный пароль ИЛИ неверный файл ИЛИ corruption header | Попробуйте другие пароли; убедитесь, что `container_id` в header не изменился относительно known-good бэкапа; если всё мимо — restore из бэкапа |
 | `Error::Busy` | Другой writer держит `LOCK_EX` | Подождите; повторите один раз после задержки; НЕ зацикливайтесь — это почти всегда зависший процесс или stale lock от упавшего peer |
-| `Error::Malformed` на open | Header повреждён или файл truncated mid-chunk | Restore из бэкапа |
+| `Error::Malformed` на open | Header повреждён (truncated mid-chunk *хвост* допускается, а не отклоняется — см. §4.4) | Restore из бэкапа |
 | `Error::IntegrityFailure { slot, detail }` | Конкретный chunk имеет неверный hash; AEAD прошёл, а Merkle нет | §4.3 |
 | `Error::ReadOnly` от write-вызова | Контейнер открыт через `open_readonly` | Переоткройте через `Container::open` (берёт `LOCK_EX`) |
 | `Error::Cancelled` | `CancelToken` был сработал во время операции | Операция aborted; безопасно повторить (нет partial state на диске) |

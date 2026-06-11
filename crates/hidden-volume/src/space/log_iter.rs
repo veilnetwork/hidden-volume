@@ -52,7 +52,7 @@ impl<'f> Space<'f> {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let root_slot = match self.find_root_slot(namespace)? {
+        let root_slot = match self.find_log_root_slot(namespace)? {
             Some(s) => s,
             None => return Ok(Vec::new()),
         };
@@ -87,7 +87,7 @@ impl<'f> Space<'f> {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let root_slot = match self.find_root_slot(namespace)? {
+        let root_slot = match self.find_log_root_slot(namespace)? {
             Some(s) => s,
             None => return Ok(Vec::new()),
         };
@@ -142,7 +142,7 @@ impl<'f> Space<'f> {
         {
             return Ok(Vec::new());
         }
-        let root_slot = match self.find_root_slot(namespace)? {
+        let root_slot = match self.find_log_root_slot(namespace)? {
             Some(s) => s,
             None => return Ok(Vec::new()),
         };
@@ -197,6 +197,24 @@ impl<'f> Space<'f> {
         Ok(out)
     }
 
+    /// Resolve the root slot for a log namespace, enforcing that the
+    /// namespace's persisted [`crate::tx::NamespaceKind`] is `Log`
+    /// (audit pass 20 R-NSKIND parity). Returns `Ok(None)` for a
+    /// never-written / fully-erased namespace (same as
+    /// [`Space::find_root_slot`]); returns `Err(WrongNamespaceKind)`
+    /// when the namespace exists but is a KV namespace — caught here,
+    /// before any leaf walk, instead of via the downstream 8-byte-key
+    /// / DataBatch-pointer shape heuristic.
+    fn find_log_root_slot(&mut self, namespace: Namespace) -> Result<Option<u64>> {
+        match self.find_root(namespace)? {
+            None => Ok(None),
+            Some(root) if root.kind != crate::tx::NamespaceKind::Log => Err(
+                Error::WrongNamespaceKind("namespace is a KV namespace, not a log"),
+            ),
+            Some(root) => Ok(Some(root.index_slot)),
+        }
+    }
+
     /// Read a log entry by `log_id` from a namespace whose entries
     /// were written via [`crate::tx::Tx::append_log`]. Returns
     /// `Ok(None)` only if the id was never appended (KV index does
@@ -208,6 +226,20 @@ impl<'f> Space<'f> {
     /// Cost: one KV lookup (O(log N) tree walk) plus one chunk read +
     /// zstd decompress for the containing batch.
     pub fn read_log(&mut self, namespace: Namespace, log_id: u64) -> Result<Option<Vec<u8>>> {
+        // Enforce the namespace's persisted kind up front (audit pass
+        // 20 R-NSKIND parity): a KV namespace is rejected with
+        // `WrongNamespaceKind` regardless of whether its values happen
+        // to look like batch-slot pointers, instead of relying on the
+        // downstream DataBatch-kind heuristic.
+        match self.find_root(namespace)? {
+            None => return Ok(None),
+            Some(root) if root.kind != crate::tx::NamespaceKind::Log => {
+                return Err(Error::WrongNamespaceKind(
+                    "namespace is a KV namespace, not a log",
+                ));
+            },
+            Some(_) => {},
+        }
         let key = log::log_id_key(log_id);
         let value_bytes = match self.get(namespace, &key)? {
             Some(v) => v,

@@ -163,6 +163,18 @@ pub enum HvError {
         /// Slot index of the offending chunk.
         slot: u64,
     },
+    /// A write would push the container past the open-scan budget
+    /// (`MAX_OPEN_SCAN_CHUNKS`). Caller-actionable: shrink
+    /// `initial_garbage_chunks`, pick a lighter [`PaddingPreset`], or
+    /// partition the container. NOT a crate bug — distinct from
+    /// [`HvError::Internal`].
+    #[error("container would exceed open-scan budget (slot_count + {extra} > {cap})")]
+    ContainerTooLarge {
+        /// Slots the failing write would have added.
+        extra: u64,
+        /// Hard cap (`MAX_OPEN_SCAN_CHUNKS`).
+        cap: u64,
+    },
 }
 
 impl From<hidden_volume::Error> for HvError {
@@ -189,7 +201,13 @@ impl From<hidden_volume::Error> for HvError {
                 detail: detail.into(),
                 slot,
             },
-            // Future variants surface as Internal — deniability-safe default.
+            E::ContainerTooLarge { extra, cap } => HvError::ContainerTooLarge { extra, cap },
+            // `hidden_volume::Error` is `#[non_exhaustive]`, so this
+            // catch-all is mandatory. It is a deniability-safe default
+            // for any variant added upstream but not yet mapped here —
+            // NOT a dumping ground for known variants. When a new core
+            // variant is added, add an explicit arm above; the
+            // `from_maps_*` unit tests guard the actionable ones.
             _ => HvError::Internal("unknown error variant".into()),
         }
     }
@@ -340,13 +358,26 @@ pub fn header_info(path: String) -> HvResult<HeaderInfo> {
 // pass-16 `Zeroizing` flow, leaving plaintext heap copies that never
 // scrub. If a future site genuinely needs a copy, write an explicit
 // `Zeroizing`-aware constructor instead of re-deriving `Clone`.
-#[derive(uniffi::Record, Debug)]
+#[derive(uniffi::Record)]
 pub struct PasswordRotation {
     /// Current password (used to decrypt the source space).
     pub old: Vec<u8>,
     /// New password (used to encrypt the dest space). Equal to
     /// `old` for a "preserve verbatim" entry.
     pub new: Vec<u8>,
+}
+
+// Audit pass 20: manual redacted `Debug`. The pass-17 F-2 rationale
+// above (no `Clone`, keep secrets out of unscrubbed copies) applies
+// equally to `Debug` — a derived `{:?}` would print both passwords
+// byte-for-byte into logs / panic messages. Redact both fields.
+impl std::fmt::Debug for PasswordRotation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PasswordRotation")
+            .field("old", &"<redacted>")
+            .field("new", &"<redacted>")
+            .finish()
+    }
 }
 
 /// In-place compact of the container at `path`, keeping only the
@@ -498,6 +529,13 @@ impl StatsInfo {
     /// Use this value as a `compact_known` trigger — see
     /// `docs/en/guide/operations.md` §3 "Reclaiming disk space".
     /// Returns `0.0` for an empty container.
+    ///
+    /// **Rust-only.** uniffi exports a `Record`'s *fields*, not its
+    /// `impl` methods, so Kotlin/Swift/Python/Ruby callers cannot
+    /// invoke this; they compute `owned_chunk_count / total_slot_count`
+    /// (guarding the zero case) from the two exported fields. The Dart
+    /// binding already provides a `utilizationRatio()` helper that does
+    /// exactly this.
     #[must_use]
     pub fn utilization_ratio(&self) -> f64 {
         if self.total_slot_count == 0 {
@@ -637,14 +675,14 @@ impl SpaceHandle {
     /// rollback-detection anchor (see `docs/en/guide/multi-device.md`).
     pub fn commit_seq(&self) -> HvResult<u64> {
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
-        Ok(g.space_mut().commit_seq())
+        Ok(g.with_space_mut(|s| s.commit_seq()))
     }
 
     /// Recoverable commit-anchor history — every Superblock seq still
     /// on disk that AEAD-decrypts under this space's key.
     pub fn commit_history(&self) -> HvResult<Vec<u64>> {
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
-        Ok(g.space_mut().commit_history().to_vec())
+        Ok(g.with_space_mut(|s| s.commit_history().to_vec()))
     }
 
     /// Override the post-commit padding policy on the open handle.
@@ -659,7 +697,7 @@ impl SpaceHandle {
     /// [`hidden_volume::Error::ReadOnly`].
     pub fn set_padding_policy(&self, preset: PaddingPreset) -> HvResult<()> {
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
-        g.space_mut().set_padding_policy(preset.to_policy())?;
+        g.with_space_mut(|s| s.set_padding_policy(preset.to_policy()))?;
         Ok(())
     }
 
@@ -667,7 +705,7 @@ impl SpaceHandle {
     /// Returns the namespace bytes in ascending order.
     pub fn list_namespaces(&self) -> HvResult<Vec<u8>> {
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
-        let v = g.space_mut().list_namespaces()?;
+        let v = g.with_space_mut(|s| s.list_namespaces())?;
         Ok(v.into_iter().map(|n| n.as_u8()).collect())
     }
 
@@ -675,7 +713,7 @@ impl SpaceHandle {
     pub fn count(&self, namespace: u8) -> HvResult<u64> {
         check_namespace(namespace)?;
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
-        let n = g.space_mut().count(Namespace(namespace))?;
+        let n = g.with_space_mut(|s| s.count(Namespace(namespace)))?;
         Ok(n as u64)
     }
 
@@ -683,14 +721,14 @@ impl SpaceHandle {
     pub fn get(&self, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
         check_namespace(namespace)?;
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
-        Ok(g.space_mut().get(Namespace(namespace), &key)?)
+        Ok(g.with_space_mut(|s| s.get(Namespace(namespace), &key))?)
     }
 
     /// Read one log entry by `log_id`. Returns `None` if not found.
     pub fn read_log(&self, namespace: u8, log_id: u64) -> HvResult<Option<Vec<u8>>> {
         check_namespace(namespace)?;
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
-        Ok(g.space_mut().read_log(Namespace(namespace), log_id)?)
+        Ok(g.with_space_mut(|s| s.read_log(Namespace(namespace), log_id))?)
     }
 
     /// Half-open range query over a log namespace.
@@ -705,9 +743,9 @@ impl SpaceHandle {
     ) -> HvResult<Vec<LogEntry>> {
         check_namespace(namespace)?;
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
-        let v = g
-            .space_mut()
-            .iter_log_range(Namespace(namespace), start, end, limit as usize)?;
+        let v = g.with_space_mut(|s| {
+            s.iter_log_range(Namespace(namespace), start, end, limit as usize)
+        })?;
         Ok(v.into_iter()
             .map(|(log_id, payload)| LogEntry { log_id, payload })
             .collect())
@@ -718,33 +756,34 @@ impl SpaceHandle {
     /// emitted; returns the current `commit_seq` unchanged.
     pub fn commit(&self, ops: Vec<WriteOp>) -> HvResult<u64> {
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
-        if ops.is_empty() {
-            return Ok(g.space_mut().commit_seq());
-        }
-        let mut tx = g.space_mut().begin_tx();
-        for op in ops {
-            match op {
-                WriteOp::Put {
-                    namespace,
-                    key,
-                    value,
-                } => {
-                    tx.put(Namespace(namespace), &key, &value)?;
-                },
-                WriteOp::Delete { namespace, key } => {
-                    tx.delete(Namespace(namespace), &key)?;
-                },
-                WriteOp::AppendLog {
-                    namespace,
-                    log_id,
-                    payload,
-                } => {
-                    tx.append_log(Namespace(namespace), log_id, &payload)?;
-                },
+        g.with_space_mut(|s| -> HvResult<u64> {
+            if ops.is_empty() {
+                return Ok(s.commit_seq());
             }
-        }
-        let seq = tx.commit()?;
-        Ok(seq)
+            let mut tx = s.begin_tx();
+            for op in ops {
+                match op {
+                    WriteOp::Put {
+                        namespace,
+                        key,
+                        value,
+                    } => {
+                        tx.put(Namespace(namespace), &key, &value)?;
+                    },
+                    WriteOp::Delete { namespace, key } => {
+                        tx.delete(Namespace(namespace), &key)?;
+                    },
+                    WriteOp::AppendLog {
+                        namespace,
+                        log_id,
+                        payload,
+                    } => {
+                        tx.append_log(Namespace(namespace), log_id, &payload)?;
+                    },
+                }
+            }
+            Ok(tx.commit()?)
+        })
     }
 
     /// Aggregated per-space stats — same shape as the `hv dump-stats`
@@ -752,7 +791,7 @@ impl SpaceHandle {
     /// would render.
     pub fn stats(&self) -> HvResult<StatsInfo> {
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
-        let s = g.space_mut().stats()?;
+        let s = g.with_space_mut(|sp| sp.stats())?;
         let total: usize = s.namespace_counts.iter().map(|(_, n)| *n).sum();
         Ok(StatsInfo {
             commit_seq: s.commit_seq,
@@ -775,7 +814,7 @@ impl SpaceHandle {
     /// Errors with [`HvError::IntegrityFailure`] on hash mismatch.
     pub fn verify_integrity(&self) -> HvResult<IntegrityResult> {
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
-        let r = g.space_mut().verify_integrity()?;
+        let r = g.with_space_mut(|s| s.verify_integrity())?;
         Ok(IntegrityResult {
             namespaces_verified: r.namespaces_verified as u64,
             chunks_verified: r.chunks_verified as u64,
@@ -802,7 +841,7 @@ impl SpaceHandle {
     /// policy for "always-on" forward-secrecy of edited messages.
     pub fn vacuum_data_batches(&self) -> HvResult<u64> {
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
-        let n = g.space_mut().vacuum_data_batches()?;
+        let n = g.with_space_mut(|s| s.vacuum_data_batches())?;
         Ok(n as u64)
     }
 
@@ -825,7 +864,7 @@ impl SpaceHandle {
     pub fn erase_namespace(&self, namespace: u8) -> HvResult<u64> {
         check_namespace(namespace)?;
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
-        let n = g.space_mut().erase_namespace(Namespace(namespace))?;
+        let n = g.with_space_mut(|s| s.erase_namespace(Namespace(namespace)))?;
         Ok(n as u64)
     }
 }
@@ -949,7 +988,7 @@ impl AsyncSpaceHandle {
         let inner = self.inner.clone();
         run_blocking(move || -> HvResult<u64> {
             let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
-            Ok(g.space_mut().commit_seq())
+            Ok(g.with_space_mut(|s| s.commit_seq()))
         })
         .await
     }
@@ -959,7 +998,7 @@ impl AsyncSpaceHandle {
         let inner = self.inner.clone();
         run_blocking(move || -> HvResult<Vec<u64>> {
             let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
-            Ok(g.space_mut().commit_history().to_vec())
+            Ok(g.with_space_mut(|s| s.commit_history().to_vec()))
         })
         .await
     }
@@ -971,7 +1010,7 @@ impl AsyncSpaceHandle {
         let inner = self.inner.clone();
         run_blocking(move || -> HvResult<()> {
             let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
-            g.space_mut().set_padding_policy(preset.to_policy())?;
+            g.with_space_mut(|s| s.set_padding_policy(preset.to_policy()))?;
             Ok(())
         })
         .await
@@ -982,7 +1021,7 @@ impl AsyncSpaceHandle {
         let inner = self.inner.clone();
         run_blocking(move || -> HvResult<Vec<u8>> {
             let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
-            let v = g.space_mut().list_namespaces()?;
+            let v = g.with_space_mut(|s| s.list_namespaces())?;
             Ok(v.into_iter().map(|n| n.as_u8()).collect())
         })
         .await
@@ -994,7 +1033,7 @@ impl AsyncSpaceHandle {
         let inner = self.inner.clone();
         run_blocking(move || -> HvResult<u64> {
             let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
-            let n = g.space_mut().count(Namespace(namespace))?;
+            let n = g.with_space_mut(|s| s.count(Namespace(namespace)))?;
             Ok(n as u64)
         })
         .await
@@ -1006,7 +1045,7 @@ impl AsyncSpaceHandle {
         let inner = self.inner.clone();
         run_blocking(move || -> HvResult<Option<Vec<u8>>> {
             let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
-            Ok(g.space_mut().get(Namespace(namespace), &key)?)
+            Ok(g.with_space_mut(|s| s.get(Namespace(namespace), &key))?)
         })
         .await
     }
@@ -1017,7 +1056,7 @@ impl AsyncSpaceHandle {
         let inner = self.inner.clone();
         run_blocking(move || -> HvResult<Option<Vec<u8>>> {
             let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
-            Ok(g.space_mut().read_log(Namespace(namespace), log_id)?)
+            Ok(g.with_space_mut(|s| s.read_log(Namespace(namespace), log_id))?)
         })
         .await
     }
@@ -1034,9 +1073,9 @@ impl AsyncSpaceHandle {
         let inner = self.inner.clone();
         run_blocking(move || -> HvResult<Vec<LogEntry>> {
             let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
-            let v =
-                g.space_mut()
-                    .iter_log_range(Namespace(namespace), start, end, limit as usize)?;
+            let v = g.with_space_mut(|s| {
+                s.iter_log_range(Namespace(namespace), start, end, limit as usize)
+            })?;
             Ok(v.into_iter()
                 .map(|(log_id, payload)| LogEntry { log_id, payload })
                 .collect())
@@ -1050,32 +1089,34 @@ impl AsyncSpaceHandle {
         let inner = self.inner.clone();
         run_blocking(move || -> HvResult<u64> {
             let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
-            if ops.is_empty() {
-                return Ok(g.space_mut().commit_seq());
-            }
-            let mut tx = g.space_mut().begin_tx();
-            for op in ops {
-                match op {
-                    WriteOp::Put {
-                        namespace,
-                        key,
-                        value,
-                    } => {
-                        tx.put(Namespace(namespace), &key, &value)?;
-                    },
-                    WriteOp::Delete { namespace, key } => {
-                        tx.delete(Namespace(namespace), &key)?;
-                    },
-                    WriteOp::AppendLog {
-                        namespace,
-                        log_id,
-                        payload,
-                    } => {
-                        tx.append_log(Namespace(namespace), log_id, &payload)?;
-                    },
+            g.with_space_mut(|s| -> HvResult<u64> {
+                if ops.is_empty() {
+                    return Ok(s.commit_seq());
                 }
-            }
-            Ok(tx.commit()?)
+                let mut tx = s.begin_tx();
+                for op in ops {
+                    match op {
+                        WriteOp::Put {
+                            namespace,
+                            key,
+                            value,
+                        } => {
+                            tx.put(Namespace(namespace), &key, &value)?;
+                        },
+                        WriteOp::Delete { namespace, key } => {
+                            tx.delete(Namespace(namespace), &key)?;
+                        },
+                        WriteOp::AppendLog {
+                            namespace,
+                            log_id,
+                            payload,
+                        } => {
+                            tx.append_log(Namespace(namespace), log_id, &payload)?;
+                        },
+                    }
+                }
+                Ok(tx.commit()?)
+            })
         })
         .await
     }
@@ -1085,7 +1126,7 @@ impl AsyncSpaceHandle {
         let inner = self.inner.clone();
         run_blocking(move || -> HvResult<StatsInfo> {
             let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
-            let s = g.space_mut().stats()?;
+            let s = g.with_space_mut(|sp| sp.stats())?;
             let total: usize = s.namespace_counts.iter().map(|(_, n)| *n).sum();
             Ok(StatsInfo {
                 commit_seq: s.commit_seq,
@@ -1111,7 +1152,7 @@ impl AsyncSpaceHandle {
         let inner = self.inner.clone();
         run_blocking(move || -> HvResult<IntegrityResult> {
             let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
-            let r = g.space_mut().verify_integrity()?;
+            let r = g.with_space_mut(|s| s.verify_integrity())?;
             Ok(IntegrityResult {
                 namespaces_verified: r.namespaces_verified as u64,
                 chunks_verified: r.chunks_verified as u64,
@@ -1128,7 +1169,7 @@ impl AsyncSpaceHandle {
         let inner = self.inner.clone();
         run_blocking(move || -> HvResult<u64> {
             let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
-            let n = g.space_mut().vacuum_data_batches()?;
+            let n = g.with_space_mut(|s| s.vacuum_data_batches())?;
             Ok(n as u64)
         })
         .await
@@ -1141,7 +1182,7 @@ impl AsyncSpaceHandle {
         let inner = self.inner.clone();
         run_blocking(move || -> HvResult<u64> {
             let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
-            let n = g.space_mut().erase_namespace(Namespace(namespace))?;
+            let n = g.with_space_mut(|s| s.erase_namespace(Namespace(namespace)))?;
             Ok(n as u64)
         })
         .await
@@ -1166,7 +1207,12 @@ where
             HvError::Internal("AsyncSpaceHandle blocking task panicked".into())
         },
         hidden_volume_rt::BlockingFailure::Cancelled => {
-            HvError::Internal("AsyncSpaceHandle blocking task cancelled".into())
+            // The blocking task was dropped before completing — e.g.
+            // the host tore down its Tokio runtime mid-call. This is
+            // a cancellation, not a crate bug, so surface the typed
+            // `Cancelled` variant rather than `Internal` (audit pass
+            // 20).
+            HvError::Cancelled
         },
     })
     .await
@@ -1512,6 +1558,45 @@ mod tests {
         super::compact_known(path.to_string_lossy().into_owned(), vec![b"pw".to_vec()]).unwrap();
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn container_too_large_maps_to_typed_variant() {
+        // Audit pass 20: a caller-actionable core variant must NOT
+        // collapse into the `Internal("unknown error variant")`
+        // catch-all — FFI hosts need the typed kind + the extra/cap
+        // diagnostic fields.
+        let core = hidden_volume::Error::ContainerTooLarge {
+            extra: 5,
+            cap: 16_000_000,
+        };
+        match HvError::from(core) {
+            HvError::ContainerTooLarge { extra, cap } => {
+                assert_eq!(extra, 5);
+                assert_eq!(cap, 16_000_000);
+            },
+            other => panic!("expected typed ContainerTooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn password_rotation_debug_is_redacted() {
+        // Audit pass 20 (mirrors pass-17 F-2 no-Clone rationale): a
+        // `{:?}` of a rotation must not print either password.
+        let r = PasswordRotation {
+            old: b"super-secret-old".to_vec(),
+            new: b"super-secret-new".to_vec(),
+        };
+        let dbg = format!("{r:?}");
+        assert!(
+            !dbg.contains("super-secret-old"),
+            "old password leaked: {dbg}"
+        );
+        assert!(
+            !dbg.contains("super-secret-new"),
+            "new password leaked: {dbg}"
+        );
+        assert!(dbg.contains("redacted"), "expected redaction marker: {dbg}");
     }
 
     // ---------- Async FFI surface tests ----------

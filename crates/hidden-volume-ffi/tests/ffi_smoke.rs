@@ -1,7 +1,7 @@
 //! FFI surface smoke-test for the host-target cdylib.
 //!
 //! Builds (implicitly, via `cargo test`) the cdylib for the test
-//! host, dlopens it via `libloading`, and probes the uniffi 0.28 C
+//! host, dlopens it via `libloading`, and probes the uniffi 0.31 C
 //! ABI surface that downstream language bindings (Kotlin, Swift,
 //! Python, Dart) depend on. Catches FFI-surface drift between
 //! `#[uniffi::*]` annotations and the generated symbol set without
@@ -87,7 +87,7 @@ fn cdylib_loads_and_uniffi_contract_version_symbol_resolves() {
     let lib = unsafe { libloading::Library::new(&path) }
         .unwrap_or_else(|e| panic!("failed to dlopen {}: {e}", path.display()));
 
-    // The uniffi 0.28 contract-version probe is a `() -> u32` C symbol
+    // The uniffi 0.31 contract-version probe is a `() -> u32` C symbol
     // every cdylib generated from uniffi proc-macros must export. If
     // it's missing, no foreign-language binding will work.
     let _: libloading::Symbol<unsafe extern "C" fn() -> u32> = unsafe {

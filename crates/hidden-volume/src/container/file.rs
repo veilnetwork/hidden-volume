@@ -341,9 +341,15 @@ impl ContainerFile {
     }
 
     /// Read the chunk at slot `i`.
+    ///
+    /// An out-of-range `i` is reported as [`Error::Malformed`], not
+    /// [`Error::Internal`]: this method is reached with slot pointers
+    /// that were decrypted out of a chunk payload (commit roots,
+    /// child pointers, log batch pointers), so a forged or corrupt
+    /// pointer is input-driven, not a crate bug (audit pass 20).
     pub fn read_slot(&mut self, i: u64) -> Result<[u8; CHUNK_SIZE]> {
         if i >= self.slot_count {
-            return Err(Error::Internal("slot index out of range"));
+            return Err(Error::Malformed("slot pointer out of range"));
         }
         let offset = FIRST_SLOT_OFFSET + i * CHUNK_SIZE as u64;
         let mut buf = [0u8; CHUNK_SIZE];
@@ -366,7 +372,7 @@ impl ContainerFile {
     pub fn read_slot_concurrent(&self, i: u64) -> Result<[u8; CHUNK_SIZE]> {
         use std::os::unix::fs::FileExt;
         if i >= self.slot_count {
-            return Err(Error::Internal("slot index out of range"));
+            return Err(Error::Malformed("slot pointer out of range"));
         }
         let offset = FIRST_SLOT_OFFSET + i * CHUNK_SIZE as u64;
         let mut buf = [0u8; CHUNK_SIZE];

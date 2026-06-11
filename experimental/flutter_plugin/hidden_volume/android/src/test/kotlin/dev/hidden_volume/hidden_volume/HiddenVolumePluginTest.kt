@@ -1,27 +1,38 @@
 package dev.hidden_volume.hidden_volume
 
-import io.flutter.plugin.common.MethodCall
-import io.flutter.plugin.common.MethodChannel
+import io.flutter.embedding.engine.plugins.FlutterPlugin
 import org.mockito.Mockito
 import kotlin.test.Test
+import kotlin.test.assertTrue
 
 /*
- * This demonstrates a simple unit test of the Kotlin portion of this plugin's implementation.
+ * Smoke test for the Kotlin plugin shell.
  *
- * Once you have built the plugin's example app, you can run these tests from the command
- * line by running `./gradlew testDebugUnitTest` in the `example/android/` directory, or
- * you can run them directly from IDEs that support JUnit such as Android Studio.
+ * `HiddenVolumePlugin` is a deliberate no-op: the Dart layer talks to
+ * the Rust cdylib directly via `dart:ffi` (`lib/src/bindings.dart`),
+ * so there is no MethodChannel handler to exercise. The old
+ * `getPlatformVersion` MethodChannel ping was removed in the
+ * 2026-05-10 audit cleanup. These tests therefore only assert that the
+ * plugin instantiates and attaches/detaches without throwing.
+ *
+ * Run from the command line via `./gradlew testDebugUnitTest` in the
+ * `example/android/` directory, or directly from a JUnit-aware IDE.
  */
 
 internal class HiddenVolumePluginTest {
     @Test
-    fun onMethodCall_getPlatformVersion_returnsExpectedValue() {
+    fun instantiates_asFlutterPlugin() {
         val plugin = HiddenVolumePlugin()
+        assertTrue(plugin is FlutterPlugin)
+    }
 
-        val call = MethodCall("getPlatformVersion", null)
-        val mockResult: MethodChannel.Result = Mockito.mock(MethodChannel.Result::class.java)
-        plugin.onMethodCall(call, mockResult)
+    @Test
+    fun attachAndDetach_areNoOp() {
+        val plugin = HiddenVolumePlugin()
+        val binding = Mockito.mock(FlutterPlugin.FlutterPluginBinding::class.java)
 
-        Mockito.verify(mockResult).success("Android " + android.os.Build.VERSION.RELEASE)
+        // No-op shell: neither call touches the binding or throws.
+        plugin.onAttachedToEngine(binding)
+        plugin.onDetachedFromEngine(binding)
     }
 }

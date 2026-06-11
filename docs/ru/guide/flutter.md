@@ -8,17 +8,17 @@
 
 | Слой | Статус | Примечания |
 |---|---|---|
-| Rust core (`hidden-volume`) | ✅ Стабильно | 397 тестов по всему workspace; pre-1.0 формат v3 (cluster #8 kind-tags + #9 version-bind + #10 per-space `container_id`, 2026-05-28) |
+| Rust core (`hidden-volume`) | ✅ Стабильно | 397 тестов по всему workspace; замороженный в v1.0.0 формат v3 (cluster #8 kind-tags + #9 version-bind + #10 per-space `container_id`, 2026-05-28) |
 | FFI-поверхность (`hidden-volume-ffi`) | ✅ Стабильно | sync + async (Tokio), uniffi 0.31 proc-macros, password-буферы обёрнуты в `Zeroizing` (audit pass 16 + 17) |
 | Автогенерируемые Kotlin / Swift биндинги | ✅ Генерируются | [`bindings/kotlin/`](../../../bindings/kotlin/), [`bindings/swift/`](../../../bindings/swift/) — gitignored, регенерируются локально |
-| **Flutter plugin scaffolding** | 🟡 Экспериментально, интеграция начата | [`experimental/flutter_plugin/hidden_volume/`](../../../experimental/flutter_plugin/hidden_volume/) — `pubspec.yaml`, Android `build.gradle` + Kotlin glue, iOS `.podspec` + Swift glue, Dart-фасад. Реальная Flutter-интеграция началась 2026-05-09; живёт под [`experimental/`](../../../experimental/README.md) и выходит из `experimental/` когда typed Dart API заменит `UnimplementedError`-заглушки. |
+| **Flutter plugin scaffolding** | ✅ Реализовано | [`experimental/flutter_plugin/hidden_volume/`](../../../experimental/flutter_plugin/hidden_volume/) — `pubspec.yaml`, Android `build.gradle` + Kotlin glue, iOS `.podspec` + Swift glue, typed Dart-фасад. Живёт под [`experimental/`](../../../experimental/README.md) в ожидании packaging нативных артефактов на всех целевых ABI. |
 | **Build-скрипты** | ✅ Доступно | [`scripts/build-android.sh`](../../../scripts/build-android.sh) (cargo-ndk, все 4 ABI), [`scripts/build-ios.sh`](../../../scripts/build-ios.sh) (xcframework, требует macOS) |
 | **CI сборка нативных артефактов** | ✅ Доступно | [`.github/workflows/flutter-build.yml`](../../../.github/workflows/flutter-build.yml) — `.so` × 4 ABI на Ubuntu + `xcframework` на macOS-14 |
-| **Dart/Flutter typed API** | 🟡 Реализация в процессе (2026-05-09) | [`lib/hidden_volume.dart`](../../../experimental/flutter_plugin/hidden_volume/lib/hidden_volume.dart) — раньше были обёртки, бросавшие `UnimplementedError`; сейчас заполняются (путь uniffi-dart 0.4 либо hand-written `dart:ffi` в [`lib/src/bindings.dart`](../../../experimental/flutter_plugin/hidden_volume/lib/src/bindings.dart)). Прогресс отслеживается в `experimental/flutter_plugin/`. |
-| Пример Flutter-приложения | 🟡 Скоро | Flutter SDK устанавливается; пример под `examples/flutter_demo/` появится после wiring typed API. |
+| **Dart/Flutter typed API** | ✅ Реализовано | [`lib/hidden_volume.dart`](../../../experimental/flutter_plugin/hidden_volume/lib/hidden_volume.dart) — hand-written `dart:ffi` typed API (~1116 + 518 строк, 18 тестов); `UnimplementedError`-заглушек больше нет. Bindings-glue в [`lib/src/bindings.dart`](../../../experimental/flutter_plugin/hidden_volume/lib/src/bindings.dart). |
+| Пример Flutter-приложения | ✅ Присутствует | [`experimental/flutter_plugin/hidden_volume/example/`](../../../experimental/flutter_plugin/hidden_volume/example/). |
 
-Все части *существуют*; запуск на устройстве требует host-setup'а
-по гайду ниже.
+Flutter-плагин полностью реализован; запуск на устройстве требует
+сборки нативных артефактов / host-setup'а по гайду ниже.
 
 ## Quick start
 
@@ -196,7 +196,8 @@ cdylib (`cargo build -p hidden-volume-ffi --release --features parallel-scan`).
 | Desktop Linux/macOS/Windows | `ArgonPreset.HEAVY` | ~250 мс |
 
 Выберите во время `create` — пресет запекается в заголовок
-контейнера. Миграция на более сильный пресет позже требует `repack`
+контейнера. Миграция на более сильный пресет позже делается через
+no-op ротацию `change_passwords` с новыми параметрами Argon2
 (см. [`operations.md`](operations.md) §3).
 
 ## Резервное копирование / восстановление на мобильных устройствах

@@ -150,3 +150,51 @@ fn v3_format_version_changes_master_key() {
     assert_ne!(m_v3.as_slice(), m_v2.as_slice());
     assert_ne!(m_v4.as_slice(), m_v2.as_slice());
 }
+
+/// **Known-answer test for the frozen v3 key schedule (audit pass
+/// 20).** The other tests in this file assert only *inequality* and
+/// *determinism* — they do NOT pin the actual derived bytes, so a
+/// refactor that silently changed `SUBKEY_KIND_TAG`, a context label
+/// (`b"hv/v3/master"` / `b"hv/v3/container_id"` / `b"hv/v3/aead_root"`),
+/// the LE encoding of `version`, or the keyed-vs-plain BLAKE3 mode
+/// would pass the whole suite while bricking every existing
+/// container. These vectors are the cryptographic identity of the
+/// on-disk format: if this test fails, the format generation changed
+/// and `PARAMS_VERSION` + `docs/en/reference/format.md` §3 must be
+/// bumped in lockstep.
+///
+/// Vectors computed for `password = b"correct horse battery"`,
+/// `salt = [0x42; 32]`, `Argon2Params::MIN`, chunk slot `7`.
+#[test]
+fn key_schedule_known_answer_vectors() {
+    fn hx(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+    let salt = [0x42u8; 32];
+    let master = derive_master_key(b"correct horse battery", &salt, Argon2Params::MIN).unwrap();
+    assert_eq!(
+        hx(master.as_slice()),
+        "c8decb4316df3e70dbde49c1a99eaac8e8a09f7e27d48ca80c5c8fa4bba5d6cc",
+        "versioned master key (Argon2id then BLAKE3 version-bind) changed"
+    );
+
+    let keys = SpaceKeys::from_master(&master);
+    assert_eq!(
+        hx(&keys.container_id),
+        "034027afe248c487ddda3dcbbed2ccb828f0cf81cd8e953dccd792a49dbe58d0",
+        "derived container_id changed (subkey label or kind-tag drift)"
+    );
+    assert_eq!(
+        hx(&keys.aead_root),
+        "c7ba089558df688671fb0dc8f5248440e42e44cfdddfe8a3ce6500ff271dec36",
+        "derived aead_root changed (subkey label or kind-tag drift)"
+    );
+
+    let chunk =
+        hidden_volume::crypto::derive::derive_chunk_key(&keys.aead_root, &keys.container_id, 7);
+    assert_eq!(
+        hx(chunk.as_slice()),
+        "0c215b2cb92e87c069004828d23f1fa7f88de5b6cfb7a171766c045533db82b9",
+        "per-slot chunk key changed (CHUNK_KEY_KIND_TAG or input layout drift)"
+    );
+}

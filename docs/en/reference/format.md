@@ -63,9 +63,13 @@ This closes the D1-A2 fingerprint signature flagged in
 
 - The file MUST be at least `CHUNK_SIZE` bytes (i.e. the header is
   always present).
-- The file size MUST be a multiple of `CHUNK_SIZE`. A file with a
-  non-aligned tail is rejected (`Error::Malformed`) — the library
-  refuses to open ambiguous truncated files.
+- The chunk grid is derived as `N = (file_size / CHUNK_SIZE) - 1`,
+  rounding down. A non-`CHUNK_SIZE`-aligned trailing tail is
+  **tolerated, not rejected**: the partial tail bytes are ignored
+  (treated as reclaimable free space) and the container opens
+  normally. This is a deliberate crash-robustness property — an
+  interrupted append that left a half-written final chunk must not
+  brick the container. See the `fault_injection` tests.
 - All bytes outside the cleartext header (offset 0..48) MUST be
   statistically indistinguishable from uniform random for an
   observer without any password.
@@ -294,7 +298,7 @@ A B+ tree node. Two variants:
 #### 4.2.1 Leaf
 
 ```
-offset 0       node_kind   u8 (0x01 = Leaf)
+offset 0       node_kind   u8 (0x00 = Leaf)
 offset 1       namespace   u8
 offset 2..4    entry_count u16 LE
 for i in 0..entry_count:
@@ -314,7 +318,7 @@ Constraints:
 #### 4.2.2 Internal
 
 ```
-offset 0       node_kind   u8 (0x02 = Internal)
+offset 0       node_kind   u8 (0x01 = Internal)
 offset 1       namespace   u8
 offset 2..4    child_count u16 LE
 for i in 0..child_count:
@@ -330,8 +334,8 @@ Constraints:
 - `first_key`s MUST be strictly ascending.
 - Total encoded size ≤ `PAYLOAD_CAP`.
 
-The Internal-vs-Leaf discriminator is the first byte (`0x01` /
-`0x02`); other values: `Error::Malformed`.
+The Leaf-vs-Internal discriminator is the first byte (`0x00` =
+Leaf / `0x01` = Internal); other values: `Error::Malformed`.
 
 ### 4.3 CommitPayload (`kind = 0x05`) — v3 layout
 

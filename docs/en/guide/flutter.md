@@ -8,17 +8,17 @@ How to embed `hidden-volume` storage in a Flutter messenger app.
 
 | Layer | Status | Notes |
 |---|---|---|
-| Rust core (`hidden-volume`) | ✅ Stable | 397 tests across the workspace; pre-1.0 format v3 (cluster #8 kind-tags + #9 version-bind + #10 per-space `container_id`, 2026-05-28) |
+| Rust core (`hidden-volume`) | ✅ Stable | 397 tests across the workspace; v1.0.0-frozen format v3 (cluster #8 kind-tags + #9 version-bind + #10 per-space `container_id`, 2026-05-28) |
 | FFI surface (`hidden-volume-ffi`) | ✅ Stable | sync + async (Tokio), uniffi 0.31 proc-macros, password buffers wrapped in `Zeroizing` (audit pass 16 + 17) |
 | Auto-generated Kotlin / Swift bindings | ✅ Generated | [`bindings/kotlin/`](../../../bindings/kotlin/), [`bindings/swift/`](../../../bindings/swift/) — gitignored, regenerate locally |
-| **Flutter plugin scaffolding** | 🟡 Experimental, integration in progress | [`experimental/flutter_plugin/hidden_volume/`](../../../experimental/flutter_plugin/hidden_volume/) — `pubspec.yaml`, Android `build.gradle` + Kotlin glue, iOS `.podspec` + Swift glue, Dart facade. Real Flutter integration work began 2026-05-09; lives under [`experimental/`](../../../experimental/README.md) and graduates out of `experimental/` once the Dart-side typed API replaces the `UnimplementedError` stubs. |
+| **Flutter plugin scaffolding** | ✅ Implemented | [`experimental/flutter_plugin/hidden_volume/`](../../../experimental/flutter_plugin/hidden_volume/) — `pubspec.yaml`, Android `build.gradle` + Kotlin glue, iOS `.podspec` + Swift glue, typed Dart facade. Lives under [`experimental/`](../../../experimental/README.md) pending native-artifact packaging on all target ABIs. |
 | **Build scripts** | ✅ Shipped | [`scripts/build-android.sh`](../../../scripts/build-android.sh) (cargo-ndk, all 4 ABIs), [`scripts/build-ios.sh`](../../../scripts/build-ios.sh) (xcframework, requires macOS) |
 | **CI native-artifact build** | ✅ Shipped | [`.github/workflows/flutter-build.yml`](../../../.github/workflows/flutter-build.yml) — `.so` × 4 ABIs on Ubuntu + `xcframework` on macOS-14 |
-| **Dart/Flutter typed API** | 🟡 Implementation in progress (2026-05-09) | [`lib/hidden_volume.dart`](../../../experimental/flutter_plugin/hidden_volume/lib/hidden_volume.dart) — was `UnimplementedError`-throwing shells; being filled in (uniffi-dart 0.4 path or hand-written `dart:ffi` in [`lib/src/bindings.dart`](../../../experimental/flutter_plugin/hidden_volume/lib/src/bindings.dart)). Track progress in `experimental/flutter_plugin/`. |
-| Sample Flutter app | 🟡 Coming | Flutter SDK install in progress; sample under `examples/flutter_demo/` lands once typed API is wired. |
+| **Dart/Flutter typed API** | ✅ Implemented | [`lib/hidden_volume.dart`](../../../experimental/flutter_plugin/hidden_volume/lib/hidden_volume.dart) — hand-written `dart:ffi` typed API (~1116 + 518 lines, 18 tests); the `UnimplementedError` stubs are gone. Bindings glue in [`lib/src/bindings.dart`](../../../experimental/flutter_plugin/hidden_volume/lib/src/bindings.dart). |
+| Sample Flutter app | ✅ Present | [`experimental/flutter_plugin/hidden_volume/example/`](../../../experimental/flutter_plugin/hidden_volume/example/). |
 
-The pieces *exist*; running on-device requires the host setup
-documented below.
+The Flutter plugin is fully implemented; running on-device requires
+the native-artifact build / host setup documented below.
 
 ## Quick start
 
@@ -196,8 +196,9 @@ scaling curve.
 | Desktop Linux/macOS/Windows | `ArgonPreset.HEAVY` | ~250 ms |
 
 Pick at `create` time — the preset is baked into the container
-header. Migrating to a stronger preset later requires `repack`
-(see [`operations.md`](operations.md) §3).
+header. Migrating to a stronger preset later is done via a no-op
+`change_passwords` rotation with new Argon2 params (see
+[`operations.md`](operations.md) §3).
 
 ## Backup / restore on mobile
 

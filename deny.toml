@@ -86,7 +86,17 @@ deny = [
     { name = "openssl-sys" },
     { name = "native-tls" },
 ]
-skip = []
+# Transitive duplicate versions we cannot dedupe ourselves — they are
+# pulled in at conflicting versions by upstream crates and will collapse
+# once those crates align on a single version. Tracked for removal on
+# each dependency bump.
+skip = [
+    { name = "cpufeatures" },    # transitive duplicate pending upstream alignment
+    { name = "getrandom" },      # transitive duplicate pending upstream alignment
+    { name = "thiserror" },      # transitive duplicate pending upstream alignment
+    { name = "thiserror-impl" }, # proc-macro companion of thiserror; same dup
+    { name = "winnow" },         # transitive duplicate pending upstream alignment
+]
 skip-tree = []
 
 # ---------------------------------------------------------------- Sources.

@@ -10,9 +10,9 @@ Pod::Spec.new do |s|
   s.description      = <<-DESC
     Deniable multi-space encrypted append-only container — local
     storage primitive for decentralized messengers. iOS surface is the
-    Swift binding (uniffi 0.28) wrapped over a vendored xcframework.
+    Swift binding (uniffi 0.31) wrapped over a vendored xcframework.
   DESC
-  s.homepage         = 'https://github.com/example/hidden-volume'
+  s.homepage         = 'https://github.com/veilnetwork/hidden-volume'
   s.license          = { :file => '../../../LICENSE-MIT' }
   s.author           = { 'hidden-volume authors' => 'noreply@example.com' }
   s.source           = { :path => '.' }

@@ -4,7 +4,12 @@ description: >
   multi-space encrypted append-only container, suitable as the local
   storage layer of a decentralized messenger.
 version: 0.0.1
-homepage: https://github.com/example/hidden-volume
+homepage: https://github.com/veilnetwork/hidden-volume
+repository: https://github.com/veilnetwork/hidden-volume
+
+# Experimental plugin — never published to pub.dev. Guards against an
+# accidental `flutter pub publish`.
+publish_to: none
 
 environment:
   sdk: '>=3.0.0 <4.0.0'

@@ -31,8 +31,11 @@ import traceback
 # Make the bindings module importable from this script's directory.
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-# Ensure the cdylib next to the bindings is found by ctypes.
-os.environ["LD_LIBRARY_PATH"] = HERE + os.pathsep + os.environ.get("LD_LIBRARY_PATH", "")
+# NOTE: setting os.environ["LD_LIBRARY_PATH"] here would be a no-op —
+# glibc snapshots LD_LIBRARY_PATH at process start, so mutating it
+# in-process does not affect later dlopen(). The uniffi-generated
+# bindings load the cdylib by absolute path anyway, so no env wiring
+# is needed.
 
 import hidden_volume_ffi as hv  # noqa: E402
 

@@ -25,8 +25,8 @@ impl<'f> Space<'f> {
     ///
     /// Does NOT scrub:
     /// - DataBatch chunks (a single batch may still contain live entries
-    ///   referenced by other log_ids; v0.3 compaction handles batch
-    ///   repacking with proper scrub).
+    ///   referenced by other log_ids; [`Space::vacuum_data_batches`] and
+    ///   `Container::repack` handle batch repacking with proper scrub).
     /// - Superblock or Commit chunks of prior commits (kept as
     ///   crash-recovery fallbacks).
     ///

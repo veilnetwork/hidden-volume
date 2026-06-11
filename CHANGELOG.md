@@ -12,6 +12,89 @@ format.
 
 ## [Unreleased]
 
+### Security — audit pass 20
+
+- **`hidden-volume-rt::OwnedSpace::space_mut` was unsound** and is
+  replaced by a higher-ranked closure accessor `with_space_mut`. The
+  old signature `&'a mut self -> &'a mut Space<'a>` let region
+  inference unify the inner lifetime across two `OwnedSpace` values,
+  so `mem::swap(a.space_mut(), b.space_mut())` could exchange the two
+  `Space`s between containers in 100% safe code — dropping one then
+  freed the `Box<Container>` the other borrowed (use-after-free). The
+  `for<'a> FnOnce(&mut Space<'a>) -> R` bound makes the borrow
+  un-nameable and unswappable. The async/FFI wrappers (the only
+  shipped consumers) were never reachable for the swap, but
+  `hidden-volume-rt` is a published `1.0.0` crate with a public API.
+  *Breaking* for any direct `hidden-volume-rt` consumer (an explicitly
+  internal crate).
+- **`derive_master_key` / `SpaceKeys` now have known-answer tests**
+  (`tests/v3_key_schedule.rs::key_schedule_known_answer_vectors`). The
+  v3 key schedule is the on-disk format's cryptographic identity, yet
+  no test pinned the actual derived bytes — a refactor of a kind-tag,
+  context label, or LE-encoding could silently brick every container
+  while passing the suite. The bytes are unchanged; the format stays
+  `format_version = 3`.
+
+### Fixed — audit pass 20
+
+- **FFI dropped `Error::ContainerTooLarge` into `Internal("unknown
+  error variant")`.** Added `HvError::ContainerTooLarge { extra, cap }`
+  + an explicit `From` arm + the Dart `_hvErrorKinds` entry. The
+  write-side budget error is caller-actionable (shrink
+  `initial_garbage_chunks` / pick a lighter padding policy) and now
+  surfaces as a typed variant instead of "internal bug". *Additive*
+  to the `#[non_exhaustive]` `HvError`.
+- **`Space::get` accepted a Leaf one level deeper than every other
+  walker.** The `MAX_TREE_DEPTH` check sat inside the `Internal` arm,
+  so a forged tree presenting a `Leaf` at depth 4 returned a value
+  while `list` / `count` / `iter_log_*` / `verify` rejected it. Moved
+  the check to loop entry, restoring the documented "identical across
+  read paths" invariant.
+- **Log read paths (`iter_log_*`, `read_log`) relied on the
+  8-byte-key / DataBatch-pointer shape heuristic** instead of the
+  persisted `NamespaceKind` byte (R-NSKIND parity gap — vacuum/repack
+  were already kind-driven). A KV namespace holding 8-byte keys *and*
+  values gave an unpredictable error taxonomy; it now returns a clean
+  `WrongNamespaceKind` before any leaf walk.
+- **A forged tree with overlapping leaf ranges could commit an
+  unsorted leaf** (per-node decode checks only intra-leaf order; the
+  release `LeafNode::encode` only `debug_assert`s global sortedness),
+  bricking the namespace on the next read. `flatten_tree` now rejects
+  a non-globally-sorted / duplicate-key flatten.
+- **Out-of-range slot pointers reported `Error::Internal`** (reserved
+  for crate bugs) instead of `Error::Malformed`; a decrypted-but-
+  corrupt or forged pointer is input-driven. `read_slot` /
+  `read_slot_concurrent` now return `Malformed`.
+- **`run_blocking` mapped runtime-shutdown cancellation to
+  `Internal`** despite `HvError::Cancelled` existing; now maps to
+  `Cancelled`.
+- **`open` retained every distinct-seq Superblock-kind payload
+  unbounded** — a key-holder could force tens of GiB of retention.
+  Candidates are now length-gated to `Superblock::ENCODED_LEN`
+  (behaviour-preserving; `decode` rejected the rest anyway).
+- **`PasswordRotation` derived `Debug`**, which would print both
+  passwords; replaced with a redacted manual impl (mirrors the
+  pass-17 no-`Clone` rationale).
+- **Flutter platform unit tests asserted the removed
+  `getPlatformVersion` MethodChannel handler** and would fail to
+  build against the no-op plugin shells; rewritten as registration
+  smoke tests.
+- **Doc-actualization**: `format.md` IndexNode discriminators
+  corrected to the real on-disk bytes (`0x00 = Leaf`, `0x01 =
+  Internal`; the doc said `0x01`/`0x02`) and the unaligned-tail
+  invariant corrected to "tolerated" (EN+RU); `operations.md` Argon2
+  migration recipe switched from a racy manual `repack`+`rename` to
+  the in-place `change_passwords` primitive, plus empty-password-list
+  data-loss-by-design and stale-temp-cleanup notes (EN+RU); stale
+  `uniffi 0.28` → `0.31`, Flutter "in progress" → "implemented",
+  branch-CI-intentionally-disabled, and repo-URL fixes across docs,
+  comments, and plugin metadata.
+- **`cargo deny` duplicate-dependency warnings** (`cpufeatures`,
+  `getrandom`, `thiserror`, `winnow`) documented in `deny.toml`;
+  `head -n -1` (unsupported on BSD/macOS) replaced with `sed '$d'`
+  in the build scripts; dead test helper + `LD_LIBRARY_PATH` placebo
+  removed.
+
 ### Fixed
 
 - **`fuzz-smoke` CI job was silently non-functional since v1.0.0.**

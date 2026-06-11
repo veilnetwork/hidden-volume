@@ -111,10 +111,12 @@ multi-handle использование.
 
 ### Self-referential реализация
 
-Внутренне `SpaceHandle` держит:
+Внутренне `SpaceHandle` держит `hidden_volume_rt::OwnedSpace` —
+общий self-referential helper (см. crate `hidden-volume-rt`),
+имеющий форму:
 
 ```rust
-struct SpaceInner {
+struct OwnedSpace {
     container: Box<Container>,           // stable address
     space: ManuallyDrop<Space<'static>>, // borrow with lifetime extended
 }
@@ -124,10 +126,10 @@ struct SpaceInner {
 живёт по своему текущему heap-адресу. Безопасность:
 
 1. `container` аллоцирован через `Box`; адрес стабилен в течение
-   жизни `SpaceInner`.
+   жизни `OwnedSpace`.
 2. После `transmute`-инга lifetime мы никогда не двигаем
    `container`.
-3. `Drop for SpaceInner` сначала дропает `space` (он заимствует у
+3. `Drop for OwnedSpace` сначала дропает `space` (он заимствует у
    `container`), потом `container`. Без `ManuallyDrop`
    автоматический порядок drop полей в Rust дропнул бы
    `container` первым — UB.
@@ -136,7 +138,8 @@ struct SpaceInner {
 и `ouroboros` существуют, чтобы абстрагировать его, но мы
 используем прямую форму, чтобы избежать лишней dependency ради
 ~30 строк кода. unsafe-блок задокументирован в
-`src/lib.rs:SpaceInner::new`.
+`hidden_volume_rt::OwnedSpace::new`; и FFI-, и async-обёртки его
+переиспользуют.
 
 ## Решение 4 — батчевый `commit(Vec<WriteOp>)` вместо per-op auto-commit
 
@@ -229,7 +232,7 @@ Storage-слой messenger сталкивается с двумя различн
 
 Поставка обоих позволяет каждому интегратору выбрать правильный
 инструмент. Две handle **разделяют один и тот же внутренний
-`SpaceInner`** (boxed Container + ManuallyDrop'ed Space за
+`hidden_volume_rt::OwnedSpace`** (boxed Container + ManuallyDrop'ed Space за
 Mutex) — дублируется только обвязка методов, не логика
 storage. Нет «async vs sync» runtime-разделения ни в формате,
 ни в sync-core; async-поверхность — чистый offload-wrapper,
@@ -358,8 +361,8 @@ Rust-сторона готова; что остаётся — это **platform 
 | **Android `.aar` / `.so` per ABI** | Нужен Android NDK; cargo-ndk + uniffi-bindgen-kotlin скрипты в CI. | Первый запрос Android-интегратора. |
 | **Linux/macOS/Windows desktop binaries** | Cross-compile через `cargo` тривиален, но потребителей пока нет. | Первый desktop messenger fork, желающий встроить. |
 | **CI matrix для всех целей** | Стоит CI-минут; пропускаем, пока binaries фактически не публикуются. | Тот же триггер, что для binary-задач выше. |
-| **Flutter sample app** | Нужен Dart-side генератор (`uniffi-dart` 0.4+, сейчас в beta). Реальная Flutter-интеграция только что началась (2026-05-09); скаффолд `experimental/flutter_plugin/` (см. [`experimental/`](../../../experimental/)) сейчас наполняется. | Прогресс отслеживается в `experimental/flutter_plugin/`; выходит из `experimental/` когда typed Dart API заменит `UnimplementedError`-заглушки. |
-| **`docs/ru/guide/flutter.md`** | Сейчас документирует экспериментальный скаффолд + uniffi-dart gate. Будет расширен по мере выхода Flutter-интеграции. | После выхода typed Dart API из `experimental/`. |
+| **Flutter typed Dart API** | **Реализован.** Hand-written `dart:ffi` typed API (~1116 + 518 строк, 18 тестов) живёт в [`experimental/flutter_plugin/hidden_volume/`](../../../experimental/flutter_plugin/); `UnimplementedError`-заглушек больше нет. Пока под `experimental/` в ожидании packaging нативных артефактов на всех целевых ABI. | — (готово) |
+| **`docs/ru/guide/flutter.md`** | Документирует реализованный плагин + quick-start рецепт. | — |
 
 Rust-side обвязка НЕ зависит ни от чего из этого — это чистая
 работа deployment / packaging. Интегратор, желающий получить
@@ -378,9 +381,9 @@ repo, потому что эволюционируют независимо от
 
 uniffi генерирует `Arc<SpaceHandle>` — несколько foreign-side
 ссылок разделяют один Rust-объект. Мы оборачиваем внутреннее
-состояние в `Mutex<SpaceInner>`, чтобы удовлетворить `Sync`.
-Конкурирующие FFI-вызовы из foreign-потоков сериализуются на
-lock.
+состояние в `Mutex<hidden_volume_rt::OwnedSpace>`, чтобы
+удовлетворить `Sync`. Конкурирующие FFI-вызовы из foreign-потоков
+сериализуются на lock.
 
 Это тот же шаблон, что у `AsyncContainer` в
 `hidden-volume-async`. Согласно дизайну sync-core, в каждый
@@ -397,8 +400,9 @@ ref-counted handles:
   обёрнутый в language-native ref-counted handle
   (`AutoCloseable` в Kotlin, ARC-managed класс в Swift).
 - Когда foreign-side handle сбрасывается до нуля refs, uniffi
-  вызывает Rust-овский `Drop`. Наш `Drop for SpaceInner`
-  отпускает `LOCK_EX` на нижележащем файле.
+  вызывает Rust-овский `Drop`. Наш
+  `Drop for hidden_volume_rt::OwnedSpace` отпускает `LOCK_EX` на
+  нижележащем файле.
 - Bytes (`Vec<u8>`) пересекают границу FFI **копированием** в
   обе стороны. Это единственный безопасный выбор — foreign-сторона
   может пережить любой одиночный Rust-вызов. Для типичных

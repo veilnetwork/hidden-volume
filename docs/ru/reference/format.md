@@ -66,8 +66,14 @@ D1-A2 fingerprint signature, указанный в
 
 - Файл ОБЯЗАН быть размером не менее `CHUNK_SIZE` байт (то есть
   header всегда присутствует).
-- Размер файла ОБЯЗАН быть кратным `CHUNK_SIZE`. Файл с
-  невыровненным хвостом отклоняется (`Error::Malformed`).
+- Сетка chunk'ов выводится как `N = (file_size / CHUNK_SIZE) - 1`
+  с округлением вниз. Невыровненный по `CHUNK_SIZE` хвост в конце
+  файла **допускается, а не отклоняется**: байты частичного хвоста
+  игнорируются (трактуются как переиспользуемое свободное место), и
+  container открывается нормально. Это намеренное свойство
+  устойчивости к сбоям — прерванный append, оставивший
+  недописанный последний chunk, не должен убивать container. См.
+  тесты `fault_injection`.
 - Все байты вне открытого header (offset 0..48) ОБЯЗАНЫ быть
   статистически неотличимы от равномерно случайных для наблюдателя
   без пароля.
@@ -298,7 +304,7 @@ offset 16..48  root_hash  32 bytes (Merkle root over Commit's roots)
 #### 4.2.1 Leaf
 
 ```
-offset 0       node_kind   u8 (0x01 = Leaf)
+offset 0       node_kind   u8 (0x00 = Leaf)
 offset 1       namespace   u8
 offset 2..4    entry_count u16 LE
 for i in 0..entry_count:
@@ -319,7 +325,7 @@ for i in 0..entry_count:
 #### 4.2.2 Internal
 
 ```
-offset 0       node_kind   u8 (0x02 = Internal)
+offset 0       node_kind   u8 (0x01 = Internal)
 offset 1       namespace   u8
 offset 2..4    child_count u16 LE
 for i in 0..child_count:
@@ -335,8 +341,8 @@ for i in 0..child_count:
 - `first_key`s ОБЯЗАНЫ строго возрастать.
 - Полный закодированный размер ≤ `PAYLOAD_CAP`.
 
-Дискриминатор Internal-vs-Leaf — это первый байт (`0x01` /
-`0x02`); прочие значения: `Error::Malformed`.
+Дискриминатор Leaf-vs-Internal — это первый байт (`0x00` =
+Leaf / `0x01` = Internal); прочие значения: `Error::Malformed`.
 
 ### 4.3 CommitPayload (`kind = 0x05`) — v3 layout
 

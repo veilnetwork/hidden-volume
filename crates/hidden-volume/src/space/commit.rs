@@ -295,7 +295,7 @@ impl<'f> Space<'f> {
         // uniform random — visually identical to AEAD-encrypted chunks.
         //
         // **M1 hardening (audit 2026-05-10).** The superblock fsync
-        // above (line 272) makes the commit durable and visible to
+        // above makes the commit durable and visible to
         // other processes; from that moment on, `new_seq` is the
         // canonical commit_seq for the space. Any failure in this
         // padding block must NOT downgrade that visible success into
@@ -337,6 +337,20 @@ impl<'f> Space<'f> {
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let mut out = Vec::new();
         self.collect_leaves(root_slot, namespace, &mut out)?;
+        // Per-node decode only checks intra-leaf order; the *global*
+        // (cross-leaf) order is an assumption the rest of the commit
+        // path relies on (`apply_op_to_sorted` binary-searches the
+        // flattened vec, and `LeafNode::encode` only `debug_assert`s
+        // sortedness in release). A key-holder / buggy writer can
+        // craft a tree whose child `first_key`s are sorted but whose
+        // leaf ranges overlap — that would silently produce an
+        // unsorted commit, bricking the namespace on the next read.
+        // Reject it here (audit pass 20).
+        if out.windows(2).any(|w| w[0].0 >= w[1].0) {
+            return Err(Error::Malformed(
+                "tree leaves are not globally sorted / contain duplicate keys",
+            ));
+        }
         Ok(out)
     }
 

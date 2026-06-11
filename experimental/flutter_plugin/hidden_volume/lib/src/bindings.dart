@@ -704,6 +704,7 @@ const _hvErrorKinds = <String>[
   'WrongNamespaceKind',
   'TooManyNamespaces',
   'IntegrityFailure',
+  'ContainerTooLarge',
 ];
 
 HvException _liftHvException(RustBuffer buf) {
