@@ -1,0 +1,10 @@
+# Project formatting config.
+# Defaults are reasonable; we lock only the few axes that matter.
+# Run `cargo fmt --all` before committing; CI enforces
+# `cargo fmt --all -- --check`.
+
+# 100-char lines.
+max_width = 100
+
+# Use modern style for `match` arms.
+match_block_trailing_comma = true

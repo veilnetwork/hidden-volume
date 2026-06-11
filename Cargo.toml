@@ -1,0 +1,25 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/hidden-volume",
+    "crates/hidden-volume-async",
+    "crates/hidden-volume-ffi",
+    "crates/hidden-volume-rt",
+]
+# Fuzz package depends on `libfuzzer-sys`, which requires nightly-only
+# `-Z` instrumentation flags. Excluding it from the workspace lets
+# stable-toolchain builds (`cargo build --workspace`) succeed without
+# pulling that dep. `cargo +nightly fuzz run <target>` picks up the
+# package via its standalone Cargo.toml.
+exclude = ["crates/hidden-volume/fuzz"]
+
+# Shared release / bench profiles for both crates.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+panic = "abort"
+
+[profile.bench]
+inherits = "release"
+debug = true

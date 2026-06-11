@@ -1,0 +1,10 @@
+# Compiled cdylib copied here by `bindings/README.md` regeneration recipe
+# so test_smoke.py can find it via ctypes. Don't commit — bloats git
+# history with a ~2 MB binary that anyone can rebuild from source.
+libhidden_volume_ffi.so
+libhidden_volume_ffi.dylib
+hidden_volume_ffi.dll
+
+# pycache from running test_smoke.py
+__pycache__/
+*.pyc
