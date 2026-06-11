@@ -1,0 +1,5 @@
+The `hidden_volume` Flutter plugin is dual-licensed under MIT OR
+Apache-2.0, matching the parent `hidden-volume` Rust workspace
+(see ../../LICENSE-MIT and ../../LICENSE-APACHE at the repo root).
+
+You may choose either license at your option.

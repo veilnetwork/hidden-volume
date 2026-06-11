@@ -1,0 +1,5 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- The plugin needs no Android permissions of its own. The host
+         app decides where to store the container file (typically the
+         app-private dir, which requires no permission). -->
+</manifest>

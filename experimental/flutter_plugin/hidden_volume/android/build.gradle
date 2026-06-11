@@ -1,0 +1,82 @@
+// Android-side Gradle module for the hidden_volume Flutter plugin.
+//
+// What this does:
+//   - Declares an Android library (AGP) with the right minSdk/targetSdk
+//     for the cdylib to load on Android 5.0+ devices.
+//   - Pulls in the generated Kotlin uniffi binding from
+//     ../../bindings/kotlin/uniffi/ (regenerated locally — see
+//     bindings/README.md § Regenerating).
+//   - Bundles the per-ABI .so files from src/main/jniLibs/, populated
+//     by ../scripts/build-android.sh at the repo root.
+
+group = 'dev.hidden_volume.hidden_volume'
+version = '0.0.1'
+
+buildscript {
+    ext.kotlin_version = '1.9.22'
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.2.0'
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
+android {
+    namespace 'dev.hidden_volume.hidden_volume'
+    compileSdk 34
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    sourceSets {
+        main {
+            // Generated uniffi Kotlin binding lives outside this module
+            // so a regenerate (cargo run -p hidden-volume-ffi --bin
+            // uniffi-bindgen) doesn't dirty the plugin tree.
+            kotlin.srcDirs = ['src/main/kotlin', '../../../bindings/kotlin']
+            // Per-ABI native libraries placed by build-android.sh.
+            jniLibs.srcDirs = ['src/main/jniLibs']
+        }
+    }
+
+    defaultConfig {
+        // minSdk 21 = Android 5.0 (Lollipop). Required for arm64-v8a
+        // and for stable JNI loading semantics; below this the cdylib
+        // is non-trivial to package.
+        minSdk 21
+        targetSdk 34
+    }
+
+    // Forward Java/Kotlin source warnings to Gradle output but do not
+    // fail the build on them — generated uniffi code may produce
+    // benign warnings on minor uniffi-version skew.
+    lintOptions {
+        abortOnError false
+    }
+}
+
+dependencies {
+    implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk8:$kotlin_version"
+    // uniffi 0.28 generated bindings depend on jna 5.x for native
+    // function dispatch.
+    implementation 'net.java.dev.jna:jna:5.14.0@aar'
+}

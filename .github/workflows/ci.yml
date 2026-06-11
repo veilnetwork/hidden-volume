@@ -1,0 +1,367 @@
+name: CI
+
+# Trigger policy (set by maintainer 2026-05-09):
+# - Push of a SemVer tag `v*.*.*` (e.g. `v1.0.0`, `v0.5.2`,
+#   `v2.0.0-rc1`) — full matrix runs against the tagged commit.
+# - Manual dispatch from the Actions UI — for re-running flaky jobs
+#   or smoke-checking a specific branch without cutting a tag.
+#
+# **Branch pushes and pull-requests do NOT trigger CI.** Local
+# `cargo fmt`, `cargo clippy -D warnings`, `cargo test --workspace`
+# are the pre-merge gate; CI exists to validate the released
+# artifact, not every commit. See `docs/en/contributing/guide.md`
+# for the local pre-PR checklist.
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: test (${{ matrix.os }} / ${{ matrix.rust }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        rust: [stable]
+        # Test on beta to catch upcoming-stable regressions; only on Linux.
+        include:
+          - os: ubuntu-latest
+            rust: beta
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+      - uses: Swatinem/rust-cache@v2
+      # Default features: every workspace member's tests, every doctest.
+      - run: cargo build --workspace --all-targets
+      - run: cargo test --workspace --tests --no-fail-fast
+      - run: cargo test --workspace --doc
+      # `cli` feature: builds the `hv` binary + runs subprocess-based
+      # integration tests in tests/cli.rs.
+      - run: cargo test -p hidden-volume --features cli --test cli
+
+  features-unix:
+    # parallel-scan + mmap are Unix-only (rely on pread / mmap(2)).
+    # Run the feature-specific test suites on Linux + macOS to catch
+    # regressions in the Unix-specific scan paths.
+    name: features-unix (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p hidden-volume --features parallel-scan --test parallel_scan
+      - run: cargo test -p hidden-volume --features mmap --test mmap_scan
+      # All-features build + full workspace test on Linux to catch
+      # cross-feature interaction.
+      - if: matrix.os == 'ubuntu-latest'
+        run: cargo test --workspace --all-features --no-fail-fast
+
+  locking-unix:
+    # Locking tests use OFD-level flock — Linux + macOS only. Windows
+    # uses LockFileEx which works at the API level but with subtly
+    # different ERROR_LOCK_VIOLATION semantics; gated until a Windows
+    # runner can debug.
+    name: locking (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p hidden-volume --test locking
+
+  clippy:
+    name: clippy (workspace, all features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  fmt:
+    name: rustfmt (workspace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  doc:
+    name: rustdoc (workspace, all features)
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --no-deps --workspace --all-features
+
+  api-surface:
+    name: api-surface drift check
+    runs-on: ubuntu-latest
+    # `scripts/dump-public-api.sh` re-extracts the public-API
+    # snapshot at `docs/en/reference/api-surface.txt` from each
+    # crate's src/ and diffs against the committed copy. Drift
+    # = a `pub` item was added, removed, or renamed without
+    # regenerating the snapshot. Fails the job loud so SemVer
+    # accountability stays a commit-time concern, not a release
+    # surprise.
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/dump-public-api.sh --check
+
+  audit:
+    name: cargo audit (deps vulnerability scan)
+    runs-on: ubuntu-latest
+    # Release-blocking since v1.0.0 (2026-05-28). Audit pass 19
+    # round 5 + v1.0 hardening removed the `continue-on-error: true`
+    # softening — a new RUSTSEC advisory now fails the release-build
+    # workflow, forcing an explicit fix or `deny.toml` ignore entry.
+    # Same gate runs on branch CI (`ci-branch.yml::audit`) for
+    # fast feedback on every push to master.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install --locked cargo-audit
+      - run: cargo audit
+
+  deny:
+    name: cargo deny (license / advisory / dup / source)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          # Use deny.toml at repo root.
+          command: check
+
+  bench-check:
+    # Verify benchmarks COMPILE — don't run the full timing suite in CI
+    # (criterion takes minutes per bench, no value to measure on
+    # shared CI hardware). The parallel-scan and mmap features are
+    # exercised in their own jobs above; here we just check the
+    # default build.
+    name: bench compile-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check -p hidden-volume --benches --all-features
+
+  msrv:
+    # MSRV pin. Bumping this is a minor-version bump (see SEMVER.md).
+    # Update the `toolchain:` value if the crate consumes a newer
+    # stable Rust feature.
+    #
+    # 2026-05-03: bumped 1.85 → 1.89 to allow `File::try_lock` (stable
+    # in 1.89; see container/file.rs), `is_multiple_of` (stable in
+    # 1.87; open/mod.rs cancel-poll), and let-chains in `if let`
+    # (stable in 1.88; open/mod.rs, space/mod.rs).
+    name: MSRV (1.89)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --all-targets
+
+  ffi-bindings-python:
+    # End-to-end smoke test for the auto-generated Python bindings.
+    # Builds the cdylib, regenerates bindings, and runs
+    # `bindings/python/test_smoke.py`. Canary for FFI binding
+    # correctness — same uniffi machinery generates Kotlin/Swift/Ruby,
+    # so a Python pass is strong evidence for the others. See
+    # `bindings/README.md` for the rationale.
+    name: ffi bindings — Python e2e (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux + macOS only — Windows .dll loading via Python ctypes
+        # works but the bindings module's path lookup needs Windows-
+        # specific handling we haven't validated. Add windows-latest
+        # once test_smoke.py runs there cleanly.
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build FFI cdylib (release)
+        run: cargo build -p hidden-volume-ffi --release
+      - name: Regenerate Python bindings
+        shell: bash
+        run: |
+          # Pick whichever extension the host produced. `ls` would
+          # error-exit when a path is missing even with `2>/dev/null`,
+          # so use a direct `[[ -f ]]` test (cross-platform under
+          # `shell: bash` on Linux + macOS + Windows runners).
+          if [[ -f target/release/libhidden_volume_ffi.so ]]; then
+            LIB=target/release/libhidden_volume_ffi.so
+          elif [[ -f target/release/libhidden_volume_ffi.dylib ]]; then
+            LIB=target/release/libhidden_volume_ffi.dylib
+          else
+            echo "error: no cdylib found in target/release/" >&2
+            exit 1
+          fi
+          cargo run --bin uniffi-bindgen --features bindgen-cli -p hidden-volume-ffi -- \
+            generate \
+            --library "$LIB" \
+            --language python \
+            --out-dir bindings/python
+      - name: Stage cdylib next to bindings
+        shell: bash
+        run: |
+          if [ -f target/release/libhidden_volume_ffi.so ]; then
+            cp target/release/libhidden_volume_ffi.so bindings/python/
+          elif [ -f target/release/libhidden_volume_ffi.dylib ]; then
+            cp target/release/libhidden_volume_ffi.dylib bindings/python/
+          fi
+      - name: Run Python smoke tests
+        working-directory: bindings/python
+        run: python3 test_smoke.py
+
+  fuzz-smoke:
+    # Run each fuzz target for 300s as a smoke test. Real coverage-
+    # guided fuzzing is multi-hour; this CI variant catches regressions
+    # in the targets themselves + obvious panic-on-arbitrary-bytes
+    # bugs introduced by recent commits. Nightly toolchain required by
+    # libfuzzer-sys.
+    name: fuzz smoke (5 min/target)
+    runs-on: ubuntu-latest
+    # Don't gate PRs on a fuzz finding — surface as a separate signal.
+    # Real crashes get filed as `bug:fuzz` issues per
+    # `crates/hidden-volume/fuzz/README.md`.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # cargo-fuzz instruments differently from regular builds;
+          # use a separate cache key to avoid invalidating the main
+          # CI cache on every fuzz run.
+          shared-key: fuzz
+      - run: cargo install cargo-fuzz
+      - name: Run plaintext_decode (5 min)
+        working-directory: crates/hidden-volume
+        run: cargo +nightly fuzz run plaintext_decode -- -max_total_time=300
+      - name: Run decoder_family (5 min)
+        working-directory: crates/hidden-volume
+        run: cargo +nightly fuzz run decoder_family -- -max_total_time=300
+      - name: Run container_open (5 min, capped input length)
+        working-directory: crates/hidden-volume
+        run: cargo +nightly fuzz run container_open -- -max_total_time=300 -max_len=8192
+      - name: Upload crash artifacts (if any)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: crates/hidden-volume/fuzz/artifacts/
+          if-no-files-found: ignore
+
+  release-build:
+    # Build release artifacts for the tagged commit. Validates
+    # release builds compile cleanly + produces SHA-256 checksums
+    # for the cdylib + the `hv` CLI. Publishing to crates.io /
+    # GitHub releases is a separate workflow that consumes these
+    # artifacts; this job is the build-time correctness gate.
+    #
+    # Runs on both triggers (`push: tags` and `workflow_dispatch`)
+    # so a manual re-run also rebuilds artifacts. The 2026-05-09
+    # trigger-policy change removed the now-redundant
+    # `if: github.event_name == 'push'` filter (it existed to skip
+    # this job on `pull_request`, which no longer triggers CI).
+    name: release build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+      # Cross-linker for aarch64-linux on x86_64 hosts.
+      - if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          cat >> .cargo/config.toml <<EOF
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+      - name: Build hv CLI
+        run: cargo build -p hidden-volume --release --features cli --target ${{ matrix.target }}
+      - name: Build FFI cdylib
+        run: cargo build -p hidden-volume-ffi --release --target ${{ matrix.target }}
+      - name: Compute checksums
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          ls -la
+          {
+            for f in hv hv.exe libhidden_volume_ffi.so libhidden_volume_ffi.dylib hidden_volume_ffi.dll; do
+              if [ -f "$f" ]; then
+                if command -v sha256sum >/dev/null; then
+                  sha256sum "$f"
+                else
+                  shasum -a 256 "$f"
+                fi
+              fi
+            done
+          } | tee SHA256SUMS-${{ matrix.target }}.txt
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/hv
+            target/${{ matrix.target }}/release/hv.exe
+            target/${{ matrix.target }}/release/libhidden_volume_ffi.so
+            target/${{ matrix.target }}/release/libhidden_volume_ffi.dylib
+            target/${{ matrix.target }}/release/hidden_volume_ffi.dll
+            target/${{ matrix.target }}/release/SHA256SUMS-${{ matrix.target }}.txt
+          if-no-files-found: ignore
+          retention-days: 30

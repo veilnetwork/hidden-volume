@@ -1,0 +1,30 @@
+# Build artifacts produced by build-android.sh / build-ios.sh.
+# These are generated locally or by CI; do not commit.
+android/src/main/jniLibs/*/libhidden_volume_ffi.so
+ios/HiddenVolumeFFI.xcframework/
+
+# Dart / Flutter ephemeral state.
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub/
+build/
+ios/Pods/
+ios/Podfile.lock
+ios/.symlinks/
+example/ios/Podfile
+example/ios/Podfile.lock
+android/.gradle/
+android/local.properties
+android/captures/
+android/gradlew
+android/gradlew.bat
+android/gradle/wrapper/
+
+# Editor / OS noise.
+.DS_Store
+Thumbs.db
+*.iml
+.idea/
+.vscode/
