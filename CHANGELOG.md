@@ -12,6 +12,16 @@ format.
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-06-11
+
+audit pass 20 — soundness, error-fidelity, walker-consistency,
+doc-actualization. No on-disk format change (format stays
+`format_version = 3`). The single breaking change is confined to the
+internal `hidden-volume-rt` crate (`space_mut` → `with_space_mut`),
+which is documented as not-for-end-user-consumption; the frozen
+`hidden-volume` + `hidden-volume-ffi` public API gains only the
+additive `HvError::ContainerTooLarge` variant.
+
 ### Security — audit pass 20
 
 - **`hidden-volume-rt::OwnedSpace::space_mut` was unsound** and is

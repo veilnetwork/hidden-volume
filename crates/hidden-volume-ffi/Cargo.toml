@@ -1,6 +1,6 @@
 [package]
 name = "hidden-volume-ffi"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.89"
 description = "uniffi-based FFI bindings for the hidden-volume container library — generates Kotlin/Swift/Python bindings."
@@ -34,10 +34,10 @@ bindgen-cli = ["uniffi/cli"]
 [dependencies]
 # Path + version: cargo-deny requires a version constraint on path
 # dependencies (wildcards = "deny").
-hidden-volume = { path = "../hidden-volume", version = "1.0.0" }
+hidden-volume = { path = "../hidden-volume", version = "1.1.0" }
 # Audit pass 8 (E5+E6 full): shared self-referential OwnedSpace +
 # run_blocking helpers. Used to be duplicated locally as SpaceInner.
-hidden-volume-rt = { path = "../hidden-volume-rt", version = "1.0.0" }
+hidden-volume-rt = { path = "../hidden-volume-rt", version = "1.1.0" }
 uniffi = { version = "0.31", features = ["build", "tokio", "scaffolding-ffi-buffer-fns"] }
 thiserror = "1"
 # Required by the async FFI surface: every `async fn` exported via uniffi
