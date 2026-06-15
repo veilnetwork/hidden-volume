@@ -144,4 +144,42 @@ void main() {
       throwsA(isA<HvException>().having((e) => e.kind, 'kind', 'AuthFailed')),
     );
   });
+
+  test('HvMultiSpace hosts several spaces of one container at once', () {
+    final tmp = Directory.systemTemp.createTempSync('hv_multi_');
+    final path = '${tmp.path}/store.bin';
+    addTearDown(() => tmp.deleteSync(recursive: true));
+
+    Uint8List u(String s) => Uint8List.fromList(s.codeUnits);
+
+    // Two spaces in one container; capture each space's keys.
+    final a = HvSpace.create(path: path, password: u('pa'), argon: ArgonPreset.light);
+    final ka = a.spaceKeys();
+    a.close();
+    final b = HvSpace.addSpace(path: path, password: u('pb'));
+    final kb = b.spaceKeys();
+    b.close();
+
+    // Host BOTH open at once under one handle / one lock.
+    final ms = HvMultiSpace.open(path: path);
+    final ida = ms.openSpace(ka);
+    final idb = ms.openSpace(kb);
+    expect(ms.spaceCount(), 2);
+
+    // Interleaved writes to both spaces.
+    ms.commit(ida, [HvWriteOpPut(namespace: 1, key: u('who'), value: u('alice'))]);
+    ms.commit(idb, [HvWriteOpPut(namespace: 1, key: u('who'), value: u('bob'))]);
+
+    // Each space reads back only its own data.
+    expect(String.fromCharCodes(ms.get(ida, 1, u('who'))!), 'alice');
+    expect(String.fromCharCodes(ms.get(idb, 1, u('who'))!), 'bob');
+
+    // Wrong length → Malformed; bogus keys → AuthFailed.
+    expect(() => ms.openSpace(Uint8List(10)),
+        throwsA(isA<HvException>().having((e) => e.kind, 'kind', 'Malformed')));
+    expect(() => ms.openSpace(Uint8List.fromList(List.filled(64, 7))),
+        throwsA(isA<HvException>().having((e) => e.kind, 'kind', 'AuthFailed')));
+
+    ms.close();
+  });
 }

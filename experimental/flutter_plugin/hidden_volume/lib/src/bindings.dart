@@ -1175,3 +1175,230 @@ class SpaceHandleBindings {
     }
   });
 }
+
+// ------------------------------------------------------------------
+// MultiSpaceHandle — several spaces of one container open at once.
+// ------------------------------------------------------------------
+
+final _msOpen = _dylib.lookupFunction<
+    ffi.Uint64 Function(RustBuffer, ffi.Pointer<RustCallStatus>),
+    int Function(RustBuffer, ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_constructor_multispacehandle_open');
+
+final _msFree = _dylib.lookupFunction<
+    ffi.Void Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
+    void Function(int, ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_free_multispacehandle');
+
+final _msClone = _dylib.lookupFunction<
+    ffi.Uint64 Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
+    int Function(int, ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_clone_multispacehandle');
+
+final _msOpenSpace = _dylib.lookupFunction<
+    ffi.Uint32 Function(ffi.Uint64, RustBuffer, ffi.Pointer<RustCallStatus>),
+    int Function(int, RustBuffer, ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_method_multispacehandle_open_space');
+
+final _msSpaceCount = _dylib.lookupFunction<
+    ffi.Uint32 Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
+    int Function(int, ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_method_multispacehandle_space_count');
+
+final _msSpaceKeys = _dylib.lookupFunction<
+    RustBuffer Function(ffi.Uint64, ffi.Uint32, ffi.Pointer<RustCallStatus>),
+    RustBuffer Function(int, int, ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_method_multispacehandle_space_keys');
+
+final _msCommit = _dylib.lookupFunction<
+    ffi.Uint64 Function(
+        ffi.Uint64, ffi.Uint32, RustBuffer, ffi.Pointer<RustCallStatus>),
+    int Function(int, int, RustBuffer, ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_method_multispacehandle_commit');
+
+final _msGet = _dylib.lookupFunction<
+    RustBuffer Function(ffi.Uint64, ffi.Uint32, ffi.Uint8, RustBuffer,
+        ffi.Pointer<RustCallStatus>),
+    RustBuffer Function(
+        int, int, int, RustBuffer, ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_method_multispacehandle_get');
+
+final _msReadLog = _dylib.lookupFunction<
+    RustBuffer Function(ffi.Uint64, ffi.Uint32, ffi.Uint8, ffi.Uint64,
+        ffi.Pointer<RustCallStatus>),
+    RustBuffer Function(int, int, int, int, ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_method_multispacehandle_read_log');
+
+final _msIterLogRange = _dylib.lookupFunction<
+    RustBuffer Function(ffi.Uint64, ffi.Uint32, ffi.Uint8, RustBuffer,
+        RustBuffer, ffi.Uint32, ffi.Pointer<RustCallStatus>),
+    RustBuffer Function(int, int, int, RustBuffer, RustBuffer, int,
+        ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_method_multispacehandle_iter_log_range');
+
+final _msCount = _dylib.lookupFunction<
+    ffi.Uint64 Function(
+        ffi.Uint64, ffi.Uint32, ffi.Uint8, ffi.Pointer<RustCallStatus>),
+    int Function(int, int, int, ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_method_multispacehandle_count');
+
+final _msCommitSeq = _dylib.lookupFunction<
+    ffi.Uint64 Function(ffi.Uint64, ffi.Uint32, ffi.Pointer<RustCallStatus>),
+    int Function(int, int, ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_method_multispacehandle_commit_seq');
+
+final _msVacuum = _dylib.lookupFunction<
+    ffi.Uint64 Function(ffi.Uint64, ffi.Uint32, ffi.Pointer<RustCallStatus>),
+    int Function(int, int, ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_method_multispacehandle_vacuum_data_batches');
+
+/// Low-level wrapper over the uniffi-exported `MultiSpaceHandle` symbols.
+/// Hosts several spaces of one container open at once under a single lock;
+/// per-space methods take a `spaceId` from [openSpace].
+class MultiSpaceHandleBindings {
+  MultiSpaceHandleBindings._(this._handle) {
+    _msFinalizer.attach(this, _handle, detach: this);
+  }
+
+  final int _handle;
+  bool _closed = false;
+
+  /// Open a container at [path] for multi-space hosting (takes its lock).
+  static MultiSpaceHandleBindings open({required String path}) {
+    final pathBuf = _bufferFromBytes(utf8.encode(path));
+    final h = rustCall<int>((s) => _msOpen(pathBuf, s));
+    return MultiSpaceHandleBindings._(h);
+  }
+
+  void _ensureOpen() {
+    if (_closed) throw StateError('MultiSpaceHandle is closed');
+  }
+
+  // uniffi method calls CONSUME the passed handle; clone before each so the
+  // wrapper keeps a live reference for later calls and for close().
+  int _clone() => rustCall<int>((s) => _msClone(_handle, s));
+
+  /// Host a space by its 64-byte SpaceKeys; returns its spaceId.
+  int openSpace(Uint8List keys) {
+    _ensureOpen();
+    final keysBuf = _bufferFromByteVec(keys);
+    final h = _clone();
+    return rustCall<int>((s) => _msOpenSpace(h, keysBuf, s));
+  }
+
+  /// Number of hosted spaces.
+  int spaceCount() {
+    _ensureOpen();
+    final h = _clone();
+    return rustCall<int>((s) => _msSpaceCount(h, s));
+  }
+
+  /// Export hosted space [id]'s 64-byte SpaceKeys (sensitive — never log).
+  Uint8List spaceKeys(int id) {
+    _ensureOpen();
+    final h = _clone();
+    final out = rustCall<RustBuffer>((s) => _msSpaceKeys(h, id, s));
+    return _Reader(_bufferToBytes(out)).readByteVec();
+  }
+
+  /// Apply a write batch to space [id]; returns its new commit_seq.
+  int commit(int id, List<HvWriteOp> ops) {
+    _ensureOpen();
+    final buf = _writeOpsToBuffer(ops);
+    final h = _clone();
+    return rustCall<int>((s) => _msCommit(h, id, buf, s));
+  }
+
+  /// Read a KV value from space [id], or null if absent.
+  Uint8List? get(int id, int namespace, Uint8List key) {
+    _ensureOpen();
+    final keyBuf = _bufferFromByteVec(key);
+    final h = _clone();
+    final out = rustCall<RustBuffer>((s) => _msGet(h, id, namespace, keyBuf, s));
+    return _decodeOptionBytes(out);
+  }
+
+  /// Read one log entry from space [id], or null if not found.
+  Uint8List? readLog(int id, int namespace, int logId) {
+    _ensureOpen();
+    final h = _clone();
+    final out =
+        rustCall<RustBuffer>((s) => _msReadLog(h, id, namespace, logId, s));
+    return _decodeOptionBytes(out);
+  }
+
+  /// Half-open range query over a log namespace of space [id].
+  List<HvLogEntry> iterLogRange({
+    required int id,
+    required int namespace,
+    int? start,
+    int? end,
+    required int limit,
+  }) {
+    _ensureOpen();
+    final startBuf = _optU64(start);
+    final endBuf = _optU64(end);
+    final h = _clone();
+    final out = rustCall<RustBuffer>(
+        (s) => _msIterLogRange(h, id, namespace, startBuf, endBuf, limit, s));
+    return _readLogEntries(_bufferToBytes(out));
+  }
+
+  /// Number of KV entries in [namespace] of space [id].
+  int count(int id, int namespace) {
+    _ensureOpen();
+    final h = _clone();
+    return rustCall<int>((s) => _msCount(h, id, namespace, s));
+  }
+
+  /// Current commit sequence of space [id].
+  int commitSeq(int id) {
+    _ensureOpen();
+    final h = _clone();
+    return rustCall<int>((s) => _msCommitSeq(h, id, s));
+  }
+
+  /// Reclaim DataBatch slots orphaned by edit/delete in space [id].
+  int vacuumDataBatches(int id) {
+    _ensureOpen();
+    final h = _clone();
+    return rustCall<int>((s) => _msVacuum(h, id, s));
+  }
+
+  /// Release the container lock and free the handle.
+  void close() {
+    if (_closed) return;
+    _closed = true;
+    _msFinalizer.detach(this);
+    rustCall<void>((s) {
+      _msFree(_handle, s);
+    });
+  }
+
+  static final Finalizer<int> _msFinalizer = Finalizer<int>((handle) {
+    final s = calloc<RustCallStatus>();
+    try {
+      s.ref.code = _callSuccess;
+      s.ref.errorBuf
+        ..capacity = 0
+        ..len = 0
+        ..data = ffi.nullptr;
+      _msFree(handle, s);
+    } finally {
+      calloc.free(s);
+    }
+  });
+}
+
+/// Decode a uniffi `Option<Vec<u8>>`: `u8 tag (0=None,1=Some) + (if Some) bytes`.
+Uint8List? _decodeOptionBytes(RustBuffer out) {
+  final bytes = _bufferToBytes(out);
+  if (bytes.isEmpty) {
+    throw StateError('uniffi: empty Option<Bytes> buffer');
+  }
+  final r = _Reader(bytes);
+  final tag = r.readU8();
+  if (tag == 0) return null;
+  if (tag != 1) throw StateError('uniffi: unexpected Option tag $tag');
+  return r.readByteVec();
+}

@@ -257,3 +257,66 @@ void changePasswords(String path, List<ffi.HvPasswordRotation> rotations) =>
 /// preserve hidden spaces without naming them.
 void compactKnown(String path, List<Uint8List> passwords) =>
     ffi.compactKnown(path, passwords);
+
+/// Hosts SEVERAL spaces of one container file open at once, under that file's
+/// single exclusive lock. The storage handle for running several identities
+/// simultaneously (one network node per identity) over a single deniable
+/// container — the single-handle [HvSpace] only opens one space at a time.
+///
+/// Spaces are addressed by a small [int] id from [openSpace]. Every call
+/// serializes internally, so writes to different spaces never overlap (which is
+/// exactly what the single-writer lock requires). Always [close] when done.
+class HvMultiSpace {
+  HvMultiSpace._(this._inner);
+
+  final ffi.MultiSpaceHandleBindings _inner;
+
+  /// Open the container at [path] for multi-space hosting (takes its lock).
+  factory HvMultiSpace.open({required String path}) =>
+      HvMultiSpace._(ffi.MultiSpaceHandleBindings.open(path: path));
+
+  /// Host an existing space by its 64-byte `SpaceKeys` (from [HvSpace.spaceKeys]);
+  /// returns its space id. Throws [HvException] `AuthFailed` if no space matches,
+  /// `Malformed` if [keys] is not 64 bytes.
+  int openSpace(Uint8List keys) => _inner.openSpace(keys);
+
+  /// Number of hosted spaces.
+  int spaceCount() => _inner.spaceCount();
+
+  /// Export hosted space [id]'s 64-byte `SpaceKeys`. **Sensitive** — never log.
+  Uint8List spaceKeys(int id) => _inner.spaceKeys(id);
+
+  /// Apply a write batch to space [id]; returns its new commit seq.
+  int commit(int id, List<ffi.HvWriteOp> ops) => _inner.commit(id, ops);
+
+  /// Read a KV value from space [id], or null if absent.
+  Uint8List? get(int id, int namespace, Uint8List key) =>
+      _inner.get(id, namespace, key);
+
+  /// Read one log entry from space [id] by [logId], or null if absent.
+  Uint8List? readLog(int id, int namespace, int logId) =>
+      _inner.readLog(id, namespace, logId);
+
+  /// Half-open range query over a log namespace of space [id].
+  List<ffi.HvLogEntry> iterLogRange({
+    required int id,
+    required int namespace,
+    int? start,
+    int? end,
+    required int limit,
+  }) =>
+      _inner.iterLogRange(
+          id: id, namespace: namespace, start: start, end: end, limit: limit);
+
+  /// Number of KV entries in [namespace] of space [id].
+  int count(int id, int namespace) => _inner.count(id, namespace);
+
+  /// Current commit sequence of space [id].
+  int commitSeq(int id) => _inner.commitSeq(id);
+
+  /// Reclaim chunks orphaned by edit/delete in space [id] (deniable scrub).
+  int vacuumDataBatches(int id) => _inner.vacuumDataBatches(id);
+
+  /// Release the container lock and free the handle.
+  void close() => _inner.close();
+}
