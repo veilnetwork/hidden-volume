@@ -12,6 +12,18 @@ format.
 
 ## [Unreleased]
 
+### Added
+
+- **FFI `SpaceHandle::add_space` (+ async `AsyncSpaceHandle::add_space`)** — add a
+  new parallel, deniable space to an *existing* container, keyed by a new
+  password. Where `create` bootstraps a fresh container file (and fails if one
+  exists), `add_space` opens the container already on disk and bootstraps an
+  additional space inside it (`Container::open` + `create_space`). This is the
+  FFI primitive for host-apps that hide several identities in one file; it
+  returns `SpaceAlreadyExists` on password collision so the caller can fall back
+  to `open`. Additive (no format/existing-API change); the sync↔async 1:1 mirror
+  is preserved.
+
 ## [1.1.0] — 2026-06-11
 
 audit pass 20 — soundness, error-fidelity, walker-consistency,
