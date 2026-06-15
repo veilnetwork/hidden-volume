@@ -159,6 +159,7 @@ pub mod error;
 // `pub(crate)`. Module visibility was `pub` historically as a no-op;
 // audit B8 (2026-05-02) tightened it to crate-private to match
 // reachability.
+pub mod multi;
 pub(crate) mod open;
 pub mod padding;
 pub mod space;
@@ -166,6 +167,7 @@ pub mod tx;
 
 pub use container::Container;
 pub use error::{Error, Result};
+pub use multi::MultiSpace;
 pub use open::MAX_OPEN_SCAN_CHUNKS;
 pub use space::Space;
 

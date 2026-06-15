@@ -295,6 +295,22 @@ impl<'f> Space<'f> {
         Ok(space)
     }
 
+    /// Re-attach a previously [detached](Self::into_state) [`SpaceState`] to a
+    /// container file, yielding a usable `Space` again. The seam that lets a
+    /// host hold MANY spaces' states at once (each detached) and bind one to the
+    /// file per operation — see [`crate::MultiSpace`]. The `'f` borrow is only
+    /// held for the duration of the bound operation, so the single file (and its
+    /// exclusive lock) is shared serially across all hosted spaces.
+    pub(crate) fn from_state(file: &'f mut ContainerFile, state: SpaceState) -> Self {
+        Self { file, state }
+    }
+
+    /// Detach this space's [`SpaceState`], dropping the file borrow so the file
+    /// is free for another hosted space. Companion to [`Self::from_state`].
+    pub(crate) fn into_state(self) -> SpaceState {
+        self.state
+    }
+
     /// Per-space monotonic commit counter. Exposed for host-app rollback
     /// detection (DESIGN §11.2): host-app stores this value externally
     /// after a successful commit, then on the next open compares the
