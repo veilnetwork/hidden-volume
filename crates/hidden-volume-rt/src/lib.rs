@@ -39,6 +39,7 @@
 use std::mem::ManuallyDrop;
 
 use hidden_volume::container::Container;
+use hidden_volume::crypto::SpaceKeys;
 use hidden_volume::space::Space;
 
 /// Self-referential pair of `Box<Container>` + `Space<'static>`
@@ -121,6 +122,23 @@ impl OwnedSpace {
     ) -> hidden_volume::Result<Self> {
         // SAFETY: same argument as `wrap_open`.
         let space: Space<'_> = container.create_space(password)?;
+        let space: Space<'static> = unsafe { std::mem::transmute(space) };
+        Ok(Self {
+            container,
+            space: ManuallyDrop::new(space),
+        })
+    }
+
+    /// Wrap an already-open Container by opening one of its spaces with
+    /// pre-derived [`SpaceKeys`] instead of a password — skips Argon2. This is
+    /// the master-space path: a master holds its children's `SpaceKeys` and
+    /// opens them without a per-child password prompt.
+    pub fn wrap_open_with_keys(
+        mut container: Box<Container>,
+        keys: SpaceKeys,
+    ) -> hidden_volume::Result<Self> {
+        // SAFETY: same argument as `wrap_open`.
+        let space: Space<'_> = container.open_space_with_keys(keys)?;
         let space: Space<'static> = unsafe { std::mem::transmute(space) };
         Ok(Self {
             container,
