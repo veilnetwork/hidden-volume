@@ -654,6 +654,37 @@ impl SpaceHandle {
         }))
     }
 
+    /// Add a **new parallel space** to an **existing** container at `path`,
+    /// keyed by `password`. Unlike [`Self::create`] (which bootstraps a fresh
+    /// container file and fails if one already exists), this opens the
+    /// container already on disk and creates an additional, deniable space
+    /// inside it — the primitive for "hide several identities in one file".
+    ///
+    /// Errors:
+    /// - [`HvError::Io`] / [`HvError::Malformed`] — `path` is not an existing,
+    ///   readable container (e.g. the file does not exist — use [`Self::create`]
+    ///   for first-run, or it is not a hidden-volume file).
+    /// - [`HvError::SpaceAlreadyExists`] — `password` already maps to a space in
+    ///   this container (the caller should fall back to [`Self::open`]).
+    /// - [`HvError::Busy`] — another process holds the file flock.
+    ///
+    /// The container's storage parameters (Argon2, padding, replicas) are fixed
+    /// at its creation and inherited here; there are no `argon`/options args.
+    #[uniffi::constructor]
+    pub fn add_space(path: String, password: Vec<u8>) -> HvResult<std::sync::Arc<Self>> {
+        // Audit pass 16: scrub our password copy on return — see
+        // SpaceHandle::create for the full rationale.
+        let password = zeroize::Zeroizing::new(password);
+        let p = PathBuf::from(path);
+        // Open the EXISTING container (never re-create — that would risk
+        // clobbering the file / an existing space), then bootstrap a new space.
+        let container = Box::new(Container::open(&p)?);
+        let inner = OwnedSpace::wrap_create(container, &password)?;
+        Ok(std::sync::Arc::new(Self {
+            inner: Mutex::new(inner),
+        }))
+    }
+
     /// Open an existing container at `path` and unlock the space
     /// identified by `password`. Errors with [`HvError::AuthFailed`]
     /// if no space matches `password` (deniability: do NOT distinguish
@@ -983,6 +1014,24 @@ impl AsyncSpaceHandle {
         }))
     }
 
+    /// Async equivalent of [`SpaceHandle::add_space`]. Adds a new parallel,
+    /// deniable space to an existing container. Argon2id + the space bootstrap
+    /// run on the blocking pool.
+    #[uniffi::constructor]
+    pub async fn add_space(path: String, password: Vec<u8>) -> HvResult<Arc<Self>> {
+        // Audit pass 16: see `SpaceHandle::create` for the rationale.
+        let password = zeroize::Zeroizing::new(password);
+        let p = PathBuf::from(path);
+        let inner = run_blocking(move || -> HvResult<OwnedSpace> {
+            let container = Box::new(Container::open(&p)?);
+            Ok(OwnedSpace::wrap_create(container, &password)?)
+        })
+        .await?;
+        Ok(Arc::new(Self {
+            inner: Arc::new(Mutex::new(inner)),
+        }))
+    }
+
     /// Current monotonic commit counter.
     pub async fn commit_seq(&self) -> HvResult<u64> {
         let inner = self.inner.clone();
@@ -1285,6 +1334,61 @@ mod tests {
             Ok(_) => panic!("expected AuthFailed, got Ok"),
         }
         drop(bad);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn add_space_creates_independent_parallel_space() {
+        let path = scratch_path();
+        let pstr = || path.to_string_lossy().into_owned();
+
+        // First identity.
+        let a = SpaceHandle::create(pstr(), b"p1".to_vec(), ArgonPreset::Min, 0, 1).unwrap();
+        a.commit(vec![WriteOp::Put {
+            namespace: 1,
+            key: b"who".to_vec(),
+            value: b"alice".to_vec(),
+        }])
+        .unwrap();
+        drop(a); // release the exclusive flock
+
+        // Second identity in the SAME file via add_space (the multi-identity
+        // primitive). A fresh, independent space — its own commit history.
+        let b = SpaceHandle::add_space(pstr(), b"p2".to_vec()).unwrap();
+        assert_eq!(b.commit_seq().unwrap(), 1, "new space starts fresh");
+        b.commit(vec![WriteOp::Put {
+            namespace: 1,
+            key: b"who".to_vec(),
+            value: b"bob".to_vec(),
+        }])
+        .unwrap();
+        drop(b);
+
+        // Each password opens its own space with its own data — the two are
+        // deniable parallel spaces, not a shared store.
+        let ra = SpaceHandle::open(pstr(), b"p1".to_vec()).unwrap();
+        assert_eq!(
+            ra.get(1, b"who".to_vec()).unwrap().as_deref(),
+            Some(&b"alice"[..])
+        );
+        drop(ra);
+        let rb = SpaceHandle::open(pstr(), b"p2".to_vec()).unwrap();
+        assert_eq!(
+            rb.get(1, b"who".to_vec()).unwrap().as_deref(),
+            Some(&b"bob"[..])
+        );
+        drop(rb);
+
+        // add_space with an existing space's password → SpaceAlreadyExists, so
+        // the host can fall back to `open` (adopt) on collision.
+        let dup = SpaceHandle::add_space(pstr(), b"p1".to_vec());
+        match &dup {
+            Err(HvError::SpaceAlreadyExists) => {},
+            Err(other) => panic!("expected SpaceAlreadyExists, got {other:?}"),
+            Ok(_) => panic!("expected SpaceAlreadyExists, got Ok"),
+        }
+        drop(dup);
 
         let _ = std::fs::remove_file(&path);
     }
