@@ -801,6 +801,14 @@ final _spOpen = _dylib.lookupFunction<
     int Function(RustBuffer, RustBuffer, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_constructor_spacehandle_open');
 
+// Same wire shape as `open` (path, password) -> handle; adds a new parallel
+// space to an existing container instead of opening one.
+final _spAddSpace = _dylib.lookupFunction<
+    ffi.Uint64 Function(
+        RustBuffer, RustBuffer, ffi.Pointer<RustCallStatus>),
+    int Function(RustBuffer, RustBuffer, ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_constructor_spacehandle_add_space');
+
 final _spFree = _dylib.lookupFunction<
     ffi.Void Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
     void Function(int, ffi.Pointer<RustCallStatus>)>(
@@ -931,6 +939,19 @@ class SpaceHandleBindings {
     final pathBuf = _bufferFromBytes(utf8.encode(path));
     final pwdBuf = _bufferFromByteVec(password);
     final h = rustCall<int>((s) => _spOpen(pathBuf, pwdBuf, s));
+    return SpaceHandleBindings._(h);
+  }
+
+  /// Add a new parallel, deniable space to an existing container (the
+  /// multi-identity primitive). Throws `SpaceAlreadyExists` if [password]
+  /// already maps to a space here.
+  static SpaceHandleBindings addSpace({
+    required String path,
+    required Uint8List password,
+  }) {
+    final pathBuf = _bufferFromBytes(utf8.encode(path));
+    final pwdBuf = _bufferFromByteVec(password);
+    final h = rustCall<int>((s) => _spAddSpace(pathBuf, pwdBuf, s));
     return SpaceHandleBindings._(h);
   }
 
