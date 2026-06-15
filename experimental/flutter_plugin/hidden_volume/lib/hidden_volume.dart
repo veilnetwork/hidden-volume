@@ -136,6 +136,24 @@ class HvSpace {
     ));
   }
 
+  /// Open a space from pre-derived [keys] (64 opaque bytes from [spaceKeys])
+  /// instead of a password — the **master-space** path: a master holds its
+  /// children's keys inside its own deniable space and opens any child without
+  /// a per-child password prompt.
+  ///
+  /// Throws [HvException] with `kind == "Malformed"` if [keys] is not 64 bytes,
+  /// `kind == "AuthFailed"` if the keys match no space here (same
+  /// indistinguishable path as a wrong password).
+  factory HvSpace.openWithKeys({
+    required String path,
+    required Uint8List keys,
+  }) {
+    return HvSpace._(ffi.SpaceHandleBindings.openWithKeys(
+      path: path,
+      keys: keys,
+    ));
+  }
+
   /// Apply a batch of writes atomically as one commit. Returns the new
   /// `commit_seq`. Empty [ops] returns the current seq unchanged.
   int commit(List<ffi.HvWriteOp> ops) => _inner.commit(ops);
@@ -196,6 +214,12 @@ class HvSpace {
   /// Reclaim DataBatch chunk slots that no longer hold live log entries.
   /// Returns the count of slots scrubbed.
   int vacuumDataBatches() => _inner.vacuumDataBatches();
+
+  /// Export this space's `SpaceKeys` as 64 opaque bytes, for a master roster to
+  /// store and later reopen this space via [HvSpace.openWithKeys] without its
+  /// password. **Sensitive** key material — keep only inside another deniable
+  /// space; never log or persist it in the clear.
+  Uint8List spaceKeys() => _inner.spaceKeys();
 
   /// Walk every chunk owned by this space, AEAD-decrypting and
   /// re-checking Merkle nodes. Throws [HvException] with

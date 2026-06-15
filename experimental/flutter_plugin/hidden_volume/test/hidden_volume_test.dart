@@ -98,4 +98,50 @@ void main() {
           .having((e) => e.kind, 'kind', 'AuthFailed')),
     );
   });
+
+  test('spaceKeys export → openWithKeys reopens without a password', () {
+    final tmp = Directory.systemTemp.createTempSync('hv_facade_');
+    final path = '${tmp.path}/store.bin';
+    addTearDown(() => tmp.deleteSync(recursive: true));
+
+    // A "child identity" space; write data, export its keys.
+    final child = HvSpace.create(
+      path: path,
+      password: Uint8List.fromList('childpw'.codeUnits),
+      argon: ArgonPreset.light,
+    );
+    child.commit([
+      HvWriteOpPut(
+        namespace: 1,
+        key: Uint8List.fromList('who'.codeUnits),
+        value: Uint8List.fromList('carol'.codeUnits),
+      ),
+    ]);
+    final keys = child.spaceKeys();
+    expect(keys.length, 64, reason: 'SpaceKeys is container_id ‖ aead_root');
+    child.close(); // release the exclusive flock
+
+    // A "master" reopens the child by keys alone — no password.
+    final reopened = HvSpace.openWithKeys(path: path, keys: keys);
+    final got = reopened.get(1, Uint8List.fromList('who'.codeUnits));
+    expect(got, isNotNull);
+    expect(String.fromCharCodes(got!), 'carol');
+    reopened.close();
+
+    // Wrong length → Malformed.
+    expect(
+      () => HvSpace.openWithKeys(path: path, keys: Uint8List(10)),
+      throwsA(isA<HvException>().having((e) => e.kind, 'kind', 'Malformed')),
+    );
+
+    // Well-formed but bogus keys → AuthFailed (indistinguishable from a wrong
+    // password — the count of spaces never leaks).
+    expect(
+      () => HvSpace.openWithKeys(
+        path: path,
+        keys: Uint8List.fromList(List.filled(64, 7)),
+      ),
+      throwsA(isA<HvException>().having((e) => e.kind, 'kind', 'AuthFailed')),
+    );
+  });
 }
