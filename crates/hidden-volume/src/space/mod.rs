@@ -308,6 +308,22 @@ impl<'f> Space<'f> {
         self.state.superblock.seq
     }
 
+    /// This space's [`SpaceKeys`] — the per-space decryption root, derived at
+    /// open time from the password (Argon2id + version-bind). Returns a clone so
+    /// a host-app can persist it for keys-only reopen via
+    /// [`Container::open_space_with_keys`] (the documented external-keyring /
+    /// master-space workflow; see [`Container::derive_space_keys`]).
+    ///
+    /// **Sensitive.** These bytes bypass Argon2 on reopen, so storing them
+    /// outside the process forfeits the brute-force protection of the password.
+    /// Keep them only inside another deniable space (e.g. a master roster);
+    /// never log or persist them in the clear. Do NOT expose for decoy/duress
+    /// spaces whose presence must stay hidden.
+    #[must_use]
+    pub fn space_keys(&self) -> SpaceKeys {
+        self.state.keys.clone()
+    }
+
     /// All recoverable commit-anchor seq numbers for this space, sorted
     /// ascending. Each entry is a `seq` whose Superblock chunk is still
     /// present on disk (one or more replicas) and decrypts under this
