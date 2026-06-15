@@ -254,11 +254,21 @@ for pure-Rust async use cases without the FFI overhead.
 ### Method coverage
 
 `AsyncSpaceHandle` mirrors **every** method of `SpaceHandle` 1:1:
-constructors (`create`, `add_space`, `open`), reads (`get`, `count`,
-`list_namespaces`, `read_log`, `iter_log_range`, `commit_seq`,
-`commit_history`, `stats`, `verify_integrity`), and write
-(`commit`). Same arguments, same error shapes, same semantics — just
-`async fn` everywhere.
+constructors (`create`, `add_space`, `open`, `open_with_keys`), reads
+(`get`, `count`, `list_namespaces`, `read_log`, `iter_log_range`,
+`commit_seq`, `commit_history`, `space_keys`, `stats`,
+`verify_integrity`), and write (`commit`). Same arguments, same error
+shapes, same semantics — just `async fn` everywhere.
+
+`open_with_keys` / `space_keys` are the **master-space** pair:
+`space_keys()` exports an open space's `SpaceKeys` as 64 opaque bytes
+(`container_id ‖ aead_root`), and `open_with_keys(path, keys)` reopens
+that space from those bytes without a password (skips Argon2 via
+`Container::open_space_with_keys`). The bytes are the per-space
+decryption root — **sensitive**; a host-app keeps them only inside
+another deniable space (a master roster) and never logs them. Wrong
+length → `Malformed`; non-matching keys → `AuthFailed`, the same
+indistinguishable path as a wrong password.
 
 ### What we still don't ship
 

@@ -88,10 +88,16 @@ use std::sync::Mutex;
 
 use hidden_volume::Container;
 use hidden_volume::container::ContainerOptions;
+use hidden_volume::crypto::SpaceKeys;
 use hidden_volume::crypto::kdf::Argon2Params;
 use hidden_volume::padding::PaddingPolicy;
 use hidden_volume::space::index::Namespace;
 use hidden_volume_rt::OwnedSpace;
+
+/// Length of a serialized [`SpaceKeys`] across the FFI: `container_id` (32) ‖
+/// `aead_root` (32). These bytes are the per-space decryption root — opaque,
+/// sensitive, **never logged**; they live only inside a master space.
+const SPACE_KEYS_LEN: usize = 64;
 
 uniffi::setup_scaffolding!();
 
@@ -604,6 +610,24 @@ fn check_namespace(byte: u8) -> Result<(), HvError> {
     Ok(())
 }
 
+/// Parse the 64-byte FFI encoding of [`SpaceKeys`] (`container_id` ‖
+/// `aead_root`). Rejects any other length as [`HvError::Malformed`].
+fn decode_space_keys(bytes: &[u8]) -> Result<SpaceKeys, HvError> {
+    if bytes.len() != SPACE_KEYS_LEN {
+        return Err(HvError::Malformed(
+            "SpaceKeys must be exactly 64 bytes".into(),
+        ));
+    }
+    let mut container_id = [0u8; 32];
+    let mut aead_root = [0u8; 32];
+    container_id.copy_from_slice(&bytes[..32]);
+    aead_root.copy_from_slice(&bytes[32..]);
+    Ok(SpaceKeys {
+        container_id,
+        aead_root,
+    })
+}
+
 // Drop impl for the self-referential pattern lives on
 // `hidden_volume_rt::OwnedSpace`.
 
@@ -682,6 +706,48 @@ impl SpaceHandle {
         let inner = OwnedSpace::wrap_create(container, &password)?;
         Ok(std::sync::Arc::new(Self {
             inner: Mutex::new(inner),
+        }))
+    }
+
+    /// Open a space in an existing container at `path` using pre-derived
+    /// [`SpaceKeys`] (64 opaque bytes from [`Self::space_keys`]) instead of a
+    /// password — skips Argon2. This is the **master-space** path: a master
+    /// holds its children's keys (inside its own encrypted space) and opens any
+    /// child without a per-child password prompt.
+    ///
+    /// Errors:
+    /// - [`HvError::Malformed`] — `keys` is not exactly 64 bytes.
+    /// - [`HvError::AuthFailed`] — the keys match no space in this container
+    ///   (same indistinguishable path as a wrong password).
+    /// - [`HvError::Io`] / [`HvError::Busy`] — see [`Self::open`].
+    ///
+    /// `keys` is sensitive key material; the caller must keep it inside a
+    /// deniable space and never persist or log it in the clear.
+    #[uniffi::constructor]
+    pub fn open_with_keys(path: String, keys: Vec<u8>) -> HvResult<std::sync::Arc<Self>> {
+        let keys = decode_space_keys(&keys)?;
+        let p = PathBuf::from(path);
+        let container = Box::new(Container::open(&p)?);
+        let inner = OwnedSpace::wrap_open_with_keys(container, keys)?;
+        Ok(std::sync::Arc::new(Self {
+            inner: Mutex::new(inner),
+        }))
+    }
+
+    /// Export this open space's [`SpaceKeys`] as 64 opaque bytes
+    /// (`container_id` ‖ `aead_root`) so a master space can store them and
+    /// later reopen this space via [`Self::open_with_keys`] without its
+    /// password. **Sensitive** — the per-space decryption root; the caller MUST
+    /// keep the bytes inside a deniable space and never log or persist them in
+    /// the clear (doing so bypasses Argon2's brute-force protection).
+    pub fn space_keys(&self) -> HvResult<Vec<u8>> {
+        let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
+        Ok(g.with_space_mut(|s| {
+            let keys = s.space_keys();
+            let mut out = Vec::with_capacity(SPACE_KEYS_LEN);
+            out.extend_from_slice(&keys.container_id);
+            out.extend_from_slice(&keys.aead_root);
+            out
         }))
     }
 
@@ -1030,6 +1096,42 @@ impl AsyncSpaceHandle {
         Ok(Arc::new(Self {
             inner: Arc::new(Mutex::new(inner)),
         }))
+    }
+
+    /// Async equivalent of [`SpaceHandle::open_with_keys`]. Opens a space from
+    /// pre-derived [`SpaceKeys`] (64 opaque bytes) — the master-space path. The
+    /// O(N) discovery scan runs on the blocking pool; no Argon2 (keys are
+    /// already derived).
+    #[uniffi::constructor]
+    pub async fn open_with_keys(path: String, keys: Vec<u8>) -> HvResult<Arc<Self>> {
+        let keys = decode_space_keys(&keys)?;
+        let p = PathBuf::from(path);
+        let inner = run_blocking(move || -> HvResult<OwnedSpace> {
+            let container = Box::new(Container::open(&p)?);
+            Ok(OwnedSpace::wrap_open_with_keys(container, keys)?)
+        })
+        .await?;
+        Ok(Arc::new(Self {
+            inner: Arc::new(Mutex::new(inner)),
+        }))
+    }
+
+    /// Async equivalent of [`SpaceHandle::space_keys`]. Exports this space's
+    /// `SpaceKeys` as 64 opaque bytes for a master roster. **Sensitive** — keep
+    /// only inside a deniable space, never log.
+    pub async fn space_keys(&self) -> HvResult<Vec<u8>> {
+        let inner = self.inner.clone();
+        run_blocking(move || -> HvResult<Vec<u8>> {
+            let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
+            Ok(g.with_space_mut(|s| {
+                let keys = s.space_keys();
+                let mut out = Vec::with_capacity(SPACE_KEYS_LEN);
+                out.extend_from_slice(&keys.container_id);
+                out.extend_from_slice(&keys.aead_root);
+                out
+            }))
+        })
+        .await
     }
 
     /// Current monotonic commit counter.
@@ -1389,6 +1491,54 @@ mod tests {
             Ok(_) => panic!("expected SpaceAlreadyExists, got Ok"),
         }
         drop(dup);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn space_keys_round_trip_opens_without_password() {
+        let path = scratch_path();
+        let pstr = || path.to_string_lossy().into_owned();
+
+        // Create a space (the "child identity"), write data, export its keys.
+        let child =
+            SpaceHandle::create(pstr(), b"childpw".to_vec(), ArgonPreset::Min, 0, 1).unwrap();
+        child
+            .commit(vec![WriteOp::Put {
+                namespace: 1,
+                key: b"who".to_vec(),
+                value: b"carol".to_vec(),
+            }])
+            .unwrap();
+        let keys = child.space_keys().unwrap();
+        assert_eq!(keys.len(), SPACE_KEYS_LEN, "exported keys are 64 bytes");
+        drop(child); // release the exclusive flock
+
+        // The "master" reopens the child via its keys alone — no password.
+        let reopened = SpaceHandle::open_with_keys(pstr(), keys.clone()).unwrap();
+        assert_eq!(
+            reopened.get(1, b"who".to_vec()).unwrap().as_deref(),
+            Some(&b"carol"[..]),
+            "keys-only open reads the same space"
+        );
+        // Keys exported here match (deterministic per space).
+        assert_eq!(reopened.space_keys().unwrap(), keys);
+        drop(reopened);
+
+        // Wrong length → Malformed (not AuthFailed).
+        match SpaceHandle::open_with_keys(pstr(), vec![0u8; 10]) {
+            Err(HvError::Malformed(_)) => {},
+            Err(other) => panic!("expected Malformed, got {other:?}"),
+            Ok(_) => panic!("expected Malformed, got Ok"),
+        }
+
+        // Well-formed but bogus keys → AuthFailed (indistinguishable from a
+        // wrong password — no leak about how many spaces exist).
+        match SpaceHandle::open_with_keys(pstr(), vec![7u8; SPACE_KEYS_LEN]) {
+            Err(HvError::AuthFailed) => {},
+            Err(other) => panic!("expected AuthFailed, got {other:?}"),
+            Ok(_) => panic!("expected AuthFailed, got Ok"),
+        }
 
         let _ = std::fs::remove_file(&path);
     }

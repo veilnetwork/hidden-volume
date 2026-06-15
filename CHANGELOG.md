@@ -14,6 +14,18 @@ format.
 
 ### Added
 
+- **FFI `SpaceHandle::open_with_keys` + `SpaceHandle::space_keys`, and core
+  `Space::space_keys`** — the master-space primitive. `space_keys()` exports an
+  open space's `SpaceKeys` as 64 opaque bytes (`container_id ‖ aead_root`);
+  `open_with_keys(path, keys)` reopens that space from those bytes alone,
+  skipping Argon2 (delegates to the existing `Container::open_space_with_keys`).
+  This lets a host-app's *master* space store its children's keys (inside its
+  own deniable space) and switch between identities without a per-child password
+  prompt. Wrong length → `Malformed`; non-matching keys → `AuthFailed` (same
+  indistinguishable path as a wrong password, so the count of spaces never
+  leaks). The bytes are the per-space decryption root — sensitive, never logged,
+  to be kept only inside another deniable space. Additive (no format/existing-API
+  change); backed by the rt helper `OwnedSpace::wrap_open_with_keys`.
 - **FFI `SpaceHandle::add_space` (+ async `AsyncSpaceHandle::add_space`)** — add a
   new parallel, deniable space to an *existing* container, keyed by a new
   password. Where `create` bootstraps a fresh container file (and fails if one
