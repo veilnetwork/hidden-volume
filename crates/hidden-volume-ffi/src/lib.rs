@@ -87,6 +87,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use hidden_volume::Container;
+use hidden_volume::MultiSpace;
 use hidden_volume::container::ContainerOptions;
 use hidden_volume::crypto::SpaceKeys;
 use hidden_volume::crypto::kdf::Argon2Params;
@@ -1369,6 +1370,146 @@ where
     .await
 }
 
+// ---------- MultiSpaceHandle ----------
+
+/// FFI handle hosting SEVERAL spaces of one container open at once, under the
+/// file's single exclusive lock (wraps [`hidden_volume::MultiSpace`]). The
+/// storage foundation for a host that runs several identities simultaneously
+/// (one network node per identity) over a single deniable container.
+///
+/// Spaces are addressed by a small `space_id` (`u32`) returned from
+/// [`Self::open_space`]. Every method serializes on an internal `Mutex`, so
+/// writes to different spaces never overlap — exactly what the single-writer
+/// lock requires. Drop the handle to release the lock.
+#[derive(uniffi::Object)]
+pub struct MultiSpaceHandle {
+    inner: Mutex<MultiSpace>,
+}
+
+#[uniffi::export]
+impl MultiSpaceHandle {
+    /// Open an existing container at `path` for multi-space hosting (takes the
+    /// file's exclusive lock). Add spaces with [`Self::open_space`].
+    #[uniffi::constructor]
+    pub fn open(path: String) -> HvResult<std::sync::Arc<Self>> {
+        let p = PathBuf::from(path);
+        let container = Container::open(&p)?;
+        Ok(std::sync::Arc::new(Self {
+            inner: Mutex::new(MultiSpace::new(container)),
+        }))
+    }
+
+    /// Host an existing space by its 64-byte `SpaceKeys` (from
+    /// [`SpaceHandle::space_keys`]); returns its `space_id`. `AuthFailed` if no
+    /// space matches; `Malformed` if `keys` is not 64 bytes.
+    pub fn open_space(&self, keys: Vec<u8>) -> HvResult<u32> {
+        let keys = decode_space_keys(&keys)?;
+        let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
+        Ok(g.open_space(keys)? as u32)
+    }
+
+    /// Number of hosted spaces.
+    pub fn space_count(&self) -> HvResult<u32> {
+        let g = self.inner.lock().map_err(|_| poisoned_mutex())?;
+        Ok(g.len() as u32)
+    }
+
+    /// Export hosted space `id`'s 64-byte `SpaceKeys`. **Sensitive** — keep only
+    /// inside a deniable space, never log.
+    pub fn space_keys(&self, id: u32) -> HvResult<Vec<u8>> {
+        let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
+        let keys = g.with_space(id as usize, |s| s.space_keys())?;
+        let mut out = Vec::with_capacity(SPACE_KEYS_LEN);
+        out.extend_from_slice(&keys.container_id);
+        out.extend_from_slice(&keys.aead_root);
+        Ok(out)
+    }
+
+    /// Apply a batch of write ops atomically to space `id`; returns its new
+    /// `commit_seq`. Empty `ops` returns the current seq unchanged.
+    pub fn commit(&self, id: u32, ops: Vec<WriteOp>) -> HvResult<u64> {
+        let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
+        g.with_space(id as usize, |s| -> HvResult<u64> {
+            if ops.is_empty() {
+                return Ok(s.commit_seq());
+            }
+            let mut tx = s.begin_tx();
+            for op in ops {
+                match op {
+                    WriteOp::Put {
+                        namespace,
+                        key,
+                        value,
+                    } => tx.put(Namespace(namespace), &key, &value)?,
+                    WriteOp::Delete { namespace, key } => tx.delete(Namespace(namespace), &key)?,
+                    WriteOp::AppendLog {
+                        namespace,
+                        log_id,
+                        payload,
+                    } => tx.append_log(Namespace(namespace), log_id, &payload)?,
+                }
+            }
+            Ok(tx.commit()?)
+        })?
+    }
+
+    /// Read a KV value from space `id`, or `None` if absent.
+    pub fn get(&self, id: u32, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
+        check_namespace(namespace)?;
+        let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
+        Ok(g.with_space(id as usize, |s| s.get(Namespace(namespace), &key))??)
+    }
+
+    /// Read one log entry from space `id` by `log_id`; `None` if not found.
+    pub fn read_log(&self, id: u32, namespace: u8, log_id: u64) -> HvResult<Option<Vec<u8>>> {
+        check_namespace(namespace)?;
+        let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
+        Ok(g.with_space(id as usize, |s| s.read_log(Namespace(namespace), log_id))??)
+    }
+
+    /// Half-open `[start, end)` range query over a log namespace of space `id`,
+    /// capped at `limit`.
+    pub fn iter_log_range(
+        &self,
+        id: u32,
+        namespace: u8,
+        start: Option<u64>,
+        end: Option<u64>,
+        limit: u32,
+    ) -> HvResult<Vec<LogEntry>> {
+        check_namespace(namespace)?;
+        let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
+        let v = g.with_space(id as usize, |s| {
+            s.iter_log_range(Namespace(namespace), start, end, limit as usize)
+        })??;
+        Ok(v.into_iter()
+            .map(|(log_id, payload)| LogEntry { log_id, payload })
+            .collect())
+    }
+
+    /// Number of KV entries in `namespace` of space `id` (O(N) index walk).
+    pub fn count(&self, id: u32, namespace: u8) -> HvResult<u64> {
+        check_namespace(namespace)?;
+        let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
+        let n = g.with_space(id as usize, |s| s.count(Namespace(namespace)))??;
+        Ok(n as u64)
+    }
+
+    /// Current commit sequence of space `id`.
+    pub fn commit_seq(&self, id: u32) -> HvResult<u64> {
+        let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
+        Ok(g.with_space(id as usize, |s| s.commit_seq())?)
+    }
+
+    /// Reclaim DataBatch slots orphaned by replaced/tombstoned records in space
+    /// `id` (the deniable edit/delete scrub). Returns slots scrubbed.
+    pub fn vacuum_data_batches(&self, id: u32) -> HvResult<u64> {
+        let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
+        let n = g.with_space(id as usize, |s| s.vacuum_data_batches())??;
+        Ok(n as u64)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1491,6 +1632,72 @@ mod tests {
             Ok(_) => panic!("expected SpaceAlreadyExists, got Ok"),
         }
         drop(dup);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn multi_space_handle_hosts_two_spaces_at_once() {
+        let path = scratch_path();
+        let pstr = || path.to_string_lossy().into_owned();
+
+        // Two spaces in one container; capture each space's keys.
+        let a = SpaceHandle::create(pstr(), b"pa".to_vec(), ArgonPreset::Min, 0, 1).unwrap();
+        let ka = a.space_keys().unwrap();
+        drop(a);
+        let b = SpaceHandle::add_space(pstr(), b"pb".to_vec()).unwrap();
+        let kb = b.space_keys().unwrap();
+        drop(b); // release the exclusive lock
+
+        // Host BOTH open at once under one handle / one lock.
+        let ms = MultiSpaceHandle::open(pstr()).unwrap();
+        let ida = ms.open_space(ka).unwrap();
+        let idb = ms.open_space(kb).unwrap();
+        assert_eq!(ms.space_count().unwrap(), 2);
+
+        // Interleaved writes to both spaces.
+        ms.commit(
+            ida,
+            vec![WriteOp::Put {
+                namespace: 1,
+                key: b"who".to_vec(),
+                value: b"alice".to_vec(),
+            }],
+        )
+        .unwrap();
+        ms.commit(
+            idb,
+            vec![WriteOp::Put {
+                namespace: 1,
+                key: b"who".to_vec(),
+                value: b"bob".to_vec(),
+            }],
+        )
+        .unwrap();
+
+        // Each space reads back only its own data — isolation under one lock.
+        assert_eq!(
+            ms.get(ida, 1, b"who".to_vec()).unwrap().as_deref(),
+            Some(&b"alice"[..])
+        );
+        assert_eq!(
+            ms.get(idb, 1, b"who".to_vec()).unwrap().as_deref(),
+            Some(&b"bob"[..])
+        );
+
+        // Error paths.
+        match ms.open_space(vec![7u8; SPACE_KEYS_LEN]) {
+            Err(HvError::AuthFailed) => {},
+            other => panic!("expected AuthFailed, got {other:?}"),
+        }
+        match ms.open_space(vec![0u8; 10]) {
+            Err(HvError::Malformed(_)) => {},
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+        match ms.get(99, 1, b"who".to_vec()) {
+            Err(HvError::Malformed(_)) => {},
+            other => panic!("expected Malformed for unknown id, got {other:?}"),
+        }
 
         let _ = std::fs::remove_file(&path);
     }
