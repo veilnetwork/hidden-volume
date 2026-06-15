@@ -14,6 +14,18 @@ format.
 
 ### Added
 
+- **Core `MultiSpace` — host several spaces of ONE container open at once** under
+  the file's single exclusive lock. The single-space `Container::open_space`
+  returns a `Space` that borrows the file for its whole lifetime (one space at a
+  time); `MultiSpace` instead holds each space's recovered `SpaceState`
+  *detached* and binds one to the file only for the duration of a single
+  operation (`MultiSpace::with_space`), so all spaces stay open while writes are
+  serialized in-core (which is what the single-writer lock requires). This is the
+  storage foundation for a host that runs several identities simultaneously (one
+  network node per identity) over one deniable container. New seam on `Space`:
+  `from_state` / `into_state` (crate-internal). Additive — the single-space API
+  is unchanged. New integration test `multi_space.rs` (two spaces coexist +
+  isolate + persist; wrong-keys → AuthFailed; unknown id → Malformed).
 - **FFI `SpaceHandle::open_with_keys` + `SpaceHandle::space_keys`, and core
   `Space::space_keys`** — the master-space primitive. `space_keys()` exports an
   open space's `SpaceKeys` as 64 opaque bytes (`container_id ‖ aead_root`);

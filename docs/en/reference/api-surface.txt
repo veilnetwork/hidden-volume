@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-06-15T14:52:08Z
+# Captured: 2026-06-15T18:06:43Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -149,19 +149,29 @@ lib.rs:  154:pub mod chunk;
 lib.rs:  155:pub mod container;
 lib.rs:  156:pub mod crypto;
 lib.rs:  157:pub mod error;
-lib.rs:  163:pub mod padding;
-lib.rs:  164:pub mod space;
-lib.rs:  165:pub mod tx;
-lib.rs:  167:pub use container::Container;
-lib.rs:  168:pub use error::{Error, Result};
-lib.rs:  169:pub use open::MAX_OPEN_SCAN_CHUNKS;
-lib.rs:  170:pub use space::Space;
-lib.rs:  174:pub const CHUNK_SIZE: usize = 4096;
-lib.rs:  200:pub const HEADER_PARAMS_OFFSET: usize = 32;
-lib.rs:  203:pub const HEADER_PARAMS_LEN: usize = 16;
-lib.rs:  209:pub const NONCE_LEN: usize = 24;
-lib.rs:  212:pub const TAG_LEN: usize = 16;
-lib.rs:  215:pub const PLAINTEXT_LEN: usize = CHUNK_SIZE - NONCE_LEN - TAG_LEN;
+lib.rs:  162:pub mod multi;
+lib.rs:  164:pub mod padding;
+lib.rs:  165:pub mod space;
+lib.rs:  166:pub mod tx;
+lib.rs:  168:pub use container::Container;
+lib.rs:  169:pub use error::{Error, Result};
+lib.rs:  170:pub use multi::MultiSpace;
+lib.rs:  171:pub use open::MAX_OPEN_SCAN_CHUNKS;
+lib.rs:  172:pub use space::Space;
+lib.rs:  176:pub const CHUNK_SIZE: usize = 4096;
+lib.rs:  202:pub const HEADER_PARAMS_OFFSET: usize = 32;
+lib.rs:  205:pub const HEADER_PARAMS_LEN: usize = 16;
+lib.rs:  211:pub const NONCE_LEN: usize = 24;
+lib.rs:  214:pub const TAG_LEN: usize = 16;
+lib.rs:  217:pub const PLAINTEXT_LEN: usize = CHUNK_SIZE - NONCE_LEN - TAG_LEN;
+multi.rs:  30:pub struct MultiSpace {
+multi.rs:  50:    pub fn new(container: Container) -> Self {
+multi.rs:  60:    pub fn derive_space_keys(&self, password: &[u8]) -> Result<SpaceKeys> {
+multi.rs:  67:    pub fn open_space(&mut self, keys: SpaceKeys) -> Result<usize> {
+multi.rs:  76:    pub fn create_space(&mut self, keys: SpaceKeys) -> Result<usize> {
+multi.rs:  84:    pub fn len(&self) -> usize {
+multi.rs:  90:    pub fn is_empty(&self) -> bool {
+multi.rs:  105:    pub fn with_space<R>(&mut self, id: usize, f: impl FnOnce(&mut Space<'_>) -> R) -> Result<R> {
 open/mod.rs:  67:pub const MAX_OPEN_SCAN_CHUNKS: u64 = 16 * 1024 * 1024;
 padding/mod.rs:  36:pub enum PaddingPolicy {
 padding/mod.rs:  69:    pub const DEFAULT: Self = Self::BucketGrowth { bucket_chunks: 256 };
@@ -217,21 +227,21 @@ space/mod.rs:  76:    pub fn total_entries(&self) -> usize {
 space/mod.rs:  100:    pub fn utilization_ratio(&self) -> f64 {
 space/mod.rs:  122:pub struct IntegrityReport {
 space/mod.rs:  189:pub struct Space<'f> {
-space/mod.rs:  307:    pub fn commit_seq(&self) -> u64 {
-space/mod.rs:  323:    pub fn space_keys(&self) -> SpaceKeys {
-space/mod.rs:  361:    pub fn commit_history(&self) -> &[u64] {
-space/mod.rs:  381:    pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
-space/mod.rs:  392:    pub fn padding_policy(&self) -> crate::padding::PaddingPolicy {
-space/mod.rs:  404:    pub fn last_padding_error(&self) -> Option<&crate::Error> {
-space/mod.rs:  413:    pub fn audit_owned_chunk_count(&self) -> usize {
-space/mod.rs:  429:    pub fn stats(&mut self) -> Result<SpaceStats> {
-space/mod.rs:  447:    pub fn begin_tx<'s>(&'s mut self) -> Tx<'s, 'f> {
-space/mod.rs:  459:    pub fn get(&mut self, namespace: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>> {
-space/mod.rs:  497:    pub fn list(&mut self, namespace: Namespace) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-space/mod.rs:  510:    pub fn count(&mut self, namespace: Namespace) -> Result<usize> {
-space/mod.rs:  562:    pub fn erase_namespace(&mut self, namespace: Namespace) -> Result<usize> {
-space/mod.rs:  587:    pub fn list_namespaces(&mut self) -> Result<Vec<Namespace>> {
-space/mod.rs:  599:    pub fn list_namespaces_with_kind(
+space/mod.rs:  323:    pub fn commit_seq(&self) -> u64 {
+space/mod.rs:  339:    pub fn space_keys(&self) -> SpaceKeys {
+space/mod.rs:  377:    pub fn commit_history(&self) -> &[u64] {
+space/mod.rs:  397:    pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
+space/mod.rs:  408:    pub fn padding_policy(&self) -> crate::padding::PaddingPolicy {
+space/mod.rs:  420:    pub fn last_padding_error(&self) -> Option<&crate::Error> {
+space/mod.rs:  429:    pub fn audit_owned_chunk_count(&self) -> usize {
+space/mod.rs:  445:    pub fn stats(&mut self) -> Result<SpaceStats> {
+space/mod.rs:  463:    pub fn begin_tx<'s>(&'s mut self) -> Tx<'s, 'f> {
+space/mod.rs:  475:    pub fn get(&mut self, namespace: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>> {
+space/mod.rs:  513:    pub fn list(&mut self, namespace: Namespace) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+space/mod.rs:  526:    pub fn count(&mut self, namespace: Namespace) -> Result<usize> {
+space/mod.rs:  578:    pub fn erase_namespace(&mut self, namespace: Namespace) -> Result<usize> {
+space/mod.rs:  603:    pub fn list_namespaces(&mut self) -> Result<Vec<Namespace>> {
+space/mod.rs:  615:    pub fn list_namespaces_with_kind(
 space/superblock.rs:  15:pub const NO_RECORD: u64 = u64::MAX;
 space/superblock.rs:  22:pub struct Superblock {
 space/superblock.rs:  37:    pub const ENCODED_LEN: usize = 8 + 8 + 32;
