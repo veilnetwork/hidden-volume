@@ -26,6 +26,13 @@ format.
   `from_state` / `into_state` (crate-internal). Additive — the single-space API
   is unchanged. New integration test `multi_space.rs` (two spaces coexist +
   isolate + persist; wrong-keys → AuthFailed; unknown id → Malformed).
+- **FFI `MultiSpaceHandle`** — exposes `MultiSpace` over the C ABI: `open(path)`
+  takes the container lock; `open_space(keys) → space_id`; then per-space
+  `commit` / `get` / `read_log` / `iter_log_range` / `count` / `commit_seq` /
+  `space_keys` / `vacuum_data_batches`, each addressed by `space_id`. Lets a
+  host run several identities at once over one container from the FFI. Sync-only
+  for now (async mirror deferred — no consumer yet). Round-trip test in
+  `tests::multi_space_handle_hosts_two_spaces_at_once`.
 - **FFI `SpaceHandle::open_with_keys` + `SpaceHandle::space_keys`, and core
   `Space::space_keys`** — the master-space primitive. `space_keys()` exports an
   open space's `SpaceKeys` as 64 opaque bytes (`container_id ‖ aead_root`);
