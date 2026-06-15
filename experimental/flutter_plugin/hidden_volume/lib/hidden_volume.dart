@@ -117,6 +117,25 @@ class HvSpace {
     ));
   }
 
+  /// Add a **new parallel space** to an **existing** container at [path],
+  /// keyed by [password] — the primitive for hiding several identities in
+  /// one file. Unlike [HvSpace.create] (which bootstraps a fresh container
+  /// and fails if one exists), this opens the container already on disk and
+  /// creates an additional, deniable space inside it.
+  ///
+  /// Throws [HvException] with `kind == "SpaceAlreadyExists"` if [password]
+  /// already maps to a space here (caller may fall back to [HvSpace.open]);
+  /// `kind == "Io"` / `"Malformed"` if [path] is not an existing container.
+  factory HvSpace.addSpace({
+    required String path,
+    required Uint8List password,
+  }) {
+    return HvSpace._(ffi.SpaceHandleBindings.addSpace(
+      path: path,
+      password: password,
+    ));
+  }
+
   /// Apply a batch of writes atomically as one commit. Returns the new
   /// `commit_seq`. Empty [ops] returns the current seq unchanged.
   int commit(List<ffi.HvWriteOp> ops) => _inner.commit(ops);

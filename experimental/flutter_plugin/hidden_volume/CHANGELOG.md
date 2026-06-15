@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Add `HvSpace.addSpace({path, password})` (+ `SpaceHandleBindings.addSpace`) —
+  bind the new `add_space` FFI constructor that adds a parallel, deniable space
+  to an existing container. The primitive for hiding several identities in one
+  file; throws `SpaceAlreadyExists` on password collision.
+
 ## 0.0.1 — 2026-05-03
 
 Initial scaffolding (no published release):
