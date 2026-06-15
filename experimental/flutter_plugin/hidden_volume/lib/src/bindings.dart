@@ -809,6 +809,15 @@ final _spAddSpace = _dylib.lookupFunction<
     int Function(RustBuffer, RustBuffer, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_constructor_spacehandle_add_space');
 
+// Same wire shape as `open` (path, keys) -> handle; opens a space from
+// pre-derived SpaceKeys (64 opaque bytes) instead of a password — the
+// master-space path.
+final _spOpenWithKeys = _dylib.lookupFunction<
+    ffi.Uint64 Function(
+        RustBuffer, RustBuffer, ffi.Pointer<RustCallStatus>),
+    int Function(RustBuffer, RustBuffer, ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_constructor_spacehandle_open_with_keys');
+
 final _spFree = _dylib.lookupFunction<
     ffi.Void Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
     void Function(int, ffi.Pointer<RustCallStatus>)>(
@@ -889,6 +898,13 @@ final _spVacuumDataBatches = _dylib.lookupFunction<
     int Function(int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_spacehandle_vacuum_data_batches');
 
+// (handle) -> Vec<u8> (the 64-byte SpaceKeys export). Same wire shape as
+// list_namespaces / commit_history (u64 -> RustBuffer).
+final _spSpaceKeys = _dylib.lookupFunction<
+    RustBuffer Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
+    RustBuffer Function(int, ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_method_spacehandle_space_keys');
+
 final _spVerifyIntegrity = _dylib.lookupFunction<
     RustBuffer Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
     RustBuffer Function(int, ffi.Pointer<RustCallStatus>)>(
@@ -952,6 +968,19 @@ class SpaceHandleBindings {
     final pathBuf = _bufferFromBytes(utf8.encode(path));
     final pwdBuf = _bufferFromByteVec(password);
     final h = rustCall<int>((s) => _spAddSpace(pathBuf, pwdBuf, s));
+    return SpaceHandleBindings._(h);
+  }
+
+  /// Open a space from pre-derived [keys] (64 opaque bytes from [spaceKeys])
+  /// instead of a password — the master-space path. Throws `Malformed` if
+  /// [keys] is not 64 bytes, `AuthFailed` if they match no space.
+  static SpaceHandleBindings openWithKeys({
+    required String path,
+    required Uint8List keys,
+  }) {
+    final pathBuf = _bufferFromBytes(utf8.encode(path));
+    final keysBuf = _bufferFromByteVec(keys);
+    final h = rustCall<int>((s) => _spOpenWithKeys(pathBuf, keysBuf, s));
     return SpaceHandleBindings._(h);
   }
 
@@ -1097,6 +1126,16 @@ class SpaceHandleBindings {
     _ensureOpen();
     final h = _cloneHandle();
     return rustCall<int>((s) => _spVacuumDataBatches(h, s));
+  }
+
+  /// Export this space's `SpaceKeys` as 64 opaque bytes for a master roster.
+  /// **Sensitive** — keep only inside another deniable space, never log.
+  Uint8List spaceKeys() {
+    _ensureOpen();
+    final h = _cloneHandle();
+    final out = rustCall<RustBuffer>((s) => _spSpaceKeys(h, s));
+    // Wire format `i32 BE len + bytes` (Vec<u8>), same as listNamespaces.
+    return _Reader(_bufferToBytes(out)).readByteVec();
   }
 
   /// Walk every chunk owned by this space, AEAD-decrypting and
