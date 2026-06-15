@@ -254,7 +254,7 @@ for pure-Rust async use cases without the FFI overhead.
 ### Method coverage
 
 `AsyncSpaceHandle` mirrors **every** method of `SpaceHandle` 1:1:
-constructors (`create`, `open`), reads (`get`, `count`,
+constructors (`create`, `add_space`, `open`), reads (`get`, `count`,
 `list_namespaces`, `read_log`, `iter_log_range`, `commit_seq`,
 `commit_history`, `stats`, `verify_integrity`), and write
 (`commit`). Same arguments, same error shapes, same semantics — just
@@ -383,8 +383,9 @@ Every password entry point on this crate AND on `hidden-volume-async`
 wraps the incoming `Vec<u8>` in `zeroize::Zeroizing` immediately on
 function entry:
 
-- Sync: `SpaceHandle::create`, `SpaceHandle::open`.
-- Async: `AsyncSpaceHandle::create`, `AsyncSpaceHandle::open`. The
+- Sync: `SpaceHandle::create`, `SpaceHandle::add_space`, `SpaceHandle::open`.
+- Async: `AsyncSpaceHandle::create`, `AsyncSpaceHandle::add_space`,
+  `AsyncSpaceHandle::open`. The
   Zeroizing wrapper is moved INTO the `run_blocking` closure so the
   scrub runs in the closure's drop on the normal-return path. Under
   `panic = "abort"` (workspace `[profile.release]`) destructors do
