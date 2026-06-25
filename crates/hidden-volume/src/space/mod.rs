@@ -7,6 +7,7 @@ pub mod superblock;
 // Audit pass 8 (E7): subtree-specific implementations
 // extracted from this file. Each contains an
 // `impl<'f> Space<'f>` block with the methods listed.
+pub(crate) mod checkpoint;
 mod commit;
 mod integrity;
 mod log_iter;

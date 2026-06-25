@@ -422,6 +422,8 @@ impl Container {
         // forward-secrecy invariant by running the deferred vacuum.
         if !is_ro {
             space.vacuum_orphans()?;
+            // Fast-open self-heal (opportunistic; never fails the open).
+            let _ = space.maybe_self_heal_checkpoint();
         }
         Ok(space)
     }
@@ -543,6 +545,14 @@ impl Container {
         // always holds when this returns Ok.
         if auto_vacuum && !is_ro {
             space.vacuum_orphans()?;
+            // Fast-open self-heal: lazily (re)write the open-scan
+            // checkpoint so the next open is O(working-set). Runs after
+            // vacuum so the recorded owned set is the post-scrub truth.
+            // Opportunistic — a failure here never fails a successful
+            // open (the checkpoint is an optimization hint, not
+            // correctness-bearing; the next open re-tries). See
+            // `crate::space::checkpoint`.
+            let _ = space.maybe_self_heal_checkpoint();
         }
         Ok(space)
     }
