@@ -12,6 +12,25 @@ format.
 
 ## [Unreleased]
 
+### Security
+
+- **FFI open paths now use the constant-time space scan (F-TM1 mitigation).**
+  The constant-time open family already existed in the core
+  (`Container::open_space_constant_time` and friends) but was opt-in, so the FFI
+  — the surface used by the Flutter/mobile deniability app — still opened via the
+  early-exit scan, leaving an unlock-timing oracle that an observer able to
+  measure open latency could use to distinguish a real space, a decoy, or a wrong
+  password. `SpaceHandle::open` / `open_with_keys` (sync **and** async) and
+  `MultiSpaceHandle::open_space` now route through the constant-time scan. No FFI
+  C-ABI / signature change (the hand-written Dart bindings are unaffected); only
+  the scan's timing profile changes. Cost: the equalizer roughly doubles
+  open-time on garbage-heavy containers (negligible on the small containers a
+  client app holds). New helpers `OwnedSpace::wrap_open_constant_time` /
+  `wrap_open_with_keys_constant_time` (rt) and `MultiSpace::open_space_constant_time`
+  (core) back this; the original non-CT `wrap_open*` / `MultiSpace::open_space`
+  remain for callers that want the faster early-exit scan (e.g. the standalone
+  async crate).
+
 ### Performance
 
 - **Root-payload cache in `Space::load_prior_roots`.** The read-hot namespace

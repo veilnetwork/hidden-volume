@@ -146,6 +146,40 @@ impl OwnedSpace {
         })
     }
 
+    /// Constant-time-scan variant of [`Self::wrap_open`]. Equalizes the
+    /// space-scan so the unlock time does not leak which slot matched — or
+    /// whether any did — closing the F-TM1 timing side-channel that lets an
+    /// observer who can measure unlock latency distinguish a real space, a
+    /// decoy, or a wrong password. Used by the FFI open path, whose consumers
+    /// are deniability apps that unlock in a coercion-prone setting.
+    pub fn wrap_open_constant_time(
+        mut container: Box<Container>,
+        password: &[u8],
+    ) -> hidden_volume::Result<Self> {
+        // SAFETY: same argument as `wrap_open`.
+        let space: Space<'_> = container.open_space_constant_time(password)?;
+        let space: Space<'static> = unsafe { std::mem::transmute(space) };
+        Ok(Self {
+            container,
+            space: ManuallyDrop::new(space),
+        })
+    }
+
+    /// Constant-time-scan variant of [`Self::wrap_open_with_keys`] (the
+    /// master-space path). Same F-TM1 mitigation as [`Self::wrap_open_constant_time`].
+    pub fn wrap_open_with_keys_constant_time(
+        mut container: Box<Container>,
+        keys: SpaceKeys,
+    ) -> hidden_volume::Result<Self> {
+        // SAFETY: same argument as `wrap_open`.
+        let space: Space<'_> = container.open_space_with_keys_constant_time(keys)?;
+        let space: Space<'static> = unsafe { std::mem::transmute(space) };
+        Ok(Self {
+            container,
+            space: ManuallyDrop::new(space),
+        })
+    }
+
     /// Borrow the inner `Space` for a callback-style operation. The
     /// stored `Space<'static>` is re-narrowed to a fresh, caller-un-
     /// nameable lifetime and handed to `f`; the result is returned.

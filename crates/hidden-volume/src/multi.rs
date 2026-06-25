@@ -18,7 +18,7 @@
 
 use crate::container::Container;
 use crate::crypto::SpaceKeys;
-use crate::open::scan_and_recover;
+use crate::open::{scan_and_recover, scan_and_recover_constant_time};
 use crate::space::{Space, SpaceState};
 use crate::{Error, Result};
 
@@ -66,6 +66,16 @@ impl MultiSpace {
     /// [`Error::AuthFailed`] if no space in the container matches the keys.
     pub fn open_space(&mut self, keys: SpaceKeys) -> Result<usize> {
         let state = scan_and_recover(&mut self.container.file, keys)?;
+        self.spaces.push(Some(state));
+        Ok(self.spaces.len() - 1)
+    }
+
+    /// Constant-time-scan variant of [`Self::open_space`]. Equalizes the
+    /// discovery scan so the host time can't leak which space (or none) matched
+    /// — the F-TM1 mitigation, for hosts that open in a coercion-prone setting.
+    /// Returns [`Error::AuthFailed`] if no space in the container matches.
+    pub fn open_space_constant_time(&mut self, keys: SpaceKeys) -> Result<usize> {
+        let state = scan_and_recover_constant_time(&mut self.container.file, keys)?;
         self.spaces.push(Some(state));
         Ok(self.spaces.len() - 1)
     }

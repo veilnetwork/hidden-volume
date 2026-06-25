@@ -664,12 +664,18 @@ Parallel и sequential утекают с тем же swing-magnitude (в
 **не** зависит от выбора scan-mode'а; opting in to parallel-scan
 или mmap для performance не mitigate'ит oracle.
 
-#### Mitigation (shipped 2026-05-28, opt-in — частичная)
+#### Mitigation (shipped 2026-05-28, opt-in — частичная; default для FFI с Unreleased)
 
 Bounded mitigation отгружен как opt-in API:
 [`Container::open_space_constant_time`](../../../crates/hidden-volume/src/container/mod.rs)
 (плюс keys-driven sibling
-`open_space_with_keys_constant_time`). Для каждого slot'а scan
+`open_space_with_keys_constant_time`).
+**Для FFI-поверхности это больше не opt-in:** `SpaceHandle::open` /
+`open_with_keys` (sync и async) и `MultiSpaceHandle::open_space` безусловно идут
+через constant-time scan (см. CHANGELOG `[Unreleased]`), так что host-app на FFI —
+deniability-клиент — получает mitigation по умолчанию, а не должен помнить про
+opt-in. Прямой Rust-путь `Container::open_space` остаётся early-exit для вызовов,
+которым важнее скорость scan'а, чем timing-oracle. Для каждого slot'а scan
 запускает real AEAD-decrypt, и на MAC-fail запускает ChaCha20
 stream-equalizer длины `PLAINTEXT_LEN` для consumption CPU
 time'а, приблизительно эквивалентного body-decrypt'у при
