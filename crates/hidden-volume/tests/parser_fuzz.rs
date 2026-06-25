@@ -102,13 +102,22 @@ proptest! {
         seq: u64,
         root_slot: u64,
         root_hash: [u8; 32],
+        checkpoint_slot: u64,
     ) {
-        let sb = Superblock { seq, root_slot, root_hash };
+        let sb = Superblock { seq, root_slot, root_hash, checkpoint_slot };
         let bytes = sb.encode();
+        // Canonical form: 48 bytes without a checkpoint pointer, 56 with.
+        let expected_len = if checkpoint_slot == hidden_volume::space::superblock::NO_RECORD {
+            Superblock::ENCODED_LEN
+        } else {
+            Superblock::ENCODED_LEN_WITH_CHECKPOINT
+        };
+        prop_assert_eq!(bytes.len(), expected_len);
         let sb2 = Superblock::decode(&bytes).unwrap();
         prop_assert_eq!(sb.seq, sb2.seq);
         prop_assert_eq!(sb.root_slot, sb2.root_slot);
         prop_assert_eq!(sb.root_hash, sb2.root_hash);
+        prop_assert_eq!(sb.checkpoint_slot, sb2.checkpoint_slot);
     }
 
     /// LeafNode roundtrip with random sorted entries.

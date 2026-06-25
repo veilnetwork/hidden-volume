@@ -277,6 +277,14 @@ impl<'f> Space<'f> {
             seq: new_seq,
             root_slot: commit_slot,
             root_hash: tx_root_hash,
+            // Carry the checkpoint pointer forward verbatim. The commit
+            // path never mints or moves a checkpoint (that is the
+            // open-scan self-heal writer's job); copying the existing
+            // pointer into the superblock we are already writing keeps
+            // the latest superblock pointing at the live checkpoint at
+            // zero extra disk cost. Defaults to NO_RECORD until the
+            // first self-heal writes a checkpoint.
+            checkpoint_slot: self.state.superblock.checkpoint_slot,
         };
         let replicas = self.file.superblock_replicas.max(1);
         for _ in 0..replicas {

@@ -183,6 +183,7 @@ impl SpaceState {
                 seq: 0,
                 root_slot: NO_RECORD,
                 root_hash: [0u8; 32],
+                checkpoint_slot: NO_RECORD,
             },
             owned_slots: Vec::new(),
             commit_history: Vec::new(),
@@ -298,6 +299,7 @@ impl<'f> Space<'f> {
             seq: 1,
             root_slot: NO_RECORD,
             root_hash: [0u8; 32],
+            checkpoint_slot: NO_RECORD,
         };
         let replicas = space.file.superblock_replicas.max(1);
         for _ in 0..replicas {
