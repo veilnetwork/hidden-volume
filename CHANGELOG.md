@@ -12,6 +12,22 @@ format.
 
 ## [Unreleased]
 
+### Performance
+
+- **Root-payload cache in `Space::load_prior_roots`.** The read-hot namespace
+  lookup path (`get` / `list_namespaces` / `find_root_slot` plus the commit and
+  vacuum validation paths) re-read and re-AEAD-decrypted the *same* `Commit`
+  chunk on every call, so a read sweep over N namespaces paid N redundant
+  XChaCha20-Poly1305 opens of one chunk. `SpaceState` now caches that chunk's
+  decrypted payload bytes keyed by `superblock.seq`; subsequent lookups in the
+  same commit era decode straight from the cache (pure parsing — no crypto, no
+  disk read). The `seq` equality gate plus an explicit clear in `commit_tx`
+  guarantee a stale era is never served (`seq` is strictly monotonic per space),
+  and the bytes are held in `Zeroizing` and scrubbed on drop / replace, so
+  decrypted index data never outlives its commit era in cleartext. Transparent —
+  no on-disk format or public-API change. Regression test
+  `tx_multi.rs::roots_cache_transparent_across_reads_and_commits`.
+
 ### Added
 
 - **Core `MultiSpace` — host several spaces of ONE container open at once** under

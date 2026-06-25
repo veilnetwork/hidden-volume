@@ -159,6 +159,19 @@ pub(crate) struct SpaceState {
     /// host-apps can surface a privacy-hardening warning without
     /// confusing it with a commit failure.
     pub last_padding_error: Option<crate::Error>,
+    /// Per-`seq` cache of the decrypted `Commit`-chunk payload bytes (the
+    /// `CommitPayload` wire bytes living at `superblock.root_slot`), so the
+    /// read-hot [`Space::load_prior_roots`] does not re-read + re-AEAD-decrypt
+    /// the same Commit chunk on every namespace lookup — a 50-namespace read
+    /// sweep was 50 redundant XChaCha20-Poly1305 opens of one chunk.
+    ///
+    /// `(seq, bytes)`: served ONLY while `seq == superblock.seq`. A successful
+    /// `commit_tx` advances `superblock.seq` and clears this, and the `seq`
+    /// equality check is a backstop, so a stale era can never be served (`seq`
+    /// is strictly monotonic per space — DESIGN §6 Inv-W3). The bytes are
+    /// decrypted plaintext, held in [`Zeroizing`] and scrubbed on drop / replace
+    /// so they never outlive their commit era in cleartext.
+    pub roots_payload_cache: Option<(u64, Zeroizing<Vec<u8>>)>,
 }
 
 impl SpaceState {
@@ -174,6 +187,7 @@ impl SpaceState {
             owned_slots: Vec::new(),
             commit_history: Vec::new(),
             last_padding_error: None,
+            roots_payload_cache: None,
         }
     }
 }
@@ -738,6 +752,17 @@ impl<'f> Space<'f> {
         if self.state.superblock.root_slot == NO_RECORD {
             return Ok(Vec::new());
         }
+        let seq = self.state.superblock.seq;
+        // Warm cache: decode straight from the cached payload bytes for this
+        // commit era, skipping the disk read + AEAD open. Decoding is pure
+        // parsing (no crypto), so the AEAD — the dominant per-read cost — is paid
+        // once per commit instead of once per namespace lookup. The `seq`
+        // equality gate means a stale era can never be served.
+        if let Some((cached_seq, bytes)) = &self.state.roots_payload_cache
+            && *cached_seq == seq
+        {
+            return Ok(CommitPayload::decode(bytes)?.roots);
+        }
         let pt = self.read_owned_chunk(self.state.superblock.root_slot)?;
         if pt.kind != ChunkKind::Commit {
             return Err(Error::Malformed(
@@ -745,6 +770,9 @@ impl<'f> Space<'f> {
             ));
         }
         let cp = CommitPayload::decode(&pt.payload)?;
+        // Cache the verified, AEAD-decrypted payload bytes (Zeroizing) keyed by
+        // the current seq for subsequent lookups in the same commit era.
+        self.state.roots_payload_cache = Some((seq, Zeroizing::new(pt.payload)));
         Ok(cp.roots)
     }
 

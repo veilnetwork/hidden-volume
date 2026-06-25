@@ -285,6 +285,12 @@ impl<'f> Space<'f> {
         self.file.fsync()?;
 
         self.state.superblock = new_sb;
+        // The prior commit era's cached roots payload is now stale — drop it so
+        // its decrypted bytes are zeroized promptly (rather than lingering until
+        // the next `load_prior_roots` replaces it), and so the next read decodes
+        // the fresh era. The `seq` gate in `load_prior_roots` is the correctness
+        // backstop; this clear is the memory-hygiene half.
+        self.state.roots_payload_cache = None;
         // new_seq is strictly greater than every prior entry (commit_tx
         // monotonically increments seq), so push preserves sort order
         // and uniqueness of `commit_history` without re-sorting.
