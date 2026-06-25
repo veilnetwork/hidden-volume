@@ -29,8 +29,62 @@ use crate::container::ContainerFile;
 use crate::crypto::aead::{ChunkAead, make_aad};
 use crate::crypto::derive::{SpaceKeys, derive_chunk_key};
 use crate::space::SpaceState;
-use crate::space::superblock::Superblock;
+use crate::space::checkpoint::{CheckpointChunk, MAX_CHECKPOINT_CHAIN};
+use crate::space::superblock::{NO_RECORD, Superblock};
 use crate::{Error, NONCE_LEN, PLAINTEXT_LEN, Result, TAG_LEN};
+
+/// How far back from the end of the file the fast-open reverse scan
+/// looks for the latest superblock (and thus the checkpoint pointer).
+/// The latest commit's superblock replicas sit just before its
+/// post-commit padding tail, so the latest superblock is within
+/// `padding_count + replicas` slots of the end — far inside this
+/// budget for any realistic padding preset (256 KiB ⇒ 64 chunks,
+/// 1 MiB ⇒ 256). If no superblock is found within the budget (our
+/// space went quiet while other spaces grew the file), the fast-path
+/// declines and the caller falls back to the full O(total) scan.
+///
+/// Correctness does not hinge on this budget being large enough to
+/// catch the *absolute* latest superblock: the fast-path only needs
+/// *some* recent superblock to recover the (carried-forward)
+/// checkpoint pointer; the authoritative latest superblock is then
+/// re-derived by the selective scan of the full tail
+/// `[cp_high_water, total)`. See [`try_fast_scan_inner`].
+const REVERSE_SCAN_BUDGET: u64 = 4096;
+
+/// In-crate test seams: a counter of fast-path engagements and a toggle
+/// to force the full scan, so unit tests can assert the fast-path was
+/// actually taken and compare it against a forced full scan. Compiled
+/// out of release builds entirely.
+///
+/// **Thread-local** so concurrently-running `#[test]`s (cargo's default)
+/// don't race on shared state: a synchronous `open_space` runs the scan
+/// on the calling test's thread, so the thread-local counter/toggle are
+/// the same instance the test reads.
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use std::cell::Cell;
+
+    thread_local! {
+        static DISABLE: Cell<bool> = const { Cell::new(false) };
+        static HITS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn set_disable(v: bool) {
+        DISABLE.with(|c| c.set(v));
+    }
+    pub(crate) fn disabled() -> bool {
+        DISABLE.with(Cell::get)
+    }
+    pub(crate) fn hits() -> u64 {
+        HITS.with(Cell::get)
+    }
+    pub(crate) fn reset_hits() {
+        HITS.with(|c| c.set(0));
+    }
+    pub(crate) fn record_hit() {
+        HITS.with(|c| c.set(c.get() + 1));
+    }
+}
 
 /// How often to poll the cancel token during the scan loop. Chosen so
 /// that the per-iteration polling cost is negligible (one `Acquire`
@@ -157,24 +211,46 @@ fn scan_and_recover_inner(
     let total = container.slot_count();
     check_scan_budget(total)?;
 
-    let mut owned_slots: Vec<u64> = Vec::new();
-    let mut commit_history: Vec<u64> = Vec::new();
+    // Fast-open: if a checkpoint pointer is recoverable from a recent
+    // superblock, trial-decrypt only the recorded working set + the
+    // tail appended since, instead of every slot. Any inconsistency
+    // (no checkpoint, unreadable checkpoint, budget/shape violation)
+    // returns `None` and we fall through to the full scan, which is
+    // always correct. The fast-path is **post-authentication**: an
+    // adversary without this space's key cannot decrypt the reverse-
+    // scan superblocks or the checkpoint chunk, so a wrong-password
+    // attempt always pays the full O(total) scan (no fast-vs-slow
+    // timing oracle for password guessing); and the selective scan
+    // never touches another space's slots, so a decoy open's wall-
+    // clock reflects only the decoy's own working set, never the
+    // existence of hidden spaces. See `crate::space::checkpoint`.
+    let fast_enabled = {
+        #[cfg(test)]
+        {
+            !test_hooks::disabled()
+        }
+        #[cfg(not(test))]
+        {
+            true
+        }
+    };
+    if fast_enabled
+        && let Some(state) = try_fast_scan_inner(
+            container,
+            &keys,
+            &container_id,
+            total,
+            cancel,
+            constant_time,
+        )?
+    {
+        #[cfg(test)]
+        test_hooks::record_hit();
+        return Ok(state);
+    }
 
-    // Track ALL distinct AEAD-passing Superblock seqs we see, keyed by
-    // seq → payload bytes (≈48 B). Replicas at the same seq are
-    // bit-equal so we keep only one per seq (first-wins; subsequent
-    // replicas are dropped with their payload Vec).
-    //
-    // We can't decode-and-pick-best inline because of audit D2 / D3:
-    // if the highest-seq SB AEAD-passes but `Superblock::decode` later
-    // fails (writer bug, future-format chunk we don't understand,
-    // physically-improbable bit corruption that AEAD missed), we must
-    // **fall back** to the next-highest-seq SB rather than abort
-    // recovery. So we collect candidates and decode at the end with
-    // descending-seq iteration.
-    let mut sb_candidates: std::collections::BTreeMap<u64, Vec<u8>> =
-        std::collections::BTreeMap::new();
-
+    // --- Full scan: trial-decrypt every slot. ---
+    let mut acc = ScanAcc::default();
     for slot in 0..total {
         // Cooperative cancel check at coarse granularity. At slot 0 we
         // also check so that cancelling before scan starts surfaces
@@ -190,53 +266,79 @@ fn scan_and_recover_inner(
             Some(pt) => pt,
             None => continue,
         };
-        owned_slots.push(slot);
-
-        if pt.kind == ChunkKind::Superblock {
-            commit_history.push(pt.seq);
-            // First-wins on tie. Audit pass 7 (D4): same-seq replicas
-            // MUST be bit-equal by construction — `commit_tx` writes
-            // the same `new_sb` payload N times (`superblock_replicas`
-            // copies). A writer-bug regression that produced
-            // same-seq-different-payload SBs would silently mask
-            // first-wins; the `debug_assert!` catches it in tests.
-            // Release builds keep first-wins semantics with no cost.
-            //
-            // Only retain payloads that are exactly a Superblock's
-            // encoded length. `Superblock::decode` rejects any other
-            // length downstream, so this is behaviour-preserving — but
-            // it bounds memory: without it, a key-holder could forge
-            // up to MAX_OPEN_SCAN_CHUNKS distinct-seq Superblock-kind
-            // chunks each carrying a PAYLOAD_CAP-sized payload and make
-            // `open` retain tens of GiB (audit pass 20). Non-matching
-            // payloads still counted toward `commit_history` above.
-            // Accepts both canonical superblock lengths (48 short / 56
-            // long-with-checkpoint); `Superblock::decode` is the
-            // canonical-form authority downstream.
-            if Superblock::is_valid_encoded_len(pt.payload.len()) {
-                use std::collections::btree_map::Entry;
-                match sb_candidates.entry(pt.seq) {
-                    Entry::Vacant(e) => {
-                        e.insert(pt.payload);
-                    },
-                    Entry::Occupied(e) => {
-                        debug_assert!(
-                            e.get() == &pt.payload,
-                            "same-seq Superblock replicas must be bit-equal"
-                        );
-                    },
-                }
-            }
-        }
-        // pt is consumed (payload moved or dropped at end-of-iter
-        // for non-Superblock kinds; kind+seq are Copy).
+        accumulate_owned_slot(&mut acc, slot, pt);
     }
 
+    finalize_scan(keys, container_id, acc)
+}
+
+/// Per-slot scan accumulator — the `owned_slots` / `commit_history` /
+/// `sb_candidates` triple shared by the full and fast scan paths.
+///
+/// `sb_candidates` tracks ALL distinct AEAD-passing Superblock seqs,
+/// keyed by seq → payload bytes. Replicas at the same seq are bit-equal
+/// so we keep one per seq (first-wins). We can't decode-and-pick-best
+/// inline because of audit D2 / D3: if the highest-seq SB AEAD-passes
+/// but `Superblock::decode` later fails (writer bug, future-format
+/// chunk, physically-improbable bit corruption that AEAD missed), we
+/// must fall back to the next-highest-seq SB — so candidates are
+/// collected and decoded at the end in descending-seq order.
+#[derive(Default)]
+struct ScanAcc {
+    owned_slots: Vec<u64>,
+    commit_history: Vec<u64>,
+    sb_candidates: std::collections::BTreeMap<u64, Vec<u8>>,
+}
+
+/// Fold one owned (AEAD-passing) slot's plaintext into the accumulator.
+/// Shared verbatim by the full and selective (fast) scan loops so they
+/// produce identical state for the same slot set.
+fn accumulate_owned_slot(acc: &mut ScanAcc, slot: u64, pt: Plaintext) {
+    acc.owned_slots.push(slot);
+    if pt.kind == ChunkKind::Superblock {
+        acc.commit_history.push(pt.seq);
+        // First-wins on tie. Audit pass 7 (D4): same-seq replicas MUST
+        // be bit-equal by construction — `commit_tx` writes the same
+        // `new_sb` payload N times. The `debug_assert!` catches a
+        // writer-bug regression in tests; release builds keep
+        // first-wins with no cost.
+        //
+        // Length-gate to the two canonical superblock lengths (48 short
+        // / 56 long-with-checkpoint) — a memory bound (audit pass 20):
+        // without it a key-holder could forge MAX_OPEN_SCAN_CHUNKS
+        // distinct-seq Superblock chunks each carrying a PAYLOAD_CAP
+        // payload. Non-matching payloads still counted toward
+        // `commit_history` above. `Superblock::decode` is the
+        // canonical-form authority downstream.
+        if Superblock::is_valid_encoded_len(pt.payload.len()) {
+            use std::collections::btree_map::Entry;
+            match acc.sb_candidates.entry(pt.seq) {
+                Entry::Vacant(e) => {
+                    e.insert(pt.payload);
+                },
+                Entry::Occupied(e) => {
+                    debug_assert!(
+                        e.get() == &pt.payload,
+                        "same-seq Superblock replicas must be bit-equal"
+                    );
+                },
+            }
+        }
+    }
+}
+
+/// Pick the winning superblock (descending-seq with the audit-D2
+/// fall-through and the audit-pass-14 chunk-vs-decoded seq cross-check)
+/// and assemble the `SpaceState`. Shared by every scan path.
+fn finalize_scan(keys: SpaceKeys, container_id: [u8; 32], acc: ScanAcc) -> Result<SpaceState> {
+    let ScanAcc {
+        owned_slots,
+        mut commit_history,
+        sb_candidates,
+    } = acc;
+
     // Recoverable-commit anchors for host-app rollback / multi-device
-    // logic (DESIGN §11.2, docs/en/guide/multi-device.md). Every Superblock that
-    // AEAD-decrypts under this key is a commit anchor that recovery
-    // *could* fall back to if the latest replicas were lost. Replicas at
-    // the same seq are deduplicated.
+    // logic (DESIGN §11.2). Replicas at the same seq are deduplicated.
     commit_history.sort_unstable();
     commit_history.dedup();
 
@@ -245,35 +347,22 @@ fn scan_and_recover_inner(
     }
 
     // Try Superblock::decode on candidates in descending-seq order; on
-    // decode failure (malformed-but-AEAD-valid SB), drop the candidate
-    // and try the next-highest seq. Audit D2 fix: previous behavior
-    // failed open entirely if the top-seq SB had a malformed payload.
-    //
-    // Audit pass 14: also reject SBs whose decoded `Superblock.seq`
-    // disagrees with the chunk-level `Plaintext.seq`. The two should
-    // always be equal (both written by `commit_tx`'s `new_seq`); a
-    // mismatch indicates either a writer-bug regression or a
-    // post-AEAD tamper by a key-holder. Surfacing as `Malformed`
-    // (and trying the next candidate) is safer than silently
-    // adopting the decoded payload's seq while the chunk-level seq
-    // says something else.
-    let mut superblock: Option<Superblock> = None;
-    for (chunk_seq, payload) in sb_candidates.iter().rev() {
-        match Superblock::decode(payload) {
-            Ok(sb) if sb.seq == *chunk_seq => {
-                superblock = Some(sb);
-                break;
-            },
-            Ok(_) | Err(_) => {
-                // Either decode failed, or decoded seq disagrees with
-                // chunk-level seq. Try the next candidate.
-                continue;
-            },
-        }
-    }
-    let superblock = superblock.ok_or(Error::Malformed(
-        "every recoverable Superblock failed to decode",
-    ))?;
+    // decode failure (malformed-but-AEAD-valid SB) drop the candidate
+    // and try the next-highest seq (audit D2). Also reject SBs whose
+    // decoded `Superblock.seq` disagrees with the chunk-level
+    // `Plaintext.seq` (audit pass 14) — a mismatch indicates a
+    // writer-bug or post-AEAD tamper by a key-holder.
+    let superblock = sb_candidates
+        .iter()
+        .rev()
+        .find_map(|(chunk_seq, payload)| {
+            Superblock::decode(payload)
+                .ok()
+                .filter(|sb| sb.seq == *chunk_seq)
+        })
+        .ok_or(Error::Malformed(
+            "every recoverable Superblock failed to decode",
+        ))?;
 
     Ok(SpaceState {
         keys,
@@ -284,6 +373,190 @@ fn scan_and_recover_inner(
         last_padding_error: None,
         roots_payload_cache: None,
     })
+}
+
+/// Find the most recent superblock by scanning **backward** from the
+/// end of the file, bounded by [`REVERSE_SCAN_BUDGET`]. Returns the
+/// max-seq decodable superblock candidate found in the window (with
+/// the same audit-D2 / pass-14 selection as the full scan), or `None`
+/// if the window holds no recoverable superblock for this space.
+///
+/// Used by the fast-path only to recover the (carried-forward)
+/// checkpoint pointer; it need not be the absolute latest superblock
+/// (the selective scan re-derives that authoritatively).
+fn find_latest_superblock_reverse(
+    container: &mut ContainerFile,
+    keys: &SpaceKeys,
+    container_id: &[u8; 32],
+    total: u64,
+    constant_time: bool,
+) -> Result<Option<Superblock>> {
+    if total == 0 {
+        return Ok(None);
+    }
+    let lo = total.saturating_sub(REVERSE_SCAN_BUDGET);
+    let mut sb_candidates: std::collections::BTreeMap<u64, Vec<u8>> =
+        std::collections::BTreeMap::new();
+    let mut slot = total;
+    while slot > lo {
+        slot -= 1;
+        let chunk = container.read_slot(slot)?;
+        let pt = match try_decrypt_with_options(keys, container_id, slot, &chunk, constant_time) {
+            Some(pt) => pt,
+            None => continue,
+        };
+        if pt.kind == ChunkKind::Superblock && Superblock::is_valid_encoded_len(pt.payload.len()) {
+            sb_candidates.entry(pt.seq).or_insert(pt.payload);
+        }
+    }
+    Ok(sb_candidates.iter().rev().find_map(|(chunk_seq, payload)| {
+        Superblock::decode(payload)
+            .ok()
+            .filter(|sb| sb.seq == *chunk_seq)
+    }))
+}
+
+/// Read the checkpoint chain rooted at `head`, returning
+/// `(cp_high_water, owned_below)` — the slot count at checkpoint-write
+/// time and the complete sorted owned-slot set below it. Returns `None`
+/// on ANY inconsistency (unreadable / wrong-kind / malformed chunk,
+/// inconsistent high-water across the chain, over-long chain, or a
+/// recorded owned set exceeding the open-scan budget), so the caller
+/// falls back to the full scan. Every read is trial-decrypted under
+/// this space's key, so an adversary without the key cannot drive this
+/// path. `constant_time` keeps the per-chunk timing equalizer engaged.
+fn read_checkpoint_chain(
+    container: &mut ContainerFile,
+    keys: &SpaceKeys,
+    container_id: &[u8; 32],
+    head: u64,
+    total: u64,
+    constant_time: bool,
+) -> Result<Option<(u64, Vec<u64>)>> {
+    let mut owned: Vec<u64> = Vec::new();
+    let mut high_water: Option<u64> = None;
+    let mut cur = head;
+    let mut hops: u64 = 0;
+    while cur != NO_RECORD {
+        hops += 1;
+        if hops > MAX_CHECKPOINT_CHAIN || cur >= total {
+            return Ok(None);
+        }
+        let chunk = container.read_slot(cur)?;
+        let pt = match try_decrypt_with_options(keys, container_id, cur, &chunk, constant_time) {
+            Some(pt) => pt,
+            None => return Ok(None),
+        };
+        if pt.kind != ChunkKind::Checkpoint {
+            return Ok(None);
+        }
+        let cc = match CheckpointChunk::decode(&pt.payload) {
+            Ok(c) => c,
+            Err(_) => return Ok(None),
+        };
+        match high_water {
+            None => high_water = Some(cc.cp_high_water),
+            Some(hw) if hw == cc.cp_high_water => {},
+            Some(_) => return Ok(None),
+        }
+        if owned.len().saturating_add(cc.owned.len()) > MAX_OPEN_SCAN_CHUNKS as usize {
+            return Ok(None);
+        }
+        owned.extend_from_slice(&cc.owned);
+        cur = cc.next_slot;
+    }
+    // `None` only if `head == NO_RECORD` (empty chain) — caller already
+    // guards that, but be explicit: no high-water ⇒ no usable checkpoint.
+    Ok(high_water.map(|hw| (hw, owned)))
+}
+
+/// Fast-open selective scan. Returns `Some(state)` when a checkpoint
+/// drove an O(working-set + tail) reconstruction, or `None` to signal
+/// "fall back to the full scan."
+///
+/// The reconstructed state is provably identical to a full scan's: the
+/// head region `[0, cp_high_water)` is covered by the checkpoint's
+/// recorded owned set, each entry re-validated by trial-decrypt (so a
+/// slot scrubbed since the checkpoint is dropped exactly as a full scan
+/// would drop it; appends-only + scrub-only-removes-ownership guarantee
+/// no head slot becomes *newly* owned after the checkpoint), and the
+/// tail `[cp_high_water, total)` is scanned fresh — which also captures
+/// the authoritative latest superblock (always written at or above the
+/// last checkpoint's high-water).
+fn try_fast_scan_inner(
+    container: &mut ContainerFile,
+    keys: &SpaceKeys,
+    container_id: &[u8; 32],
+    total: u64,
+    cancel: Option<&CancelToken>,
+    constant_time: bool,
+) -> Result<Option<SpaceState>> {
+    // Phase A: recover the checkpoint pointer from a recent superblock.
+    let head_sb = match find_latest_superblock_reverse(
+        container,
+        keys,
+        container_id,
+        total,
+        constant_time,
+    )? {
+        Some(sb) => sb,
+        None => return Ok(None),
+    };
+    if head_sb.checkpoint_slot == NO_RECORD {
+        return Ok(None);
+    }
+
+    // Phase B: read the checkpoint chain → (high_water, owned_below).
+    let (cp_high_water, owned_below) = match read_checkpoint_chain(
+        container,
+        keys,
+        container_id,
+        head_sb.checkpoint_slot,
+        total,
+        constant_time,
+    )? {
+        Some(x) => x,
+        None => return Ok(None),
+    };
+    // A checkpoint can only summarize the past: its high-water must lie
+    // within the current file. (Equal is fine — nothing appended since.)
+    if cp_high_water > total {
+        return Ok(None);
+    }
+
+    // Phase C: selective scan over the recorded owned set (head) plus
+    // the fresh tail. Defensively clamp recorded entries to the head
+    // region and de-duplicate; the tail is scanned in full.
+    let mut head_owned: Vec<u64> = owned_below
+        .into_iter()
+        .filter(|&s| s < cp_high_water)
+        .collect();
+    head_owned.sort_unstable();
+    head_owned.dedup();
+
+    let mut acc = ScanAcc::default();
+    // The selective set: recorded head-owned slots, then the fresh tail.
+    let selective = head_owned.iter().copied().chain(cp_high_water..total);
+    for (i, slot) in selective.enumerate() {
+        if let Some(token) = cancel
+            && (i as u64).is_multiple_of(CANCEL_POLL_PERIOD)
+        {
+            token.check()?;
+        }
+        let chunk = container.read_slot(slot)?;
+        if let Some(pt) = try_decrypt_with_options(keys, container_id, slot, &chunk, constant_time)
+        {
+            accumulate_owned_slot(&mut acc, slot, pt);
+        }
+    }
+
+    // If no superblock survived (e.g. the checkpoint pointed us at a
+    // stale region and the tail held none), decline rather than error
+    // — the full scan is the authority.
+    if acc.sb_candidates.is_empty() {
+        return Ok(None);
+    }
+    finalize_scan(keys.clone(), *container_id, acc).map(Some)
 }
 
 /// Parallel variant of [`scan_and_recover`] using rayon's work-stealing

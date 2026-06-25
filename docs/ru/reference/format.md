@@ -194,8 +194,13 @@ AEAD-decrypt fail.
 | `0x04` | `Journal` | reserved (intent-log; not emitted in v3) | — |
 | `0x05` | `Commit` | per-Tx root commit | §4.3 |
 | `0x06` | `DataBatch` | zstd-compressed log batch | §4.4 |
+| `0x07` | `Checkpoint` | ускорение open-скана (опционально) | §4.5 |
 
 Прочие значения: отклоняются как `Error::Malformed`.
+
+`Checkpoint` (`0x07`) — **опциональный** и forward-inert: контейнер,
+который ни разу не открывался checkpoint-совместимым писателем, их не
+содержит и побайтово идентичен v3-контейнеру без checkpoint. См. §4.5.
 
 ### 2.5 Garbage chunks
 
@@ -280,13 +285,25 @@ kind-tag-байты из того же byte-namespace.
 ### 4.1 Superblock (`kind = 0x01`)
 
 ```
-offset 0..8    seq        u64 LE
-offset 8..16   root_slot  u64 LE   (slot of the latest Commit chunk,
-                                    or u64::MAX for empty space)
-offset 16..48  root_hash  32 bytes (Merkle root over Commit's roots)
+offset 0..8     seq             u64 LE
+offset 8..16    root_slot       u64 LE   (slot of the latest Commit chunk,
+                                         or u64::MAX for empty space)
+offset 16..48   root_hash       32 bytes (Merkle root over Commit's roots)
+offset 48..56   checkpoint_slot u64 LE   (ОПЦИОНАЛЬНО — присутствует iff != u64::MAX)
 ```
 
-Всего: 48 байт. Несколько реплик Superblock с одним и тем же `seq`
+**Канонический 48/56-байтовый кодек.** Поле `checkpoint_slot` (§4.5)
+кодируется только когда оно задано: superblock с `checkpoint_slot ==
+u64::MAX` (`NO_RECORD`) кодируется как **48 байт** — побайтово
+идентично v3-superblock'у без checkpoint — а любое другое значение как
+**56 байт** (48-байтовый префикс плюс указатель). `decode` принимает
+ровно эти две длины и **отклоняет** 56-байтовый payload, чей
+`checkpoint_slot` равен `NO_RECORD` (его канонический вид — 48-байтовый),
+поэтому кодирование остаётся биекцией — сохраняя strict-length
+контракт канонической уникальности (audit pass 19 round 2).
+Существующие контейнеры читаются без изменений.
+
+Несколько реплик Superblock с одним и тем же `seq`
 пишутся за Tx (по умолчанию `superblock_replicas = 3`); recovery
 выбирает любую AEAD-decryptable реплику с наибольшим `seq`.
 
@@ -296,6 +313,8 @@ offset 16..48  root_hash  32 bytes (Merkle root over Commit's roots)
 
 `root_slot = u64::MAX` (константа `NO_RECORD`) означает «commit'а
 ещё нет»; это состояние свежесозданного space до любых Tx commit.
+`commit_tx` переносит `checkpoint_slot` дословно из предыдущего
+superblock (он никогда не создаёт его сам — см. §4.5).
 
 ### 4.2 IndexNode (`kind = 0x02`)
 
@@ -411,6 +430,72 @@ KV value for log entry: u64 LE = batch_slot
 KV key for log entry:   u64 BE = log_id (big-endian for natural sort order)
 ```
 
+### 4.5 Checkpoint (`kind = 0x07`) — ускорение open-скана (опционально)
+
+**Checkpoint** — это оптимизация, позволяющая последующему open
+восстановить состояние space за O(working-set + tail) вместо O(всех
+слотов). Он **никогда не несёт корректности**: читатель, который его
+игнорирует (или находит нечитаемым), откатывается к полному скану и
+всегда корректен.
+
+Checkpoint — это односвязная цепочка из одного или более Checkpoint
+chunk'ов, записывающая **полный** набор слотов, которыми владел этот
+space на момент прошлого open и которые лежат ниже записанного
+high-water. Payload каждого chunk'а:
+
+```
+offset 0..8     cp_seq         u64 LE   (seq superblock'а, под которым
+                                         опубликован этот checkpoint)
+offset 8..16    cp_high_water  u64 LE   (slot_count на момент записи; каждый
+                                         записанный owned-слот < этого)
+offset 16..24   next_slot      u64 LE   (следующий Checkpoint chunk, или u64::MAX)
+offset 24..28   count          u32 LE   (число owned-записей в ЭТОМ chunk'е)
+offset 28..     owned[count]   u64 LE каждая (по возрастанию)
+```
+
+На голову цепочки указывает `Superblock.checkpoint_slot` (§4.1).
+Последующий open восстанавливает указатель из недавнего superblock'а,
+читает цепочку чтобы получить `(cp_high_water, owned_below)`, затем
+trial-decrypt'ит только `owned_below` (перепроверяя каждый — слот,
+вычищенный с тех пор, отбрасывается) плюс свежий хвост
+`[cp_high_water, slot_count)`. Результат доказуемо идентичен полному
+скану, поэтому forward-secrecy (vacuum обходит весь `owned_slots`) и
+`commit_history` сохраняются.
+
+Правила записи (чтобы per-commit overhead оставался нулевым, а износ
+диска — амортизированным):
+
+- `commit_tx` **никогда** не пишет checkpoint — он лишь переносит
+  `checkpoint_slot` вперёд (§4.1, §5).
+- Checkpoint (пере)записывается лениво не чаще одного раза за open,
+  после `vacuum_orphans`, и только когда это помогает (контейнер выше
+  порога размера и un-checkpointed хвост вырос больше working-set).
+- Запись checkpoint публикует свежую цепочку плюс superblock с
+  **увеличенным seq** (тот же `root_slot` / `root_hash`, новый
+  `checkpoint_slot`) — «checkpoint commit» — и вычищает цепочку,
+  которую заменяет.
+
+**Без bump'а `format_version`.** Checkpoint — это additive,
+опциональная v3-структура, а не новое поколение: версия криптографически
+привязана к key schedule (§3), поэтому её bump осиротил бы каждый
+существующий контейнер. Замечание о forward-совместимости: контейнер,
+который **был** checkpoint'нут, содержит `0x07` chunk'и и 56-байтовые
+superblock'и и поэтому **не** читается pre-checkpoint бинарником
+(который отклоняет неизвестный chunk kind / длину superblock'а);
+checkpoint-free контейнер остаётся полностью взаимозаменяемым.
+
+**Deniability.** Каждый Checkpoint chunk AEAD-запечатан под per-space
+ключом (непрозрачные случайные байты для чужого противника) и имеет
+тот же `CHUNK_SIZE`, что и любой другой chunk, не добавляя сигнала
+размера/структуры сверх append'ов и in-place перезаписей, которые
+commit + padding + vacuum уже производят. Чтение fast-path
+**пост-аутентификационное**: без ключа противник не может расшифровать
+superblock или checkpoint, поэтому open с неверным паролем платит
+полный скан (нет fast-vs-slow timing-оракула для подбора пароля), а
+decoy-open никогда не трогает слоты другого space (его wall-clock
+отражает только working-set самого decoy, никогда — существование
+скрытых space). Checkpoint'ы только per-space.
+
 ## 5. Протокол commit Tx (write path)
 
 Успешный commit Tx ОБЯЗАН выполнить следующую последовательность
@@ -482,6 +567,19 @@ SSD из-за трёх barrier.
 6. Опционально: построить `commit_history = sort_dedup(all SB seqs)`
    и `owned_slots = sort(all AEAD-successful slots)` для downstream
    API.
+
+**Fast-open path (опционально, §4.5).** Перед полным шагом-4 sequential
+скан пытается восстановить состояние за O(working-set + tail):
+ограниченный обратный скан восстанавливает `checkpoint_slot` недавнего
+superblock'а, цепочка Checkpoint даёт `(cp_high_water, owned_below)`, и
+сканируются только `owned_below` (перепроверённый trial-decrypt'ом) плюс
+свежий хвост `[cp_high_water, N)`. Любая несогласованность (нет
+checkpoint, нечитаемая/слишком длинная цепочка, нарушение формы)
+откатывается к полному скану выше, который является авторитетом.
+Результат доказуемо идентичен полному скану. Пропуск
+**пост-аутентификационный** — только держатель ключа может расшифровать
+superblock/checkpoint, поэтому неверный пароль всегда платит полный скан
+из `N` попыток.
 
 **Инвариант deniability.** Шаг 4 выполняет ровно `N` AEAD-попыток
 независимо от per-space результата. Успешные и неуспешные decrypts

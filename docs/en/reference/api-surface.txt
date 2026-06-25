@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-06-25T22:52:18Z
+# Captured: 2026-06-25T23:18:10Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -89,26 +89,26 @@ container/mod.rs:  318:    pub fn create_space(&mut self, password: &[u8]) -> Re
 container/mod.rs:  347:    pub fn open_space(&mut self, password: &[u8]) -> Result<Space<'_>> {
 container/mod.rs:  402:    pub fn open_space_verified(&mut self, password: &[u8]) -> Result<Space<'_>> {
 container/mod.rs:  411:    pub fn open_space_with_keys_verified(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
-container/mod.rs:  453:    pub fn derive_space_keys(&self, password: &[u8]) -> Result<SpaceKeys> {
-container/mod.rs:  469:    pub fn open_space_with_keys(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
-container/mod.rs:  482:    pub fn open_space_cancellable(
-container/mod.rs:  496:    pub fn open_space_with_keys_cancellable(
-container/mod.rs:  562:    pub fn open_space_parallel(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  570:    pub fn open_space_with_keys_parallel(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
-container/mod.rs:  600:    pub fn open_space_mmap(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  608:    pub fn open_space_with_keys_mmap(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
-container/mod.rs:  656:    pub fn open_space_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  665:    pub fn open_space_with_keys_constant_time(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
-container/mod.rs:  690:    pub fn open_space_parallel_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  698:    pub fn open_space_with_keys_parallel_constant_time(
-container/mod.rs:  723:    pub fn open_space_mmap_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  731:    pub fn open_space_with_keys_mmap_constant_time(
-container/mod.rs:  809:    pub fn repack(
-container/mod.rs:  831:    pub fn repack_cancellable(
-container/mod.rs:  1040:    pub fn compact_known(
-container/mod.rs:  1051:    pub fn compact_known_cancellable(
-container/mod.rs:  1109:    pub fn change_passwords(
-container/mod.rs:  1120:    pub fn change_passwords_cancellable(
+container/mod.rs:  455:    pub fn derive_space_keys(&self, password: &[u8]) -> Result<SpaceKeys> {
+container/mod.rs:  471:    pub fn open_space_with_keys(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
+container/mod.rs:  484:    pub fn open_space_cancellable(
+container/mod.rs:  498:    pub fn open_space_with_keys_cancellable(
+container/mod.rs:  572:    pub fn open_space_parallel(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  580:    pub fn open_space_with_keys_parallel(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
+container/mod.rs:  610:    pub fn open_space_mmap(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  618:    pub fn open_space_with_keys_mmap(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
+container/mod.rs:  666:    pub fn open_space_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  675:    pub fn open_space_with_keys_constant_time(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
+container/mod.rs:  700:    pub fn open_space_parallel_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  708:    pub fn open_space_with_keys_parallel_constant_time(
+container/mod.rs:  733:    pub fn open_space_mmap_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  741:    pub fn open_space_with_keys_mmap_constant_time(
+container/mod.rs:  819:    pub fn repack(
+container/mod.rs:  841:    pub fn repack_cancellable(
+container/mod.rs:  1050:    pub fn compact_known(
+container/mod.rs:  1061:    pub fn compact_known_cancellable(
+container/mod.rs:  1119:    pub fn change_passwords(
+container/mod.rs:  1130:    pub fn change_passwords_cancellable(
 crypto/aead.rs:  21:pub struct ChunkAead {
 crypto/aead.rs:  36:    pub fn new(key: &[u8; 32]) -> Self {
 crypto/aead.rs:  46:    pub fn seal(&self, plaintext: &[u8], aad: [u8; AAD_LEN]) -> Result<([u8; NONCE_LEN], Vec<u8>)> {
@@ -173,7 +173,7 @@ multi.rs:  86:    pub fn create_space(&mut self, keys: SpaceKeys) -> Result<usiz
 multi.rs:  94:    pub fn len(&self) -> usize {
 multi.rs:  100:    pub fn is_empty(&self) -> bool {
 multi.rs:  115:    pub fn with_space<R>(&mut self, id: usize, f: impl FnOnce(&mut Space<'_>) -> R) -> Result<R> {
-open/mod.rs:  67:pub const MAX_OPEN_SCAN_CHUNKS: u64 = 16 * 1024 * 1024;
+open/mod.rs:  121:pub const MAX_OPEN_SCAN_CHUNKS: u64 = 16 * 1024 * 1024;
 padding/mod.rs:  36:pub enum PaddingPolicy {
 padding/mod.rs:  69:    pub const DEFAULT: Self = Self::BucketGrowth { bucket_chunks: 256 };
 padding/mod.rs:  91:    pub fn from_persisted_index(idx: u8) -> Self {
@@ -223,26 +223,26 @@ space/log_iter.rs:  228:    pub fn read_log(&mut self, namespace: Namespace, log
 space/mod.rs:  3:pub mod index;
 space/mod.rs:  4:pub mod log;
 space/mod.rs:  5:pub mod superblock;
-space/mod.rs:  44:pub struct SpaceStats {
-space/mod.rs:  76:    pub fn total_entries(&self) -> usize {
-space/mod.rs:  100:    pub fn utilization_ratio(&self) -> f64 {
-space/mod.rs:  122:pub struct IntegrityReport {
-space/mod.rs:  204:pub struct Space<'f> {
-space/mod.rs:  339:    pub fn commit_seq(&self) -> u64 {
-space/mod.rs:  355:    pub fn space_keys(&self) -> SpaceKeys {
-space/mod.rs:  393:    pub fn commit_history(&self) -> &[u64] {
-space/mod.rs:  413:    pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
-space/mod.rs:  424:    pub fn padding_policy(&self) -> crate::padding::PaddingPolicy {
-space/mod.rs:  436:    pub fn last_padding_error(&self) -> Option<&crate::Error> {
-space/mod.rs:  445:    pub fn audit_owned_chunk_count(&self) -> usize {
-space/mod.rs:  461:    pub fn stats(&mut self) -> Result<SpaceStats> {
-space/mod.rs:  479:    pub fn begin_tx<'s>(&'s mut self) -> Tx<'s, 'f> {
-space/mod.rs:  491:    pub fn get(&mut self, namespace: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>> {
-space/mod.rs:  529:    pub fn list(&mut self, namespace: Namespace) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-space/mod.rs:  542:    pub fn count(&mut self, namespace: Namespace) -> Result<usize> {
-space/mod.rs:  594:    pub fn erase_namespace(&mut self, namespace: Namespace) -> Result<usize> {
-space/mod.rs:  619:    pub fn list_namespaces(&mut self) -> Result<Vec<Namespace>> {
-space/mod.rs:  631:    pub fn list_namespaces_with_kind(
+space/mod.rs:  45:pub struct SpaceStats {
+space/mod.rs:  77:    pub fn total_entries(&self) -> usize {
+space/mod.rs:  101:    pub fn utilization_ratio(&self) -> f64 {
+space/mod.rs:  123:pub struct IntegrityReport {
+space/mod.rs:  205:pub struct Space<'f> {
+space/mod.rs:  340:    pub fn commit_seq(&self) -> u64 {
+space/mod.rs:  356:    pub fn space_keys(&self) -> SpaceKeys {
+space/mod.rs:  394:    pub fn commit_history(&self) -> &[u64] {
+space/mod.rs:  414:    pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
+space/mod.rs:  425:    pub fn padding_policy(&self) -> crate::padding::PaddingPolicy {
+space/mod.rs:  437:    pub fn last_padding_error(&self) -> Option<&crate::Error> {
+space/mod.rs:  446:    pub fn audit_owned_chunk_count(&self) -> usize {
+space/mod.rs:  462:    pub fn stats(&mut self) -> Result<SpaceStats> {
+space/mod.rs:  480:    pub fn begin_tx<'s>(&'s mut self) -> Tx<'s, 'f> {
+space/mod.rs:  492:    pub fn get(&mut self, namespace: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>> {
+space/mod.rs:  530:    pub fn list(&mut self, namespace: Namespace) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+space/mod.rs:  543:    pub fn count(&mut self, namespace: Namespace) -> Result<usize> {
+space/mod.rs:  595:    pub fn erase_namespace(&mut self, namespace: Namespace) -> Result<usize> {
+space/mod.rs:  620:    pub fn list_namespaces(&mut self) -> Result<Vec<Namespace>> {
+space/mod.rs:  632:    pub fn list_namespaces_with_kind(
 space/superblock.rs:  30:pub const NO_RECORD: u64 = u64::MAX;
 space/superblock.rs:  37:pub struct Superblock {
 space/superblock.rs:  72:    pub const ENCODED_LEN: usize = 8 + 8 + 32;
