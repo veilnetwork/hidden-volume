@@ -210,7 +210,10 @@ fn scan_and_recover_inner(
             // chunks each carrying a PAYLOAD_CAP-sized payload and make
             // `open` retain tens of GiB (audit pass 20). Non-matching
             // payloads still counted toward `commit_history` above.
-            if pt.payload.len() == Superblock::ENCODED_LEN {
+            // Accepts both canonical superblock lengths (48 short / 56
+            // long-with-checkpoint); `Superblock::decode` is the
+            // canonical-form authority downstream.
+            if Superblock::is_valid_encoded_len(pt.payload.len()) {
                 use std::collections::btree_map::Entry;
                 match sb_candidates.entry(pt.seq) {
                     Entry::Vacant(e) => {
@@ -423,8 +426,9 @@ fn scan_and_recover_parallel_inner(
                         acc.commit_history.push(pt.seq);
                         // Audit pass 7 (D4): see sequential variant for rationale.
                         // Audit pass 20: length-gate the candidate (memory bound).
+                        // Accepts both canonical lengths (48 / 56).
                         use std::collections::btree_map::Entry;
-                        if pt.payload.len() == Superblock::ENCODED_LEN {
+                        if Superblock::is_valid_encoded_len(pt.payload.len()) {
                             match acc.sb_candidates.entry(pt.seq) {
                                 Entry::Vacant(e) => {
                                     e.insert(pt.payload);
@@ -619,17 +623,26 @@ fn scan_and_recover_mmap_inner(
             // Audit pass 7 (D4): see sequential variant for rationale.
             // `debug_assert!` catches a writer-bug regression that
             // produces same-seq-different-payload SBs.
+            //
+            // Length-gate the retained payload to the two canonical
+            // superblock lengths (48 / 56) — same memory bound the
+            // sequential / parallel scan paths apply (audit pass 20).
+            // Previously the mmap path omitted this gate; closed here
+            // alongside the 56-byte long-form addition. Non-matching
+            // payloads still counted toward `commit_history` above.
             use std::collections::btree_map::Entry;
-            match sb_candidates.entry(pt.seq) {
-                Entry::Vacant(e) => {
-                    e.insert(pt.payload);
-                },
-                Entry::Occupied(e) => {
-                    debug_assert!(
-                        e.get() == &pt.payload,
-                        "same-seq Superblock replicas must be bit-equal"
-                    );
-                },
+            if Superblock::is_valid_encoded_len(pt.payload.len()) {
+                match sb_candidates.entry(pt.seq) {
+                    Entry::Vacant(e) => {
+                        e.insert(pt.payload);
+                    },
+                    Entry::Occupied(e) => {
+                        debug_assert!(
+                            e.get() == &pt.payload,
+                            "same-seq Superblock replicas must be bit-equal"
+                        );
+                    },
+                }
             }
         }
     }
