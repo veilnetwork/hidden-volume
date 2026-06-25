@@ -729,7 +729,10 @@ impl SpaceHandle {
         let keys = decode_space_keys(&keys)?;
         let p = PathBuf::from(path);
         let container = Box::new(Container::open(&p)?);
-        let inner = OwnedSpace::wrap_open_with_keys(container, keys)?;
+        // Constant-time scan: the FFI is the deniability-app surface, so equalize
+        // the open so unlock latency can't distinguish which space (or none)
+        // matched — see OwnedSpace::wrap_open_with_keys_constant_time.
+        let inner = OwnedSpace::wrap_open_with_keys_constant_time(container, keys)?;
         Ok(std::sync::Arc::new(Self {
             inner: Mutex::new(inner),
         }))
@@ -762,7 +765,8 @@ impl SpaceHandle {
         let password = zeroize::Zeroizing::new(password);
         let p = PathBuf::from(path);
         let container = Box::new(Container::open(&p)?);
-        let inner = OwnedSpace::wrap_open(container, &password)?;
+        // Constant-time scan (deniability) — see open_with_keys / wrap_open_constant_time.
+        let inner = OwnedSpace::wrap_open_constant_time(container, &password)?;
         Ok(std::sync::Arc::new(Self {
             inner: Mutex::new(inner),
         }))
@@ -1073,7 +1077,8 @@ impl AsyncSpaceHandle {
         let p = PathBuf::from(path);
         let inner = run_blocking(move || -> HvResult<OwnedSpace> {
             let container = Box::new(Container::open(&p)?);
-            Ok(OwnedSpace::wrap_open(container, &password)?)
+            // Constant-time scan (deniability) — see the sync SpaceHandle::open.
+            Ok(OwnedSpace::wrap_open_constant_time(container, &password)?)
         })
         .await?;
         Ok(Arc::new(Self {
@@ -1109,7 +1114,10 @@ impl AsyncSpaceHandle {
         let p = PathBuf::from(path);
         let inner = run_blocking(move || -> HvResult<OwnedSpace> {
             let container = Box::new(Container::open(&p)?);
-            Ok(OwnedSpace::wrap_open_with_keys(container, keys)?)
+            // Constant-time scan (deniability) — see the sync open_with_keys.
+            Ok(OwnedSpace::wrap_open_with_keys_constant_time(
+                container, keys,
+            )?)
         })
         .await?;
         Ok(Arc::new(Self {
@@ -1405,7 +1413,9 @@ impl MultiSpaceHandle {
     pub fn open_space(&self, keys: Vec<u8>) -> HvResult<u32> {
         let keys = decode_space_keys(&keys)?;
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
-        Ok(g.open_space(keys)? as u32)
+        // Constant-time scan (deniability) — equalizes the discovery scan so
+        // hosting a space doesn't leak which one (or none) matched.
+        Ok(g.open_space_constant_time(keys)? as u32)
     }
 
     /// Number of hosted spaces.
