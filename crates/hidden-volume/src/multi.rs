@@ -9,9 +9,9 @@
 //! identity's space open simultaneously.
 //!
 //! [`MultiSpace`] provides that by holding each space's recovered
-//! [`SpaceState`](crate::space::SpaceState) *detached* from the file, and
-//! binding one state to the file only for the duration of a single operation
-//! (see [`Space::from_state`]). Because every operation goes through
+//! `SpaceState` *detached* from the file, and binding one state to the file only
+//! for the duration of a single operation (via the crate-internal
+//! `Space::from_state`). Because every operation goes through
 //! `&mut self`, writes to different spaces are serialized — which is exactly
 //! what the single-writer file lock requires — while all spaces stay open (no
 //! re-scan, no re-derivation) between operations.
