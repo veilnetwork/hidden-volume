@@ -646,11 +646,17 @@ TM1 leak does **not** depend on scan-mode choice; opting in to
 parallel-scan or mmap for performance does not mitigate the
 oracle.
 
-#### Mitigation (shipped 2026-05-28, opt-in — partial)
+#### Mitigation (shipped 2026-05-28, opt-in — partial; FFI default since Unreleased)
 
 The bounded mitigation is shipped as an opt-in API:
 [`Container::open_space_constant_time`](../../../crates/hidden-volume/src/container/mod.rs)
 (plus the keys-driven sibling `open_space_with_keys_constant_time`).
+**For the FFI surface it is no longer opt-in:** `SpaceHandle::open` /
+`open_with_keys` (sync and async) and `MultiSpaceHandle::open_space` route through
+the constant-time scan unconditionally (see CHANGELOG `[Unreleased]`), so a host
+app built on the FFI — the deniability client — gets the mitigation by default
+rather than having to remember to opt in. The direct Rust `Container::open_space`
+remains early-exit for callers that prioritise scan speed over the timing oracle.
 For each slot the scan runs the real AEAD-decrypt, and on MAC-fail
 runs a ChaCha20 stream-equalizer of length `PLAINTEXT_LEN` to
 consume CPU time approximately equivalent to the body decrypt of a
