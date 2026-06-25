@@ -279,6 +279,7 @@ fn scan_and_recover_inner(
         owned_slots,
         commit_history,
         last_padding_error: None,
+        roots_payload_cache: None,
     })
 }
 
@@ -503,6 +504,7 @@ fn scan_and_recover_parallel_inner(
         owned_slots,
         commit_history,
         last_padding_error: None,
+        roots_payload_cache: None,
     })
 }
 
@@ -659,6 +661,7 @@ fn scan_and_recover_mmap_inner(
         owned_slots,
         commit_history,
         last_padding_error: None,
+        roots_payload_cache: None,
     })
 }
 

@@ -266,3 +266,68 @@ fn two_spaces_independent_kv() {
 
     std::fs::remove_file(&path).ok();
 }
+
+/// Regression for the per-`seq` roots-payload cache in `load_prior_roots`: it
+/// must be fully TRANSPARENT. Repeated reads within one commit era (cache hits)
+/// agree, and a commit invalidates the cache so a subsequent read sees the new
+/// era and NEVER the stale prior roots.
+#[test]
+fn roots_cache_transparent_across_reads_and_commits() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_owned();
+    drop(tmp);
+
+    let mut c = Container::create(&path, fast_params()).unwrap();
+    let mut s = c.create_space(b"pw").unwrap();
+
+    // Commit era 1: two namespaces (SETTINGS=1, CONTACTS=2).
+    let mut tx = s.begin_tx();
+    tx.put(Namespace::SETTINGS, b"theme", b"dark").unwrap();
+    tx.put(Namespace::CONTACTS, b"alice", b"a1").unwrap();
+    tx.commit().unwrap();
+
+    // Repeated reads in the SAME era warm then hit the cache; all must agree.
+    for _ in 0..5 {
+        assert_eq!(
+            s.get(Namespace::CONTACTS, b"alice").unwrap().as_deref(),
+            Some(&b"a1"[..])
+        );
+        assert_eq!(
+            s.list_namespaces().unwrap(),
+            vec![Namespace::SETTINGS, Namespace::CONTACTS]
+        );
+    }
+
+    // Commit era 2: overwrite alice + add MEDIA(=4). The cache MUST invalidate.
+    let mut tx = s.begin_tx();
+    tx.put(Namespace::CONTACTS, b"alice", b"a2").unwrap();
+    tx.put(Namespace::MEDIA, b"m", b"hi").unwrap();
+    tx.commit().unwrap();
+
+    assert_eq!(
+        s.get(Namespace::CONTACTS, b"alice").unwrap().as_deref(),
+        Some(&b"a2"[..]),
+        "read after commit must see the new value, not the cached era"
+    );
+    assert_eq!(
+        s.get(Namespace::MEDIA, b"m").unwrap().as_deref(),
+        Some(&b"hi"[..]),
+        "a namespace added in the new era must be visible (cache invalidated)"
+    );
+    assert_eq!(
+        s.list_namespaces().unwrap(),
+        vec![Namespace::SETTINGS, Namespace::CONTACTS, Namespace::MEDIA]
+    );
+
+    // Reopen → fresh (empty) cache → identical observable state.
+    drop(s);
+    drop(c);
+    let mut c = Container::open(&path).unwrap();
+    let mut s = c.open_space(b"pw").unwrap();
+    assert_eq!(
+        s.get(Namespace::CONTACTS, b"alice").unwrap().as_deref(),
+        Some(&b"a2"[..])
+    );
+
+    std::fs::remove_file(&path).ok();
+}
