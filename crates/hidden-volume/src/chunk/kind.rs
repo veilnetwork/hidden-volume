@@ -27,6 +27,16 @@ pub enum ChunkKind {
     /// Used for the message log namespace where a per-message KV
     /// entry would explode the index. See `space::log`.
     DataBatch = 0x06,
+    /// Open-scan acceleration chunk (the "fast-open" optimization).
+    /// Records the set of slots owned by this space as of a past open,
+    /// so a later open can trial-decrypt only the owned working set
+    /// plus the tail appended since, instead of every slot in the file.
+    /// AEAD-sealed under the same per-space key as every other chunk
+    /// (opaque garbage to a foreign adversary); an optimization hint
+    /// only — a reader that ignores it is always correct. Written
+    /// lazily by the open-scan self-heal path, never by `commit_tx`.
+    /// See `crate::open` and `docs/en/reference/format.md` §8.
+    Checkpoint = 0x07,
 }
 
 impl ChunkKind {
@@ -40,6 +50,7 @@ impl ChunkKind {
             0x02 => Self::IndexNode,
             0x05 => Self::Commit,
             0x06 => Self::DataBatch,
+            0x07 => Self::Checkpoint,
             _ => return Err(Error::Malformed("unknown chunk kind")),
         })
     }

@@ -12,6 +12,45 @@ format.
 
 ## [Unreleased]
 
+### Added
+
+- **Fast-open checkpoint — format groundwork (inert).** The open-scan
+  is O(total slots): a long-history / low-utilization container (e.g.
+  a messenger store bloated by per-commit padding) pays a full
+  trial-decrypt sweep of every slot on each unlock. This change lands
+  the *inert* on-disk groundwork for an O(working-set) open; the
+  acceleration behavior (self-heal writer + fast-path reader) follows
+  in a companion change. Three additive, forward-inert pieces:
+  - `ChunkKind::Checkpoint = 0x07` — a new (additive, `#[non_exhaustive]`)
+    chunk kind reserved for the open-scan acceleration structure. Not
+    yet produced by any writer.
+  - `Superblock` gains an optional `checkpoint_slot: u64` pointer with a
+    **canonical 48/56-byte codec**: `NO_RECORD` encodes as the 48-byte
+    short form, byte-identical to a pre-checkpoint v3 superblock;
+    any other value encodes as a 56-byte long form (short form ‖
+    pointer). `decode` accepts both and rejects the non-canonical
+    "56-byte-but-NO_RECORD" form, preserving the strict-length
+    canonical-uniqueness contract (audit pass 19). `commit_tx` carries
+    the pointer forward verbatim at zero extra disk cost. `Superblock::encode`
+    now returns `Vec<u8>` (was `[u8; 48]`); new
+    `Superblock::ENCODED_LEN_WITH_CHECKPOINT` (= 56) and
+    `Superblock::is_valid_encoded_len`.
+  - The open-scan superblock length-gate now accepts both canonical
+    lengths {48, 56} on all three scan paths (sequential / parallel /
+    mmap) — and the mmap path gains the length-gate it previously
+    lacked (a memory-bound parity fix, audit pass 20).
+  - **No `format_version` bump (stays 3).** The version is
+    cryptographically bound into the key schedule
+    (`derive_master_key`), so bumping it would orphan every existing
+    container. The checkpoint is therefore an *optional, forward-inert
+    v3 optimization hint* (AEAD-sealed under the per-space key, opaque
+    to a foreign adversary; a reader that ignores it is always
+    correct), not a format generation. Existing containers read back
+    byte-identically; a container that has *been* checkpointed by a
+    checkpoint-aware writer is not readable by a pre-checkpoint binary
+    (one-way forward-incompat within v3 — acceptable for this
+    project's single-app deployment, see `docs/en/reference/format.md` §8).
+
 ### Security
 
 - **FFI open paths now use the constant-time space scan (F-TM1 mitigation).**
