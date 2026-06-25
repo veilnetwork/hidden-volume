@@ -341,8 +341,8 @@ impl<'f> Space<'f> {
     /// This space's [`SpaceKeys`] — the per-space decryption root, derived at
     /// open time from the password (Argon2id + version-bind). Returns a clone so
     /// a host-app can persist it for keys-only reopen via
-    /// [`Container::open_space_with_keys`] (the documented external-keyring /
-    /// master-space workflow; see [`Container::derive_space_keys`]).
+    /// [`crate::Container::open_space_with_keys`] (the documented external-keyring
+    /// / master-space workflow; see [`crate::Container::derive_space_keys`]).
     ///
     /// **Sensitive.** These bytes bypass Argon2 on reopen, so storing them
     /// outside the process forfeits the brute-force protection of the password.
