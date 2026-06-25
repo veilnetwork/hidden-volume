@@ -14,16 +14,42 @@
 //!
 //! **It is an optimization hint, never a correctness-bearing
 //! structure.** A reader that ignores the checkpoint, or that finds it
-//! unreadable, always falls back to the full scan and is correct. The
-//! reconstructed `owned_slots` is provably identical to a full scan's:
-//! the checkpoint records the owned set below `cp_high_water`; the
-//! reader re-validates each recorded slot by trial-decrypt (so a slot
-//! scrubbed since the checkpoint is dropped exactly as a full scan
-//! would drop it), and appends-only + scrub-only-removes-ownership
-//! guarantee no slot below `cp_high_water` becomes *newly* owned after
-//! the checkpoint. So forward-secrecy (`vacuum_orphans` /
+//! unreadable, always falls back to the full scan and is correct.
+//!
+//! **Completeness is guaranteed by induction over honest writes.** The
+//! reconstructed `owned_slots` equals a full scan's whenever the
+//! checkpoint's recorded owned set is itself complete, and the honest
+//! writer always produces a complete one:
+//! - *Base case.* The first checkpoint can only be written when none
+//!   exists (`old_head == NO_RECORD`), which means this open's
+//!   fast-path declined and a **full scan** produced the authoritative
+//!   owned set that is snapshotted — complete by construction.
+//! - *Inductive step.* A fast open trial-decrypts every slot the
+//!   checkpoint recorded below `cp_high_water` (re-validating each, so a
+//!   slot scrubbed since is dropped exactly as a full scan would drop
+//!   it) and scans the tail `[cp_high_water, total)` in full. Since
+//!   appends-only + scrub-only-removes-ownership mean no slot below the
+//!   high-water becomes *newly* owned after the checkpoint, a complete
+//!   predecessor yields a complete successor.
+//!
+//! So under honest operation forward-secrecy (`vacuum_orphans` /
 //! `vacuum_data_batches` iterate the full `owned_slots`) and
 //! `commit_history` are preserved bit-for-bit.
+//!
+//! **Trust boundary.** The recorded owned set is a *key-authenticated
+//! trusted cache*: the reader drops recorded slots that fail
+//! re-validation but cannot detect an *omitted* slot without the very
+//! full scan it is avoiding. A checkpoint that omits a genuinely-owned
+//! slot below `cp_high_water` — only producible by a key-holder
+//! deliberately forging one (self-harm), never by the honest writer
+//! above, and unreachable by any keyless adversary — would make vacuum
+//! miss that orphan (a forward-secrecy degradation), but never affects
+//! the winning superblock or any committed data (reads follow
+//! `superblock.root_slot`, not `owned_slots`). This is the same trust
+//! model the superblock's persisted `root_slot` / `root_hash` already
+//! rely on (and `verify_integrity` cross-checks the Merkle root). The
+//! `fast_path_matches_full_scan_and_engages` test guards the
+//! owned-tracking regression class.
 //!
 //! **Lazy self-heal, never per-commit.** `commit_tx` never writes a
 //! checkpoint (zero per-commit overhead — it only carries the pointer

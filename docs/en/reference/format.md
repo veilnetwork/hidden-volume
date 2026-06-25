@@ -448,8 +448,21 @@ A later open recovers the pointer from a recent superblock, reads the
 chain to get `(cp_high_water, owned_below)`, then trial-decrypts only
 `owned_below` (re-validating each — a slot scrubbed since is dropped)
 plus the fresh tail `[cp_high_water, slot_count)`. The result is
-provably identical to a full scan, so forward-secrecy (vacuum iterates
-the full `owned_slots`) and `commit_history` are preserved.
+identical to a full scan whenever the recorded owned set is complete,
+which the honest writer guarantees by induction (the first checkpoint
+is always written from a full scan; each fast-derived one inherits
+completeness). So forward-secrecy (vacuum iterates the full
+`owned_slots`) and `commit_history` are preserved.
+
+The recorded owned set is a **key-authenticated trusted cache**: the
+reader drops slots that fail re-validation but cannot detect an
+*omitted* one without the full scan it is avoiding. A checkpoint that
+omits an owned slot — only forgeable by a key-holder (self-harm),
+never by the honest writer, unreachable by a keyless adversary — would
+make vacuum miss that orphan (a forward-secrecy degradation) but never
+affects the winning superblock or any committed data. This is the same
+trust the superblock's persisted `root_slot` / `root_hash` already
+rely on.
 
 Write rules (so per-commit overhead stays zero and disk churn is
 amortized):
