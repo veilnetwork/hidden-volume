@@ -189,8 +189,13 @@ AEAD-decrypt fail.
 | `0x04` | `Journal` | reserved (intent-log; not emitted in v3) | — |
 | `0x05` | `Commit` | per-Tx root commit | §4.3 |
 | `0x06` | `DataBatch` | zstd-compressed log batch | §4.4 |
+| `0x07` | `Checkpoint` | open-scan acceleration (optional) | §4.5 |
 
 Other values: rejected as `Error::Malformed`.
+
+`Checkpoint` (`0x07`) is **optional** and forward-inert: a container
+that has never been opened by a checkpoint-aware writer contains none,
+and is byte-identical to a pre-checkpoint v3 container. See §4.5.
 
 ### 2.5 Garbage chunks
 
@@ -274,15 +279,27 @@ kind-tag bytes from the same byte-namespace.
 ### 4.1 Superblock (`kind = 0x01`)
 
 ```
-offset 0..8    seq        u64 LE
-offset 8..16   root_slot  u64 LE   (slot of the latest Commit chunk,
-                                    or u64::MAX for empty space)
-offset 16..48  root_hash  32 bytes (Merkle root over Commit's roots)
+offset 0..8     seq             u64 LE
+offset 8..16    root_slot       u64 LE   (slot of the latest Commit chunk,
+                                         or u64::MAX for empty space)
+offset 16..48   root_hash       32 bytes (Merkle root over Commit's roots)
+offset 48..56   checkpoint_slot u64 LE   (OPTIONAL — present iff != u64::MAX)
 ```
 
-Total: 48 bytes. Multiple Superblock replicas at the same `seq` are
-written per Tx (default `superblock_replicas = 3`); recovery picks
-any AEAD-decryptable replica with the highest `seq`.
+**Canonical 48/56-byte codec.** The `checkpoint_slot` field (§4.5) is
+encoded only when it is set: a superblock with `checkpoint_slot ==
+u64::MAX` (`NO_RECORD`) encodes as **48 bytes** — byte-identical to a
+pre-checkpoint v3 superblock — and any other value encodes as **56
+bytes** (the 48-byte prefix plus the pointer). `decode` accepts exactly
+those two lengths and **rejects** a 56-byte payload whose
+`checkpoint_slot` is `NO_RECORD` (its canonical form is the 48-byte
+one), so the encoding stays a bijection — preserving the strict-length
+canonical-uniqueness contract (audit pass 19 round 2). Existing
+containers therefore read back unchanged.
+
+Multiple Superblock replicas at the same `seq` are written per Tx
+(default `superblock_replicas = 3`); recovery picks any
+AEAD-decryptable replica with the highest `seq`.
 
 `root_hash` is BLAKE3 over the concatenation of
 `IndexRoot.payload_hash` for every namespace in the latest Commit
@@ -290,6 +307,8 @@ any AEAD-decryptable replica with the highest `seq`.
 
 `root_slot = u64::MAX` (constant `NO_RECORD`) means "no commit yet";
 this is the state of a freshly-created space before any Tx commits.
+`commit_tx` carries `checkpoint_slot` forward verbatim from the prior
+superblock (it never mints one — see §4.5).
 
 ### 4.2 IndexNode (`kind = 0x02`)
 
@@ -403,6 +422,68 @@ KV value for log entry: u64 LE = batch_slot
 KV key for log entry:   u64 BE = log_id (big-endian for natural sort order)
 ```
 
+### 4.5 Checkpoint (`kind = 0x07`) — open-scan acceleration (optional)
+
+A **checkpoint** is an optimization that lets a later open reconstruct
+this space's state in O(working-set + tail) instead of O(total slots).
+It is **never correctness-bearing**: a reader that ignores it (or finds
+it unreadable) falls back to the full scan and is always correct.
+
+A checkpoint is a singly-linked chain of one or more Checkpoint chunks
+recording the **complete** set of slots this space owned, as of a past
+open, that lie below a recorded high-water mark. Each chunk's payload:
+
+```
+offset 0..8     cp_seq         u64 LE   (superblock seq this checkpoint
+                                         was published under)
+offset 8..16    cp_high_water  u64 LE   (slot_count at write time; every
+                                         recorded owned slot is < this)
+offset 16..24   next_slot      u64 LE   (next Checkpoint chunk, or u64::MAX)
+offset 24..28   count          u32 LE   (owned-slot entries in THIS chunk)
+offset 28..     owned[count]   u64 LE each (sorted ascending)
+```
+
+The chain head is pointed to by `Superblock.checkpoint_slot` (§4.1).
+A later open recovers the pointer from a recent superblock, reads the
+chain to get `(cp_high_water, owned_below)`, then trial-decrypts only
+`owned_below` (re-validating each — a slot scrubbed since is dropped)
+plus the fresh tail `[cp_high_water, slot_count)`. The result is
+provably identical to a full scan, so forward-secrecy (vacuum iterates
+the full `owned_slots`) and `commit_history` are preserved.
+
+Write rules (so per-commit overhead stays zero and disk churn is
+amortized):
+
+- `commit_tx` **never** writes a checkpoint — it only carries
+  `checkpoint_slot` forward (§4.1, §5).
+- The checkpoint is (re)written lazily at most once per open, after
+  `vacuum_orphans`, and only when it helps (container above a
+  size floor and the un-checkpointed tail grown past the working set).
+- A checkpoint write publishes a fresh chain plus a superblock with a
+  **bumped seq** (same `root_slot` / `root_hash`, new
+  `checkpoint_slot`) — a "checkpoint commit" — and scrubs the chain it
+  supersedes.
+
+**No `format_version` bump.** The checkpoint is an additive, optional
+v3 structure, not a new generation: the version is cryptographically
+bound into the key schedule (§3), so bumping it would orphan every
+existing container. Forward-compatibility note: a container that *has
+been* checkpointed contains `0x07` chunks and 56-byte superblocks and
+is therefore **not** readable by a pre-checkpoint binary (which rejects
+the unknown chunk kind / superblock length); a checkpoint-free
+container remains fully interchangeable.
+
+**Deniability.** Each Checkpoint chunk is AEAD-sealed under the
+per-space key (opaque random bytes to a foreign adversary) and is the
+same `CHUNK_SIZE` as every other chunk, adding no size/structure signal
+beyond the appends and in-place rewrites that commit + padding + vacuum
+already produce. The fast-path read is **post-authentication**: without
+the key an adversary cannot decrypt the superblock or checkpoint, so a
+wrong-password open pays the full scan (no fast-vs-slow timing oracle
+for password guessing), and a decoy open never touches another space's
+slots (its wall-clock reflects only the decoy's own working set, never
+the existence of hidden spaces). Checkpoints are per-space only.
+
 ## 5. Tx commit protocol (write path)
 
 A successful Tx commit MUST execute the following sequence (DESIGN
@@ -469,6 +550,18 @@ candidate `password`:
 6. Optionally: build `commit_history = sort_dedup(all SB seqs)`
    and `owned_slots = sort(all AEAD-successful slots)` for
    downstream APIs.
+
+**Fast-open path (optional, §4.5).** Before the full step-4 sweep the
+sequential scan attempts an O(working-set + tail) reconstruction: a
+bounded reverse scan recovers a recent superblock's `checkpoint_slot`,
+the Checkpoint chain yields `(cp_high_water, owned_below)`, and only
+`owned_below` (re-validated by trial-decrypt) plus the fresh tail
+`[cp_high_water, N)` are scanned. Any inconsistency (no checkpoint,
+unreadable/over-long chain, shape violation) declines to the full
+sweep above, which is the authority. The result is provably identical
+to the full sweep. The skip is **post-authentication** — only a
+key-holder can decrypt the superblock/checkpoint, so a wrong password
+always pays the full `N`-attempt sweep.
 
 **Deniability invariant.** Step 4 executes exactly `N` AEAD attempts
 regardless of the per-space outcome. Successful and unsuccessful

@@ -14,6 +14,37 @@ format.
 
 ### Added
 
+- **Fast-open checkpoint — O(working-set) open (behavior).** Activates
+  the checkpoint groundwork below: opens now run in O(working-set +
+  tail) instead of O(total slots) once a checkpoint exists.
+  - **Reader (`crate::open`).** Before the full sweep the sequential
+    scan attempts a fast path: a bounded reverse scan recovers a recent
+    superblock's `checkpoint_slot`, the Checkpoint chain yields
+    `(cp_high_water, owned_below)`, and only `owned_below`
+    (re-validated by trial-decrypt) plus the fresh tail are scanned.
+    Any inconsistency declines to the full sweep — which is always
+    correct — so the reconstructed state is provably identical to a
+    full scan (owned_slots, commit_history, superblock, data). The
+    parallel / mmap scan modes are unchanged (full scan).
+  - **Writer (`crate::space::checkpoint`).** `commit_tx` never writes a
+    checkpoint (zero per-commit overhead — it only carries the pointer
+    forward). A lazy self-heal runs at most once per open, after
+    `vacuum_orphans`, gated by a size floor + a tail-growth threshold
+    (amortized disk writes). It snapshots the post-vacuum owned set,
+    writes a fresh Checkpoint chain (multi-chunk, §4.5), publishes a
+    bumped-seq superblock, and scrubs the chain it supersedes.
+  - **Forward-secrecy preserved.** The reconstructed `owned_slots` is
+    complete, so `vacuum_orphans` / `vacuum_data_batches` scrub exactly
+    the orphans a full-scan-driven vacuum would.
+  - **Timing / deniability.** The skip is post-authentication: without
+    the key the superblock/checkpoint can't be decrypted, so a wrong
+    password pays the full scan (no fast-vs-slow password oracle), and
+    a decoy open never touches another space's slots (its wall-clock
+    reflects only the decoy's own working set, never hidden-space
+    existence). Each Checkpoint chunk is AEAD-sealed, same `CHUNK_SIZE`
+    as any chunk. The constant-time scan still equalizes MAC-fails on
+    the (reduced) scanned set.
+
 - **Fast-open checkpoint — format groundwork (inert).** The open-scan
   is O(total slots): a long-history / low-utilization container (e.g.
   a messenger store bloated by per-commit padding) pays a full
