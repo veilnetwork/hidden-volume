@@ -186,6 +186,10 @@ class HvSpace {
   /// Number of KV entries in [namespace]. O(N) — walks the index.
   int count(int namespace) => _inner.count(namespace);
 
+  /// Keys of every KV entry in [namespace] (sorted ascending, values not
+  /// transferred) — see SpaceHandleBindings.kvKeys.
+  List<Uint8List> kvKeys(int namespace) => _inner.kvKeys(namespace);
+
   /// Drop all entries in [namespace]. Returns the **number of
   /// entries that were erased** (matches Rust
   /// [`Space::erase_namespace`] semantics — see
@@ -310,6 +314,9 @@ class HvMultiSpace {
 
   /// Number of KV entries in [namespace] of space [id].
   int count(int id, int namespace) => _inner.count(id, namespace);
+
+  /// Keys of every KV entry in [namespace] of space [id].
+  List<Uint8List> kvKeys(int id, int namespace) => _inner.kvKeys(id, namespace);
 
   /// Current commit sequence of space [id].
   int commitSeq(int id) => _inner.commitSeq(id);
