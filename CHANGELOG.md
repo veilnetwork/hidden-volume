@@ -14,6 +14,18 @@ format.
 
 ### Added
 
+- **KV key enumeration over FFI (`SpaceHandle::kv_keys`,
+  `MultiSpaceHandle::kv_keys`).** Returns every key of a namespace,
+  framed as `[count u32 LE] ( [len u32 LE][key bytes] )*` inside one
+  `Vec<u8>` so the handwritten Dart bindings decode it without a uniffi
+  sequence type; values are not transferred. Rationale: a namespace's
+  2-level B+ index has a hard entry budget (`Error::IndexFull`), and a
+  host app garbage-collecting stale per-content bookkeeping keys (which
+  on aged stores wedged every new write) must be able to enumerate them
+  to delete them. Same O(N) index walk as `count`; core `Space::list`
+  already existed — this exposes keys through the FFI and the Flutter
+  plugin (`HvSpace.kvKeys` / `HvMultiSpace.kvKeys`).
+
 - **Fast-open checkpoint — O(working-set) open (behavior).** Activates
   the checkpoint groundwork below: opens now run in O(working-set +
   tail) instead of O(total slots) once a checkpoint exists.

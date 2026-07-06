@@ -340,6 +340,22 @@ RustBuffer _bufferFromByteVec(Uint8List src) {
 
 /// Copy a Rust-owned buffer's contents into a fresh Dart byte list, then
 /// free the Rust buffer. Safe to call regardless of buf.len / data state.
+/// Decode the `kv_keys` inner frame: `[count u32 LE] ( [len u32 LE][key] )*`.
+List<Uint8List> _decodeFramedKeys(Uint8List buf) {
+  final bd = ByteData.sublistView(buf);
+  var off = 0;
+  final count = bd.getUint32(off, Endian.little);
+  off += 4;
+  final keys = <Uint8List>[];
+  for (var i = 0; i < count; i++) {
+    final len = bd.getUint32(off, Endian.little);
+    off += 4;
+    keys.add(Uint8List.fromList(Uint8List.sublistView(buf, off, off + len)));
+    off += len;
+  }
+  return keys;
+}
+
 Uint8List _bufferToBytes(RustBuffer buf) {
   try {
     if (buf.len == 0 || buf.data == ffi.nullptr) return Uint8List(0);
@@ -864,6 +880,12 @@ final _spCount = _dylib.lookupFunction<
     int Function(int, int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_spacehandle_count');
 
+final _spKvKeys = _dylib.lookupFunction<
+    RustBuffer Function(
+        ffi.Uint64, ffi.Uint8, ffi.Pointer<RustCallStatus>),
+    RustBuffer Function(int, int, ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_method_spacehandle_kv_keys');
+
 final _spEraseNs = _dylib.lookupFunction<
     ffi.Uint64 Function(
         ffi.Uint64, ffi.Uint8, ffi.Pointer<RustCallStatus>),
@@ -1068,6 +1090,18 @@ class SpaceHandleBindings {
     return rustCall<int>((s) => _spCount(h, namespace, s));
   }
 
+  /// Keys of every KV entry in [namespace], sorted ascending. O(N) — walks
+  /// the index like [count]; values are not transferred. Host apps use this
+  /// to garbage-collect stale bookkeeping keys (a namespace's 2-level B+
+  /// tree has a hard entry budget — `IndexFull` — so orphans must be
+  /// enumerable to be deletable).
+  List<Uint8List> kvKeys(int namespace) {
+    _ensureOpen();
+    final h = _cloneHandle();
+    final out = rustCall<RustBuffer>((s) => _spKvKeys(h, namespace, s));
+    return _decodeFramedKeys(_Reader(_bufferToBytes(out)).readByteVec());
+  }
+
   /// Drop all entries in [namespace] and zero the index root. Returns
   /// the new commit_seq.
   int eraseNamespace(int namespace) {
@@ -1242,6 +1276,12 @@ final _msCount = _dylib.lookupFunction<
     int Function(int, int, int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_multispacehandle_count');
 
+final _msKvKeys = _dylib.lookupFunction<
+    RustBuffer Function(
+        ffi.Uint64, ffi.Uint32, ffi.Uint8, ffi.Pointer<RustCallStatus>),
+    RustBuffer Function(int, int, int, ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_method_multispacehandle_kv_keys');
+
 final _msCommitSeq = _dylib.lookupFunction<
     ffi.Uint64 Function(ffi.Uint64, ffi.Uint32, ffi.Pointer<RustCallStatus>),
     int Function(int, int, ffi.Pointer<RustCallStatus>)>(
@@ -1349,6 +1389,15 @@ class MultiSpaceHandleBindings {
     _ensureOpen();
     final h = _clone();
     return rustCall<int>((s) => _msCount(h, id, namespace, s));
+  }
+
+  /// Keys of every KV entry in [namespace] of space [id] — the multi-space
+  /// twin of [SpaceHandleBindings.kvKeys].
+  List<Uint8List> kvKeys(int id, int namespace) {
+    _ensureOpen();
+    final h = _clone();
+    final out = rustCall<RustBuffer>((s) => _msKvKeys(h, id, namespace, s));
+    return _decodeFramedKeys(_Reader(_bufferToBytes(out)).readByteVec());
   }
 
   /// Current commit sequence of space [id].
