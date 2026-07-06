@@ -611,6 +611,21 @@ fn check_namespace(byte: u8) -> Result<(), HvError> {
     Ok(())
 }
 
+/// Frame KV keys into one byte buffer for the handwritten Dart bindings:
+/// `[count u32 LE] ( [len u32 LE][key bytes] )*`. Values are dropped — key
+/// enumeration exists for host-app garbage collection, which point-reads any
+/// value it actually needs.
+fn frame_kv_keys(entries: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
+    let total: usize = entries.iter().map(|(k, _)| 4 + k.len()).sum();
+    let mut out = Vec::with_capacity(4 + total);
+    out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    for (k, _) in entries {
+        out.extend_from_slice(&(k.len() as u32).to_le_bytes());
+        out.extend_from_slice(k);
+    }
+    out
+}
+
 /// Parse the 64-byte FFI encoding of [`SpaceKeys`] (`container_id` ‖
 /// `aead_root`). Rejects any other length as [`HvError::Malformed`].
 fn decode_space_keys(bytes: &[u8]) -> Result<SpaceKeys, HvError> {
@@ -817,6 +832,20 @@ impl SpaceHandle {
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
         let n = g.with_space_mut(|s| s.count(Namespace(namespace)))?;
         Ok(n as u64)
+    }
+
+    /// Keys of every KV entry in `namespace`, framed into one byte buffer:
+    /// `[count u32 LE] ( [len u32 LE][key bytes] )*`. A host app garbage-
+    /// collecting stale bookkeeping keys needs enumeration: the KV index is
+    /// otherwise write/point-read only, and a namespace's 2-level B+ tree has
+    /// a hard entry budget ([`Error::IndexFull`]), so orphaned keys must be
+    /// findable to be deletable. Same O(N) index walk as [`Self::count`];
+    /// values are not decoded into the buffer.
+    pub fn kv_keys(&self, namespace: u8) -> HvResult<Vec<u8>> {
+        check_namespace(namespace)?;
+        let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
+        let entries = g.with_space_mut(|s| s.list(Namespace(namespace)))?;
+        Ok(frame_kv_keys(&entries))
     }
 
     /// Read one KV value. Returns `None` if the key is absent.
@@ -1505,6 +1534,15 @@ impl MultiSpaceHandle {
         Ok(n as u64)
     }
 
+    /// Keys of every KV entry in `namespace` of space `id`, framed as in
+    /// [`SpaceHandle::kv_keys`]: `[count u32 LE] ( [len u32 LE][key bytes] )*`.
+    pub fn kv_keys(&self, id: u32, namespace: u8) -> HvResult<Vec<u8>> {
+        check_namespace(namespace)?;
+        let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
+        let entries = g.with_space(id as usize, |s| s.list(Namespace(namespace)))??;
+        Ok(frame_kv_keys(&entries))
+    }
+
     /// Current commit sequence of space `id`.
     pub fn commit_seq(&self, id: u32) -> HvResult<u64> {
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
@@ -1529,6 +1567,51 @@ mod tests {
         let p = tmp.path().to_owned();
         drop(tmp);
         p
+    }
+
+    #[test]
+    fn kv_keys_frames_all_keys_sorted() {
+        let path = scratch_path();
+        let h = SpaceHandle::create(
+            path.to_string_lossy().into_owned(),
+            b"pw".to_vec(),
+            ArgonPreset::Min,
+            0,
+            1,
+        )
+        .unwrap();
+        h.commit(vec![
+            WriteOp::Put {
+                namespace: 1,
+                key: b"beta".to_vec(),
+                value: b"2".to_vec(),
+            },
+            WriteOp::Put {
+                namespace: 1,
+                key: b"alpha".to_vec(),
+                value: b"1".to_vec(),
+            },
+        ])
+        .unwrap();
+
+        let framed = h.kv_keys(1).unwrap();
+        // [count u32 LE] ( [len u32 LE][key] )*
+        assert_eq!(&framed[..4], &2u32.to_le_bytes());
+        let mut off = 4usize;
+        let mut keys = Vec::new();
+        for _ in 0..2 {
+            let len =
+                u32::from_le_bytes(framed[off..off + 4].try_into().unwrap()) as usize;
+            off += 4;
+            keys.push(framed[off..off + len].to_vec());
+            off += len;
+        }
+        assert_eq!(off, framed.len(), "no trailing bytes");
+        assert_eq!(keys, vec![b"alpha".to_vec(), b"beta".to_vec()]);
+
+        // Empty namespace → zero-count frame, not an error.
+        let empty = h.kv_keys(2).unwrap();
+        assert_eq!(&empty[..], &0u32.to_le_bytes());
     }
 
     #[test]
