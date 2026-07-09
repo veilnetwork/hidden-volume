@@ -101,6 +101,12 @@ impl MultiSpace {
         self.spaces.is_empty()
     }
 
+    /// Override the shared container's post-commit padding policy. Applies to
+    /// future commits from any hosted space.
+    pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
+        self.container.set_padding_policy(policy)
+    }
+
     /// Bind hosted space `id` to the container file, run `f` against the usable
     /// [`Space`], then detach it again. The file borrow — and the exclusive lock
     /// it represents — is held only for the duration of `f`, so a later
