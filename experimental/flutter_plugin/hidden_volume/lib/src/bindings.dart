@@ -99,17 +99,18 @@ const int _callUnexpectedError = 2;
 // ------------------------------------------------------------------
 
 final _rustbufferFromBytes = _dylib.lookupFunction<
-    RustBuffer Function(ForeignBytes, ffi.Pointer<RustCallStatus>),
-    RustBuffer Function(ForeignBytes, ffi.Pointer<RustCallStatus>)>(
+        RustBuffer Function(ForeignBytes, ffi.Pointer<RustCallStatus>),
+        RustBuffer Function(ForeignBytes, ffi.Pointer<RustCallStatus>)>(
     'ffi_hidden_volume_ffi_rustbuffer_from_bytes');
 
 final _rustbufferFree = _dylib.lookupFunction<
     ffi.Void Function(RustBuffer, ffi.Pointer<RustCallStatus>),
-    void Function(RustBuffer, ffi.Pointer<RustCallStatus>)>(
-    'ffi_hidden_volume_ffi_rustbuffer_free');
+    void Function(RustBuffer,
+        ffi.Pointer<RustCallStatus>)>('ffi_hidden_volume_ffi_rustbuffer_free');
 
-final _contractVersion = _dylib.lookupFunction<ffi.Uint32 Function(),
-    int Function()>('ffi_hidden_volume_ffi_uniffi_contract_version');
+final _contractVersion =
+    _dylib.lookupFunction<ffi.Uint32 Function(), int Function()>(
+        'ffi_hidden_volume_ffi_uniffi_contract_version');
 
 /// Reads the contract version baked into the cdylib at compile time.
 /// uniffi 0.31 = 30. Mismatch with our hardcoded expectation would mean
@@ -462,9 +463,7 @@ final class HvWriteOpDelete extends HvWriteOp {
 /// Append one log entry into a DataBatch chunk.
 final class HvWriteOpAppendLog extends HvWriteOp {
   const HvWriteOpAppendLog(
-      {required this.namespace,
-      required this.logId,
-      required this.payload});
+      {required this.namespace, required this.logId, required this.payload});
   final int namespace;
   final int logId;
   final Uint8List payload;
@@ -509,8 +508,7 @@ class HvHeaderInfo {
   final int fileSizeBytes;
 
   @override
-  String toString() =>
-      'HvHeaderInfo(salt=${saltHex.substring(0, 16)}…, '
+  String toString() => 'HvHeaderInfo(salt=${saltHex.substring(0, 16)}…, '
       'argon(m=$argonMCostKib t=$argonTCost p=$argonPCost), size=${fileSizeBytes}B)';
 }
 
@@ -744,22 +742,18 @@ HvException _liftHvException(RustBuffer buf) {
 // ------------------------------------------------------------------
 
 final _fnHeaderInfo = _dylib.lookupFunction<
-    RustBuffer Function(RustBuffer, ffi.Pointer<RustCallStatus>),
-    RustBuffer Function(RustBuffer, ffi.Pointer<RustCallStatus>)>(
+        RustBuffer Function(RustBuffer, ffi.Pointer<RustCallStatus>),
+        RustBuffer Function(RustBuffer, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_func_header_info');
 
 final _fnChangePasswords = _dylib.lookupFunction<
-    ffi.Void Function(
-        RustBuffer, RustBuffer, ffi.Pointer<RustCallStatus>),
-    void Function(
-        RustBuffer, RustBuffer, ffi.Pointer<RustCallStatus>)>(
+        ffi.Void Function(RustBuffer, RustBuffer, ffi.Pointer<RustCallStatus>),
+        void Function(RustBuffer, RustBuffer, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_func_change_passwords');
 
 final _fnCompactKnown = _dylib.lookupFunction<
-    ffi.Void Function(
-        RustBuffer, RustBuffer, ffi.Pointer<RustCallStatus>),
-    void Function(
-        RustBuffer, RustBuffer, ffi.Pointer<RustCallStatus>)>(
+        ffi.Void Function(RustBuffer, RustBuffer, ffi.Pointer<RustCallStatus>),
+        void Function(RustBuffer, RustBuffer, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_func_compact_known');
 
 /// Inspect plaintext header (salt, Argon params, size). v3
@@ -805,131 +799,129 @@ void compactKnown(String path, List<Uint8List> passwords) {
 // ------------------------------------------------------------------
 
 final _spCreate = _dylib.lookupFunction<
-    ffi.Uint64 Function(RustBuffer, RustBuffer, RustBuffer, ffi.Uint64,
-        ffi.Uint8, ffi.Pointer<RustCallStatus>),
-    int Function(RustBuffer, RustBuffer, RustBuffer, int, int,
-        ffi.Pointer<RustCallStatus>)>(
+        ffi.Uint64 Function(RustBuffer, RustBuffer, RustBuffer, ffi.Uint64,
+            ffi.Uint8, ffi.Pointer<RustCallStatus>),
+        int Function(RustBuffer, RustBuffer, RustBuffer, int, int,
+            ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_constructor_spacehandle_create');
 
-final _spOpen = _dylib.lookupFunction<
-    ffi.Uint64 Function(
-        RustBuffer, RustBuffer, ffi.Pointer<RustCallStatus>),
-    int Function(RustBuffer, RustBuffer, ffi.Pointer<RustCallStatus>)>(
-    'uniffi_hidden_volume_ffi_fn_constructor_spacehandle_open');
+final _spOpen =
+    _dylib.lookupFunction<
+            ffi.Uint64 Function(
+                RustBuffer, RustBuffer, ffi.Pointer<RustCallStatus>),
+            int Function(RustBuffer, RustBuffer, ffi.Pointer<RustCallStatus>)>(
+        'uniffi_hidden_volume_ffi_fn_constructor_spacehandle_open');
 
 // Same wire shape as `open` (path, password) -> handle; adds a new parallel
 // space to an existing container instead of opening one.
-final _spAddSpace = _dylib.lookupFunction<
-    ffi.Uint64 Function(
-        RustBuffer, RustBuffer, ffi.Pointer<RustCallStatus>),
-    int Function(RustBuffer, RustBuffer, ffi.Pointer<RustCallStatus>)>(
-    'uniffi_hidden_volume_ffi_fn_constructor_spacehandle_add_space');
+final _spAddSpace =
+    _dylib.lookupFunction<
+            ffi.Uint64 Function(
+                RustBuffer, RustBuffer, ffi.Pointer<RustCallStatus>),
+            int Function(RustBuffer, RustBuffer, ffi.Pointer<RustCallStatus>)>(
+        'uniffi_hidden_volume_ffi_fn_constructor_spacehandle_add_space');
 
 // Same wire shape as `open` (path, keys) -> handle; opens a space from
 // pre-derived SpaceKeys (64 opaque bytes) instead of a password — the
 // master-space path.
-final _spOpenWithKeys = _dylib.lookupFunction<
-    ffi.Uint64 Function(
-        RustBuffer, RustBuffer, ffi.Pointer<RustCallStatus>),
-    int Function(RustBuffer, RustBuffer, ffi.Pointer<RustCallStatus>)>(
-    'uniffi_hidden_volume_ffi_fn_constructor_spacehandle_open_with_keys');
+final _spOpenWithKeys =
+    _dylib.lookupFunction<
+            ffi.Uint64 Function(
+                RustBuffer, RustBuffer, ffi.Pointer<RustCallStatus>),
+            int Function(RustBuffer, RustBuffer, ffi.Pointer<RustCallStatus>)>(
+        'uniffi_hidden_volume_ffi_fn_constructor_spacehandle_open_with_keys');
 
 final _spFree = _dylib.lookupFunction<
-    ffi.Void Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
-    void Function(int, ffi.Pointer<RustCallStatus>)>(
+        ffi.Void Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
+        void Function(int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_free_spacehandle');
 
 final _spClone = _dylib.lookupFunction<
-    ffi.Uint64 Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
-    int Function(int, ffi.Pointer<RustCallStatus>)>(
+        ffi.Uint64 Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
+        int Function(int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_clone_spacehandle');
 
-final _spCommit = _dylib.lookupFunction<
-    ffi.Uint64 Function(
-        ffi.Uint64, RustBuffer, ffi.Pointer<RustCallStatus>),
-    int Function(int, RustBuffer, ffi.Pointer<RustCallStatus>)>(
-    'uniffi_hidden_volume_ffi_fn_method_spacehandle_commit');
+final _spCommit =
+    _dylib.lookupFunction<
+            ffi.Uint64 Function(
+                ffi.Uint64, RustBuffer, ffi.Pointer<RustCallStatus>),
+            int Function(int, RustBuffer, ffi.Pointer<RustCallStatus>)>(
+        'uniffi_hidden_volume_ffi_fn_method_spacehandle_commit');
 
 final _spGet = _dylib.lookupFunction<
-    RustBuffer Function(
-        ffi.Uint64, ffi.Uint8, RustBuffer, ffi.Pointer<RustCallStatus>),
-    RustBuffer Function(
-        int, int, RustBuffer, ffi.Pointer<RustCallStatus>)>(
+        RustBuffer Function(
+            ffi.Uint64, ffi.Uint8, RustBuffer, ffi.Pointer<RustCallStatus>),
+        RustBuffer Function(int, int, RustBuffer, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_spacehandle_get');
 
 final _spIterLogRange = _dylib.lookupFunction<
-    RustBuffer Function(ffi.Uint64, ffi.Uint8, RustBuffer, RustBuffer,
-        ffi.Uint32, ffi.Pointer<RustCallStatus>),
-    RustBuffer Function(int, int, RustBuffer, RustBuffer, int,
-        ffi.Pointer<RustCallStatus>)>(
+        RustBuffer Function(ffi.Uint64, ffi.Uint8, RustBuffer, RustBuffer,
+            ffi.Uint32, ffi.Pointer<RustCallStatus>),
+        RustBuffer Function(int, int, RustBuffer, RustBuffer, int,
+            ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_spacehandle_iter_log_range');
 
 final _spCommitSeq = _dylib.lookupFunction<
-    ffi.Uint64 Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
-    int Function(int, ffi.Pointer<RustCallStatus>)>(
+        ffi.Uint64 Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
+        int Function(int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_spacehandle_commit_seq');
 
 final _spCommitHistory = _dylib.lookupFunction<
-    RustBuffer Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
-    RustBuffer Function(int, ffi.Pointer<RustCallStatus>)>(
+        RustBuffer Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
+        RustBuffer Function(int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_spacehandle_commit_history');
 
 final _spCount = _dylib.lookupFunction<
-    ffi.Uint64 Function(
-        ffi.Uint64, ffi.Uint8, ffi.Pointer<RustCallStatus>),
-    int Function(int, int, ffi.Pointer<RustCallStatus>)>(
+        ffi.Uint64 Function(ffi.Uint64, ffi.Uint8, ffi.Pointer<RustCallStatus>),
+        int Function(int, int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_spacehandle_count');
 
 final _spKvKeys = _dylib.lookupFunction<
-    RustBuffer Function(
-        ffi.Uint64, ffi.Uint8, ffi.Pointer<RustCallStatus>),
-    RustBuffer Function(int, int, ffi.Pointer<RustCallStatus>)>(
+        RustBuffer Function(ffi.Uint64, ffi.Uint8, ffi.Pointer<RustCallStatus>),
+        RustBuffer Function(int, int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_spacehandle_kv_keys');
 
 final _spEraseNs = _dylib.lookupFunction<
-    ffi.Uint64 Function(
-        ffi.Uint64, ffi.Uint8, ffi.Pointer<RustCallStatus>),
-    int Function(int, int, ffi.Pointer<RustCallStatus>)>(
+        ffi.Uint64 Function(ffi.Uint64, ffi.Uint8, ffi.Pointer<RustCallStatus>),
+        int Function(int, int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_spacehandle_erase_namespace');
 
 final _spReadLog = _dylib.lookupFunction<
-    RustBuffer Function(
-        ffi.Uint64, ffi.Uint8, ffi.Uint64, ffi.Pointer<RustCallStatus>),
-    RustBuffer Function(
-        int, int, int, ffi.Pointer<RustCallStatus>)>(
+        RustBuffer Function(
+            ffi.Uint64, ffi.Uint8, ffi.Uint64, ffi.Pointer<RustCallStatus>),
+        RustBuffer Function(int, int, int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_spacehandle_read_log');
 
 final _spListNamespaces = _dylib.lookupFunction<
-    RustBuffer Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
-    RustBuffer Function(int, ffi.Pointer<RustCallStatus>)>(
+        RustBuffer Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
+        RustBuffer Function(int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_spacehandle_list_namespaces');
 
 final _spSetPaddingPolicy = _dylib.lookupFunction<
-    ffi.Void Function(
-        ffi.Uint64, RustBuffer, ffi.Pointer<RustCallStatus>),
-    void Function(int, RustBuffer, ffi.Pointer<RustCallStatus>)>(
+        ffi.Void Function(ffi.Uint64, RustBuffer, ffi.Pointer<RustCallStatus>),
+        void Function(int, RustBuffer, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_spacehandle_set_padding_policy');
 
 final _spStats = _dylib.lookupFunction<
-    RustBuffer Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
-    RustBuffer Function(int, ffi.Pointer<RustCallStatus>)>(
+        RustBuffer Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
+        RustBuffer Function(int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_spacehandle_stats');
 
 final _spVacuumDataBatches = _dylib.lookupFunction<
-    ffi.Uint64 Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
-    int Function(int, ffi.Pointer<RustCallStatus>)>(
+        ffi.Uint64 Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
+        int Function(int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_spacehandle_vacuum_data_batches');
 
 // (handle) -> Vec<u8> (the 64-byte SpaceKeys export). Same wire shape as
 // list_namespaces / commit_history (u64 -> RustBuffer).
 final _spSpaceKeys = _dylib.lookupFunction<
-    RustBuffer Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
-    RustBuffer Function(int, ffi.Pointer<RustCallStatus>)>(
+        RustBuffer Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
+        RustBuffer Function(int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_spacehandle_space_keys');
 
 final _spVerifyIntegrity = _dylib.lookupFunction<
-    RustBuffer Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
-    RustBuffer Function(int, ffi.Pointer<RustCallStatus>)>(
+        RustBuffer Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
+        RustBuffer Function(int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_spacehandle_verify_integrity');
 
 /// Encode an `Option<u64>` as: 1 byte tag (0=None, 1=Some) + (if Some) u64 BE.
@@ -965,8 +957,8 @@ class SpaceHandleBindings {
     final pathBuf = _bufferFromBytes(utf8.encode(path));
     final pwdBuf = _bufferFromByteVec(password);
     final argonBuf = argon._toRustBuffer();
-    final h = rustCall<int>((s) => _spCreate(
-        pathBuf, pwdBuf, argonBuf, initialGarbageChunks, superblockReplicas, s));
+    final h = rustCall<int>((s) => _spCreate(pathBuf, pwdBuf, argonBuf,
+        initialGarbageChunks, superblockReplicas, s));
     return SpaceHandleBindings._(h);
   }
 
@@ -1114,8 +1106,7 @@ class SpaceHandleBindings {
   Uint8List? readLog(int namespace, int logId) {
     _ensureOpen();
     final h = _cloneHandle();
-    final out = rustCall<RustBuffer>(
-        (s) => _spReadLog(h, namespace, logId, s));
+    final out = rustCall<RustBuffer>((s) => _spReadLog(h, namespace, logId, s));
     return _readOptByteVec(_bufferToBytes(out));
   }
 
@@ -1215,81 +1206,92 @@ class SpaceHandleBindings {
 // ------------------------------------------------------------------
 
 final _msOpen = _dylib.lookupFunction<
-    ffi.Uint64 Function(RustBuffer, ffi.Pointer<RustCallStatus>),
-    int Function(RustBuffer, ffi.Pointer<RustCallStatus>)>(
+        ffi.Uint64 Function(RustBuffer, ffi.Pointer<RustCallStatus>),
+        int Function(RustBuffer, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_constructor_multispacehandle_open');
 
 final _msFree = _dylib.lookupFunction<
-    ffi.Void Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
-    void Function(int, ffi.Pointer<RustCallStatus>)>(
+        ffi.Void Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
+        void Function(int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_free_multispacehandle');
 
 final _msClone = _dylib.lookupFunction<
-    ffi.Uint64 Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
-    int Function(int, ffi.Pointer<RustCallStatus>)>(
+        ffi.Uint64 Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
+        int Function(int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_clone_multispacehandle');
 
-final _msOpenSpace = _dylib.lookupFunction<
-    ffi.Uint32 Function(ffi.Uint64, RustBuffer, ffi.Pointer<RustCallStatus>),
-    int Function(int, RustBuffer, ffi.Pointer<RustCallStatus>)>(
-    'uniffi_hidden_volume_ffi_fn_method_multispacehandle_open_space');
+final _msOpenSpace =
+    _dylib.lookupFunction<
+            ffi.Uint32 Function(
+                ffi.Uint64, RustBuffer, ffi.Pointer<RustCallStatus>),
+            int Function(int, RustBuffer, ffi.Pointer<RustCallStatus>)>(
+        'uniffi_hidden_volume_ffi_fn_method_multispacehandle_open_space');
 
 final _msSpaceCount = _dylib.lookupFunction<
-    ffi.Uint32 Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
-    int Function(int, ffi.Pointer<RustCallStatus>)>(
+        ffi.Uint32 Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
+        int Function(int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_multispacehandle_space_count');
 
-final _msSpaceKeys = _dylib.lookupFunction<
-    RustBuffer Function(ffi.Uint64, ffi.Uint32, ffi.Pointer<RustCallStatus>),
-    RustBuffer Function(int, int, ffi.Pointer<RustCallStatus>)>(
-    'uniffi_hidden_volume_ffi_fn_method_multispacehandle_space_keys');
+final _msSetPaddingPolicy = _dylib.lookupFunction<
+        ffi.Void Function(ffi.Uint64, RustBuffer, ffi.Pointer<RustCallStatus>),
+        void Function(int, RustBuffer, ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_method_multispacehandle_set_padding_policy');
+
+final _msSpaceKeys =
+    _dylib.lookupFunction<
+            RustBuffer Function(
+                ffi.Uint64, ffi.Uint32, ffi.Pointer<RustCallStatus>),
+            RustBuffer Function(int, int, ffi.Pointer<RustCallStatus>)>(
+        'uniffi_hidden_volume_ffi_fn_method_multispacehandle_space_keys');
 
 final _msCommit = _dylib.lookupFunction<
-    ffi.Uint64 Function(
-        ffi.Uint64, ffi.Uint32, RustBuffer, ffi.Pointer<RustCallStatus>),
-    int Function(int, int, RustBuffer, ffi.Pointer<RustCallStatus>)>(
+        ffi.Uint64 Function(
+            ffi.Uint64, ffi.Uint32, RustBuffer, ffi.Pointer<RustCallStatus>),
+        int Function(int, int, RustBuffer, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_multispacehandle_commit');
 
 final _msGet = _dylib.lookupFunction<
-    RustBuffer Function(ffi.Uint64, ffi.Uint32, ffi.Uint8, RustBuffer,
-        ffi.Pointer<RustCallStatus>),
-    RustBuffer Function(
-        int, int, int, RustBuffer, ffi.Pointer<RustCallStatus>)>(
+        RustBuffer Function(ffi.Uint64, ffi.Uint32, ffi.Uint8, RustBuffer,
+            ffi.Pointer<RustCallStatus>),
+        RustBuffer Function(
+            int, int, int, RustBuffer, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_multispacehandle_get');
 
 final _msReadLog = _dylib.lookupFunction<
-    RustBuffer Function(ffi.Uint64, ffi.Uint32, ffi.Uint8, ffi.Uint64,
-        ffi.Pointer<RustCallStatus>),
-    RustBuffer Function(int, int, int, int, ffi.Pointer<RustCallStatus>)>(
+        RustBuffer Function(ffi.Uint64, ffi.Uint32, ffi.Uint8, ffi.Uint64,
+            ffi.Pointer<RustCallStatus>),
+        RustBuffer Function(int, int, int, int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_multispacehandle_read_log');
 
 final _msIterLogRange = _dylib.lookupFunction<
-    RustBuffer Function(ffi.Uint64, ffi.Uint32, ffi.Uint8, RustBuffer,
-        RustBuffer, ffi.Uint32, ffi.Pointer<RustCallStatus>),
-    RustBuffer Function(int, int, int, RustBuffer, RustBuffer, int,
-        ffi.Pointer<RustCallStatus>)>(
+        RustBuffer Function(ffi.Uint64, ffi.Uint32, ffi.Uint8, RustBuffer,
+            RustBuffer, ffi.Uint32, ffi.Pointer<RustCallStatus>),
+        RustBuffer Function(int, int, int, RustBuffer, RustBuffer, int,
+            ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_multispacehandle_iter_log_range');
 
 final _msCount = _dylib.lookupFunction<
-    ffi.Uint64 Function(
-        ffi.Uint64, ffi.Uint32, ffi.Uint8, ffi.Pointer<RustCallStatus>),
-    int Function(int, int, int, ffi.Pointer<RustCallStatus>)>(
+        ffi.Uint64 Function(
+            ffi.Uint64, ffi.Uint32, ffi.Uint8, ffi.Pointer<RustCallStatus>),
+        int Function(int, int, int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_multispacehandle_count');
 
 final _msKvKeys = _dylib.lookupFunction<
-    RustBuffer Function(
-        ffi.Uint64, ffi.Uint32, ffi.Uint8, ffi.Pointer<RustCallStatus>),
-    RustBuffer Function(int, int, int, ffi.Pointer<RustCallStatus>)>(
+        RustBuffer Function(
+            ffi.Uint64, ffi.Uint32, ffi.Uint8, ffi.Pointer<RustCallStatus>),
+        RustBuffer Function(int, int, int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_multispacehandle_kv_keys');
 
-final _msCommitSeq = _dylib.lookupFunction<
-    ffi.Uint64 Function(ffi.Uint64, ffi.Uint32, ffi.Pointer<RustCallStatus>),
-    int Function(int, int, ffi.Pointer<RustCallStatus>)>(
-    'uniffi_hidden_volume_ffi_fn_method_multispacehandle_commit_seq');
+final _msCommitSeq =
+    _dylib.lookupFunction<
+            ffi.Uint64 Function(
+                ffi.Uint64, ffi.Uint32, ffi.Pointer<RustCallStatus>),
+            int Function(int, int, ffi.Pointer<RustCallStatus>)>(
+        'uniffi_hidden_volume_ffi_fn_method_multispacehandle_commit_seq');
 
 final _msVacuum = _dylib.lookupFunction<
-    ffi.Uint64 Function(ffi.Uint64, ffi.Uint32, ffi.Pointer<RustCallStatus>),
-    int Function(int, int, ffi.Pointer<RustCallStatus>)>(
+        ffi.Uint64 Function(ffi.Uint64, ffi.Uint32, ffi.Pointer<RustCallStatus>),
+        int Function(int, int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_multispacehandle_vacuum_data_batches');
 
 /// Low-level wrapper over the uniffi-exported `MultiSpaceHandle` symbols.
@@ -1333,6 +1335,16 @@ class MultiSpaceHandleBindings {
     return rustCall<int>((s) => _msSpaceCount(h, s));
   }
 
+  /// Override the shared container's post-commit padding policy.
+  void setPaddingPolicy(PaddingPreset preset) {
+    _ensureOpen();
+    final buf = preset._toRustBuffer();
+    final h = _clone();
+    rustCall<void>((s) {
+      _msSetPaddingPolicy(h, buf, s);
+    });
+  }
+
   /// Export hosted space [id]'s 64-byte SpaceKeys (sensitive — never log).
   Uint8List spaceKeys(int id) {
     _ensureOpen();
@@ -1354,7 +1366,8 @@ class MultiSpaceHandleBindings {
     _ensureOpen();
     final keyBuf = _bufferFromByteVec(key);
     final h = _clone();
-    final out = rustCall<RustBuffer>((s) => _msGet(h, id, namespace, keyBuf, s));
+    final out =
+        rustCall<RustBuffer>((s) => _msGet(h, id, namespace, keyBuf, s));
     return _decodeOptionBytes(out);
   }
 

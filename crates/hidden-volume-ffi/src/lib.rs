@@ -1453,6 +1453,13 @@ impl MultiSpaceHandle {
         Ok(g.len() as u32)
     }
 
+    /// Override the shared container's post-commit padding policy. Applies to
+    /// future commits from any hosted space; see [`SpaceHandle::set_padding_policy`].
+    pub fn set_padding_policy(&self, preset: PaddingPreset) -> HvResult<()> {
+        let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
+        Ok(g.set_padding_policy(preset.to_policy())?)
+    }
+
     /// Export hosted space `id`'s 64-byte `SpaceKeys`. **Sensitive** — keep only
     /// inside a deniable space, never log.
     pub fn space_keys(&self, id: u32) -> HvResult<Vec<u8>> {
@@ -1600,8 +1607,7 @@ mod tests {
         let mut off = 4usize;
         let mut keys = Vec::new();
         for _ in 0..2 {
-            let len =
-                u32::from_le_bytes(framed[off..off + 4].try_into().unwrap()) as usize;
+            let len = u32::from_le_bytes(framed[off..off + 4].try_into().unwrap()) as usize;
             off += 4;
             keys.push(framed[off..off + len].to_vec());
             off += len;
