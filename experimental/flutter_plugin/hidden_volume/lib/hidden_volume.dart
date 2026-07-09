@@ -57,11 +57,7 @@ export 'src/bindings.dart'
 
 // Async wrapper + Future-returning top-level helpers.
 export 'src/async_bindings.dart'
-    show
-        HvAsyncSpace,
-        headerInfoAsync,
-        changePasswordsAsync,
-        compactKnownAsync;
+    show HvAsyncSpace, headerInfoAsync, changePasswordsAsync, compactKnownAsync;
 
 /// A handle to one open space inside a `hidden-volume` container file.
 ///
@@ -286,6 +282,10 @@ class HvMultiSpace {
 
   /// Number of hosted spaces.
   int spaceCount() => _inner.spaceCount();
+
+  /// Override the shared container's post-commit padding policy.
+  void setPaddingPolicy(ffi.PaddingPreset preset) =>
+      _inner.setPaddingPolicy(preset);
 
   /// Export hosted space [id]'s 64-byte `SpaceKeys`. **Sensitive** — never log.
   Uint8List spaceKeys(int id) => _inner.spaceKeys(id);
