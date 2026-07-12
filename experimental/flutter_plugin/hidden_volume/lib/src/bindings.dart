@@ -26,12 +26,29 @@ library;
 
 import 'dart:convert';
 import 'dart:ffi' as ffi;
-import 'dart:io' show Platform;
+import 'dart:io' show File, Platform;
 import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 
 DynamicLibrary _open() {
+  // Standalone/headless hosts cannot preload symbols through a Flutter runner.
+  // Honour the same explicit path the xVeil desktop integration already uses.
+  // The file check keeps a typo from silently falling through to an unrelated
+  // soname on the system loader path.
+  final overridePath = Platform.environment['XVEIL_HV_DYLIB'];
+  if (overridePath != null &&
+      overridePath.isNotEmpty &&
+      File(overridePath).existsSync()) {
+    return ffi.DynamicLibrary.open(overridePath);
+  }
+  final bundled = File(Platform.resolvedExecutable)
+      .parent
+      .parent
+      .uri
+      .resolve('lib/${_libraryFileName()}')
+      .toFilePath();
+  if (File(bundled).existsSync()) return ffi.DynamicLibrary.open(bundled);
   if (Platform.isAndroid) {
     return ffi.DynamicLibrary.open('libhidden_volume_ffi.so');
   } else if (Platform.isIOS || Platform.isMacOS) {
@@ -44,6 +61,14 @@ DynamicLibrary _open() {
     throw UnsupportedError(
         'hidden_volume: unsupported platform ${Platform.operatingSystem}');
   }
+}
+
+String _libraryFileName() {
+  if (Platform.isWindows) return 'hidden_volume_ffi.dll';
+  if (Platform.isMacOS || Platform.isIOS) {
+    return 'libhidden_volume_ffi.dylib';
+  }
+  return 'libhidden_volume_ffi.so';
 }
 
 ffi.DynamicLibrary _dylib = _open();
