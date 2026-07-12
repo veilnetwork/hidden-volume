@@ -13,7 +13,9 @@ import 'dart:ffi' show DynamicLibrary;
 import 'dart:io';
 
 /// Find the freshly-built `hidden-volume-ffi` cdylib for the current
-/// host platform. Tries release first, then debug; searches both
+/// host platform. Tries debug first because `cargo test` / `cargo build` refresh
+/// it during local development; a stale release artifact must not silently make
+/// the binding tests exercise an older ABI. Searches both
 /// "test runs from plugin dir" and "test runs from repo root"
 /// layouts. Throws [StateError] with the full candidate list if no
 /// file is found.
@@ -41,7 +43,7 @@ String resolveDylibPath() {
   ];
   final candidates = <String>[];
   for (final base in searchRoots) {
-    for (final profile in ['release', 'debug']) {
+    for (final profile in ['debug', 'release']) {
       for (final triple in triplets) {
         candidates.add('$base/$profile/${triple[0]}${triple[1]}${triple[2]}');
       }

@@ -129,6 +129,31 @@ void main() {
     space.close();
   });
 
+  test('delete_log removes a logical record', () {
+    final tmp = Directory.systemTemp.createTempSync('hv_dart_');
+    final path = '${tmp.path}/store.bin';
+    addTearDown(() => tmp.deleteSync(recursive: true));
+    final space = SpaceHandleBindings.create(
+      path: path,
+      password: Uint8List.fromList('pw'.codeUnits),
+      argon: ArgonPreset.light,
+    );
+    space.commit([
+      HvWriteOpAppendLog(
+        namespace: 3,
+        logId: 9,
+        payload: Uint8List.fromList('record'.codeUnits),
+      ),
+    ]);
+    expect(space.readLog(3, 9), isNotNull);
+
+    space.commit([const HvWriteOpDeleteLog(namespace: 3, logId: 9)]);
+
+    expect(space.readLog(3, 9), isNull);
+    expect(space.count(3), 0);
+    space.close();
+  });
+
   test('wrong password → HvException.AuthFailed', () {
     final tmp = Directory.systemTemp.createTempSync('hv_dart_');
     final path = '${tmp.path}/store.bin';
@@ -146,8 +171,7 @@ void main() {
         path: path,
         password: Uint8List.fromList('wrong'.codeUnits),
       ),
-      throwsA(isA<HvException>()
-          .having((e) => e.kind, 'kind', 'AuthFailed')),
+      throwsA(isA<HvException>().having((e) => e.kind, 'kind', 'AuthFailed')),
     );
   });
 
@@ -313,8 +337,7 @@ void main() {
         path: path,
         password: Uint8List.fromList('first'.codeUnits),
       ),
-      throwsA(isA<HvException>()
-          .having((e) => e.kind, 'kind', 'AuthFailed')),
+      throwsA(isA<HvException>().having((e) => e.kind, 'kind', 'AuthFailed')),
     );
 
     // New password opens, data preserved.

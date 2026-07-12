@@ -131,7 +131,7 @@ async wrappers reuse it.
 
 ## Decision 4 — batch `commit(Vec<WriteOp>)` over per-op auto-commit
 
-A naive FFI shape would expose `put` / `delete` / `append_log` directly
+A naive FFI shape would expose `put` / `delete` / `append_log` / `delete_log` directly
 on `SpaceHandle`, each auto-wrapping in a one-op Tx. This is wasteful
 because:
 
@@ -150,6 +150,10 @@ space.commit(listOf(
     WriteOp.AppendLog(namespace = 3u, logId = msgIdGen.next(), payload = "Added Alice".encodeToByteArray()),
 ))
 ```
+
+`WriteOp.DeleteLog(namespace, logId)` removes the logical id from a Log
+namespace's bounded index. It is distinct from `AppendLog(..., emptyPayload)`,
+which stores a real empty record and does not release index capacity.
 
 This makes the 3-fsync cost amortize naturally over each logical
 "action" the host-app performs, matching the underlying transactional
