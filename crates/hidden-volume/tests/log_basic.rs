@@ -145,6 +145,65 @@ fn log_namespace_count_matches_distinct_ids() {
 }
 
 #[test]
+fn delete_log_removes_index_entry_and_is_idempotent() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_owned();
+    drop(tmp);
+
+    let mut c = Container::create(&path, fast_params()).unwrap();
+    let mut s = c.create_space(b"pw").unwrap();
+    let mut tx = s.begin_tx();
+    tx.append_log(Namespace::MESSAGE_LOG, 7, b"keep").unwrap();
+    tx.append_log(Namespace::MESSAGE_LOG, 8, b"delete").unwrap();
+    tx.commit().unwrap();
+    assert_eq!(s.count(Namespace::MESSAGE_LOG).unwrap(), 2);
+
+    let mut tx = s.begin_tx();
+    tx.delete_log(Namespace::MESSAGE_LOG, 8).unwrap();
+    tx.delete_log(Namespace::MESSAGE_LOG, 999).unwrap();
+    tx.commit().unwrap();
+
+    assert_eq!(s.count(Namespace::MESSAGE_LOG).unwrap(), 1);
+    assert!(s.read_log(Namespace::MESSAGE_LOG, 8).unwrap().is_none());
+    assert_eq!(
+        s.read_log(Namespace::MESSAGE_LOG, 7).unwrap().as_deref(),
+        Some(&b"keep"[..])
+    );
+
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn delete_log_and_append_same_namespace_are_rejected_before_commit() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_owned();
+    drop(tmp);
+
+    let mut c = Container::create(&path, fast_params()).unwrap();
+    let mut s = c.create_space(b"pw").unwrap();
+    let mut tx = s.begin_tx();
+    tx.append_log(Namespace::MESSAGE_LOG, 1, b"one").unwrap();
+    assert!(matches!(
+        tx.delete_log(Namespace::MESSAGE_LOG, 1),
+        Err(Error::WrongNamespaceKind(_))
+    ));
+    drop(tx);
+
+    let mut tx = s.begin_tx();
+    tx.delete_log(Namespace::MESSAGE_LOG, 1).unwrap();
+    assert!(matches!(
+        tx.append_log(Namespace::MESSAGE_LOG, 2, b"two"),
+        Err(Error::WrongNamespaceKind(_))
+    ));
+    assert!(matches!(
+        tx.put(Namespace::MESSAGE_LOG, b"key", b"value"),
+        Err(Error::WrongNamespaceKind(_))
+    ));
+
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
 fn log_and_kv_in_different_namespaces_coexist() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let path = tmp.path().to_owned();

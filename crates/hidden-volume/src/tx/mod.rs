@@ -6,7 +6,7 @@
 //!   namespace's IndexNode tree. Suitable for settings, contacts,
 //!   media-cache index, and similar bounded-size random-access data.
 //!
-//! - **Log appends** (`append_log`) — records destined for a
+//! - **Log mutations** (`append_log` / `delete_log`) — records destined for a
 //!   `DataBatch` chunk. The Tx accumulates per-namespace log buffers;
 //!   on commit each non-empty buffer is encoded as one zstd-compressed
 //!   batch, written as a `DataBatch` chunk, and pointers (8-byte slot
@@ -27,7 +27,7 @@
 
 pub mod commit;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::space::Space;
 use crate::space::index::Namespace;
@@ -44,7 +44,7 @@ pub(crate) enum KvOp {
 }
 
 /// In-progress transaction over a [`Space`]. Accumulates per-namespace
-/// `put` / `delete` / `append_log` ops and applies them atomically at
+/// `put` / `delete` / `append_log` / `delete_log` ops and applies them atomically at
 /// `commit` time via the 3-fsync protocol (DESIGN §6).
 ///
 /// Drop-without-commit discards the pending ops with no on-disk
@@ -59,6 +59,9 @@ pub struct Tx<'s, 'f> {
     /// `namespace_byte → ordered (log_id, payload) appends`. Each
     /// non-empty entry produces one `DataBatch` chunk on commit.
     pub(crate) pending_log: BTreeMap<u8, Vec<(u64, Vec<u8>)>>,
+    /// Namespaces whose `pending_kv` entries came from [`Self::delete_log`].
+    /// Keeps public KV mutations from being mixed with Log-index deletes.
+    pending_log_deletes: BTreeSet<u8>,
 }
 
 impl<'s, 'f> Tx<'s, 'f> {
@@ -67,6 +70,7 @@ impl<'s, 'f> Tx<'s, 'f> {
             space,
             pending_kv: BTreeMap::new(),
             pending_log: BTreeMap::new(),
+            pending_log_deletes: BTreeSet::new(),
         }
     }
 
@@ -142,6 +146,11 @@ impl<'s, 'f> Tx<'s, 'f> {
         if value.len() > crate::space::index::MAX_VALUE_LEN {
             return Err(Error::PayloadTooLarge);
         }
+        if self.pending_log_deletes.contains(&namespace.0) {
+            return Err(Error::WrongNamespaceKind(
+                "put cannot be mixed with delete_log in one Tx",
+            ));
+        }
         self.check_namespace_capacity(namespace.0)?;
         self.check_namespace_kind(namespace.0, NamespaceKind::Kv)?;
         self.pending_kv
@@ -161,6 +170,11 @@ impl<'s, 'f> Tx<'s, 'f> {
         }
         if key.is_empty() || key.len() > crate::space::index::MAX_KEY_LEN {
             return Err(Error::Malformed("invalid key length"));
+        }
+        if self.pending_log_deletes.contains(&namespace.0) {
+            return Err(Error::WrongNamespaceKind(
+                "delete cannot be mixed with delete_log in one Tx",
+            ));
         }
         self.check_namespace_capacity(namespace.0)?;
         self.check_namespace_kind(namespace.0, NamespaceKind::Kv)?;
@@ -259,6 +273,37 @@ impl<'s, 'f> Tx<'s, 'f> {
             return Err(Error::PayloadTooLarge);
         }
         buf.push((log_id, payload.to_vec()));
+        Ok(())
+    }
+
+    /// Delete one log entry by its logical id. No-op if the id is absent.
+    ///
+    /// Unlike replacing an entry with an empty payload through
+    /// [`Self::append_log`], this removes the `log_id → DataBatch` pointer from
+    /// the namespace's B+ index and therefore releases one unique-id slot. The
+    /// old DataBatch becomes orphaned and is physically reclaimed by
+    /// [`crate::Space::vacuum_data_batches`] or
+    /// [`crate::Container::compact_known`].
+    ///
+    /// A transaction may contain several `delete_log` calls for the same Log
+    /// namespace, but it must not mix `delete_log` and `append_log` for that
+    /// namespace in one transaction. Callers that replace some records and
+    /// delete others should commit the appends first and the deletes second.
+    pub fn delete_log(&mut self, namespace: Namespace, log_id: u64) -> Result<()> {
+        if self.pending_log.contains_key(&namespace.0) {
+            return Err(Error::WrongNamespaceKind(
+                "delete_log cannot be mixed with append_log in one Tx",
+            ));
+        }
+        if self.pending_kv.contains_key(&namespace.0)
+            && !self.pending_log_deletes.contains(&namespace.0)
+        {
+            return Err(Error::WrongNamespaceKind(
+                "delete_log cannot be mixed with KV ops in one Tx",
+            ));
+        }
+        self.delete_internal(namespace, &log_id.to_be_bytes())?;
+        self.pending_log_deletes.insert(namespace.0);
         Ok(())
     }
 

@@ -53,6 +53,7 @@ export 'src/bindings.dart'
         HvWriteOpPut,
         HvWriteOpDelete,
         HvWriteOpAppendLog,
+        HvWriteOpDeleteLog,
         PaddingPreset;
 
 // Async wrapper + Future-returning top-level helpers.
