@@ -574,13 +574,14 @@ impl<'s, 'c> Tx<'s, 'c> {
     pub fn put(&mut self, namespace: Namespace, key: &[u8], value: &[u8]) -> Result<()>;
     pub fn delete(&mut self, namespace: Namespace, key: &[u8]) -> Result<()>;
     pub fn append_log(&mut self, namespace: Namespace, log_id: u64, entry: &[u8]) -> Result<()>;
+    pub fn delete_log(&mut self, namespace: Namespace, log_id: u64) -> Result<()>;
     pub fn commit(self) -> Result<u64>;
 }
 ```
 
 Нижний слой — per-namespace KV + append-only log с атомарными
 multi-namespace транзакциями. Мессенджер строится поверх: message stream
-= namespace `MESSAGE_LOG` через `append_log`; contacts = `CONTACTS`
+= namespace `MESSAGE_LOG` через `append_log` / `delete_log`; contacts = `CONTACTS`
 KV-namespace; media = `MEDIA` KV-namespace с большими value'ами
 (возможно — chunked самим host-app'ом). Slot-уровневые `update_slot` /
 `tombstone_slot` из v0.1-наброска вытеснены `vacuum` +

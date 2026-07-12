@@ -143,7 +143,7 @@ struct OwnedSpace {
 
 ## Решение 4 — батчевый `commit(Vec<WriteOp>)` вместо per-op auto-commit
 
-Наивная FFI-форма выставила бы `put` / `delete` / `append_log`
+Наивная FFI-форма выставила бы `put` / `delete` / `append_log` / `delete_log`
 прямо на `SpaceHandle`, каждый авто-оборачивающий в одну Tx.
 Это расточительно, потому что:
 
@@ -162,6 +162,11 @@ space.commit(listOf(
     WriteOp.AppendLog(namespace = 3u, logId = msgIdGen.next(), payload = "Added Alice".encodeToByteArray()),
 ))
 ```
+
+`WriteOp.DeleteLog(namespace, logId)` удаляет logical id из ограниченного
+индекса Log-namespace. Это не то же самое, что
+`AppendLog(..., emptyPayload)`: последний сохраняет настоящую пустую запись и
+не освобождает ёмкость индекса.
 
 Это позволяет 3-fsync-стоимости естественно амортизироваться
 по каждому логическому «действию», которое выполняет

@@ -464,7 +464,8 @@ fn hex(b: &[u8]) -> String {
 // ---------- Write op ----------
 
 /// One pending change to commit via [`SpaceHandle::commit`]. Mirrors
-/// the sync core's `Tx::put` / `Tx::delete` / `Tx::append_log` ops.
+/// the sync core's `Tx::put` / `Tx::delete` / `Tx::append_log` /
+/// `Tx::delete_log` ops.
 #[derive(uniffi::Enum, Debug, Clone)]
 pub enum WriteOp {
     /// KV insert / replace.
@@ -492,6 +493,14 @@ pub enum WriteOp {
         log_id: u64,
         /// Payload bytes (≤ MAX_LOG_PAYLOAD_LEN, default 8 KiB).
         payload: Vec<u8>,
+    },
+    /// Delete a log entry by logical id. No-op if absent. This removes the
+    /// log-id index entry; replacing it with an empty payload does not.
+    DeleteLog {
+        /// Namespace tag (typically a Log-kind namespace).
+        namespace: u8,
+        /// Logical id to remove.
+        log_id: u64,
     },
 }
 
@@ -911,6 +920,9 @@ impl SpaceHandle {
                     } => {
                         tx.append_log(Namespace(namespace), log_id, &payload)?;
                     },
+                    WriteOp::DeleteLog { namespace, log_id } => {
+                        tx.delete_log(Namespace(namespace), log_id)?;
+                    },
                 }
             }
             Ok(tx.commit()?)
@@ -1302,6 +1314,9 @@ impl AsyncSpaceHandle {
                         } => {
                             tx.append_log(Namespace(namespace), log_id, &payload)?;
                         },
+                        WriteOp::DeleteLog { namespace, log_id } => {
+                            tx.delete_log(Namespace(namespace), log_id)?;
+                        },
                     }
                 }
                 Ok(tx.commit()?)
@@ -1493,6 +1508,9 @@ impl MultiSpaceHandle {
                         log_id,
                         payload,
                     } => tx.append_log(Namespace(namespace), log_id, &payload)?,
+                    WriteOp::DeleteLog { namespace, log_id } => {
+                        tx.delete_log(Namespace(namespace), log_id)?
+                    },
                 }
             }
             Ok(tx.commit()?)
@@ -1678,6 +1696,37 @@ mod tests {
         drop(bad);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn delete_log_through_ffi_removes_record() {
+        let path = scratch_path();
+        let h = SpaceHandle::create(
+            path.to_string_lossy().into_owned(),
+            b"pw".to_vec(),
+            ArgonPreset::Min,
+            0,
+            1,
+        )
+        .unwrap();
+        h.commit(vec![WriteOp::AppendLog {
+            namespace: 3,
+            log_id: 41,
+            payload: b"payload".to_vec(),
+        }])
+        .unwrap();
+        assert_eq!(h.count(3).unwrap(), 1);
+
+        h.commit(vec![WriteOp::DeleteLog {
+            namespace: 3,
+            log_id: 41,
+        }])
+        .unwrap();
+        assert_eq!(h.count(3).unwrap(), 0);
+        assert!(h.read_log(3, 41).unwrap().is_none());
+
+        drop(h);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

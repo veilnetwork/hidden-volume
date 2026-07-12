@@ -595,13 +595,14 @@ impl<'s, 'c> Tx<'s, 'c> {
     pub fn put(&mut self, namespace: Namespace, key: &[u8], value: &[u8]) -> Result<()>;
     pub fn delete(&mut self, namespace: Namespace, key: &[u8]) -> Result<()>;
     pub fn append_log(&mut self, namespace: Namespace, log_id: u64, entry: &[u8]) -> Result<()>;
+    pub fn delete_log(&mut self, namespace: Namespace, log_id: u64) -> Result<()>;
     pub fn commit(self) -> Result<u64>;
 }
 ```
 
 The lower layer is a per-namespace KV + append-only log store with
 atomic multi-namespace transactions. The messenger is built on top:
-message stream = `MESSAGE_LOG` namespace via `append_log`; contacts =
+message stream = `MESSAGE_LOG` namespace via `append_log` / `delete_log`; contacts =
 `CONTACTS` KV namespace; media = `MEDIA` KV namespace with large values
 (possibly chunked by the host-app). Slot-level `update_slot` /
 `tombstone_slot` from the v0.1 sketch were superseded by `vacuum` +

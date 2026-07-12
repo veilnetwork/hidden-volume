@@ -14,6 +14,14 @@ format.
 
 ### Added
 
+- **True per-record log deletion (`Tx::delete_log`, FFI `WriteOp::DeleteLog`,
+  Flutter `HvWriteOpDeleteLog`).** Removes the logical id from a Log
+  namespace's B+ index instead of replacing its payload with an empty record,
+  so bounded host-app chunk stores can reclaim unique-id capacity without
+  erasing the whole namespace. The prior DataBatch remains an orphan until
+  `vacuum_data_batches` / `compact_known`, preserving the append-only commit
+  invariant and existing forensic-erasure contract.
+
 - **KV key enumeration over FFI (`SpaceHandle::kv_keys`,
   `MultiSpaceHandle::kv_keys`).** Returns every key of a namespace,
   framed as `[count u32 LE] ( [len u32 LE][key bytes] )*` inside one

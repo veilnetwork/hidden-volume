@@ -446,7 +446,8 @@ enum PaddingPreset {
 }
 
 /// One mutation in a [SpaceHandleBindings.commit] batch. Mirror of the
-/// Rust `WriteOp` enum (variant tags 1=Put, 2=Delete, 3=AppendLog).
+/// Rust `WriteOp` enum (variant tags 1=Put, 2=Delete, 3=AppendLog,
+/// 4=DeleteLog).
 sealed class HvWriteOp {
   const HvWriteOp();
   void _write(_Writer w);
@@ -500,6 +501,21 @@ final class HvWriteOpAppendLog extends HvWriteOp {
       ..writeU8(namespace)
       ..writeU64(logId)
       ..writeByteVec(payload);
+  }
+}
+
+/// Delete one logical record from a Log namespace. No-op if absent.
+final class HvWriteOpDeleteLog extends HvWriteOp {
+  const HvWriteOpDeleteLog({required this.namespace, required this.logId});
+  final int namespace;
+  final int logId;
+
+  @override
+  void _write(_Writer w) {
+    w
+      ..writeI32(4)
+      ..writeU8(namespace)
+      ..writeU64(logId);
   }
 }
 
