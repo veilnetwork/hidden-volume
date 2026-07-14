@@ -39,13 +39,18 @@ Pod::Spec.new do |s|
   # single Rust symbol and `dlsym` fails at first call. `-force_load`
   # pulls every object from the archive into the framework so the
   # symbols are present and exported for the process-scope lookup.
-  # Path mirrors the `LIBRARY_SEARCH_PATHS` CocoaPods generates for the
-  # vendored xcframework slice.
+  # Point force_load at the already-built XCFramework slice rather than
+  # `PODS_XCFRAMEWORKS_BUILD_DIR`. Xcode validates linker inputs before the
+  # CocoaPods copy-XCFramework phase on a clean build, so the intermediate path
+  # races that phase and makes the first device/simulator build fail with a
+  # missing `libhidden_volume_ffi.a`. SDK-conditioned source paths exist before
+  # the build starts and still select the exact archive CocoaPods will stage.
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
     'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386',
     'OTHER_SWIFT_FLAGS' => '-Xfrontend -warn-long-expression-type-checking=200',
-    'OTHER_LDFLAGS' => '-force_load "${PODS_XCFRAMEWORKS_BUILD_DIR}/hidden_volume/libhidden_volume_ffi.a"'
+    'OTHER_LDFLAGS[sdk=iphoneos*]' => '-force_load "${PODS_ROOT}/../.symlinks/plugins/hidden_volume/ios/HiddenVolumeFFI.xcframework/ios-arm64/libhidden_volume_ffi.a"',
+    'OTHER_LDFLAGS[sdk=iphonesimulator*]' => '-force_load "${PODS_ROOT}/../.symlinks/plugins/hidden_volume/ios/HiddenVolumeFFI.xcframework/ios-arm64_x86_64-simulator/libhidden_volume_ffi.a"'
   }
   s.swift_version = '5.0'
 end
