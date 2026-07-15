@@ -1,6 +1,6 @@
 [package]
 name = "hidden-volume-rt"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2024"
 rust-version = "1.89"
 description = "Internal runtime helpers shared between hidden-volume-async and hidden-volume-ffi (self-referential SpaceInner pattern + tokio spawn_blocking adapter). Not for end-user consumption."
@@ -13,7 +13,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # Sync core whose `Container` and `Space<'_>` types we wrap.
-hidden-volume = { path = "../hidden-volume", version = "1.1.0" }
+hidden-volume = { path = "../hidden-volume", version = "1.2.0" }
 # spawn_blocking adapter is generic over its error mapping; tokio is the
 # only async runtime this crate's consumers use.
 tokio = { version = "1", features = ["rt", "sync"] }
