@@ -847,8 +847,9 @@ impl SpaceHandle {
     /// `[count u32 LE] ( [len u32 LE][key bytes] )*`. A host app garbage-
     /// collecting stale bookkeeping keys needs enumeration: the KV index is
     /// otherwise write/point-read only, and a namespace's 2-level B+ tree has
-    /// a hard entry budget ([`Error::IndexFull`]), so orphaned keys must be
-    /// findable to be deletable. Same O(N) index walk as [`Self::count`];
+    /// a hard entry budget ([`hidden_volume::Error::IndexFull`]), so orphaned
+    /// keys must be findable to be deletable. Same O(N) index walk as
+    /// [`Self::count`];
     /// values are not decoded into the buffer.
     pub fn kv_keys(&self, namespace: u8) -> HvResult<Vec<u8>> {
         check_namespace(namespace)?;
