@@ -1,0 +1,54 @@
+name: Windows release gate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: Windows workspace tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-release-gate
+      - run: cargo build --workspace --all-targets --locked
+      - run: cargo test --workspace --tests --no-fail-fast --locked
+      - run: cargo test --workspace --doc --locked
+      - run: cargo test -p hidden-volume --features cli --test cli --locked
+
+  release-build:
+    name: Windows release build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-x86_64-pc-windows-msvc
+      - run: cargo build -p hidden-volume --release --features cli --target x86_64-pc-windows-msvc --locked
+      - run: cargo build -p hidden-volume-ffi --release --target x86_64-pc-windows-msvc --locked
+      - name: Stage Windows artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/x86_64-pc-windows-msvc/release/hv.exe dist/hv-x86_64-pc-windows-msvc.exe
+          cp target/x86_64-pc-windows-msvc/release/hidden_volume_ffi.dll dist/hidden_volume_ffi-x86_64-pc-windows-msvc.dll
+          cd dist
+          sha256sum -- * > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-x86_64-pc-windows-msvc
+          path: dist/
+          if-no-files-found: error
+          retention-days: 3

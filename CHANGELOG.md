@@ -12,6 +12,24 @@ format.
 
 ## [Unreleased]
 
+## [1.2.1] — 2026-07-16
+
+Corrective release that restores three signed commits accidentally omitted
+from the `v1.2.0` tag while its changelog and host integrations already
+depended on them.
+
+### Fixed
+
+- Restored true per-record log deletion across core, FFI, and Flutter APIs.
+- Restored headless-bundle FFI loading.
+- Restored race-free force-loading for the iOS XCFramework.
+
+## [1.2.0] — 2026-07-15
+
+Feature release for multi-space host applications and authenticated fast-open
+checkpoints. The container `format_version` remains 3; see the compatibility
+note below for checkpoint-aware writers and older v3 readers.
+
 ### Added
 
 - **True per-record log deletion (`Tx::delete_log`, FFI `WriteOp::DeleteLog`,
@@ -103,6 +121,10 @@ format.
     project's single-app deployment, see `docs/en/reference/format.md` §8).
 
 ### Security
+
+- **Release dependency refresh.** Updated `crossbeam-epoch` to 0.9.20,
+  `memmap2` to 0.9.11, and transitive `anyhow` to 1.0.103 to clear the current
+  release advisories.
 
 - **FFI open paths now use the constant-time space scan (F-TM1 mitigation).**
   The constant-time open family already existed in the core
