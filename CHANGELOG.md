@@ -23,6 +23,8 @@ depended on them.
 - Restored true per-record log deletion across core, FFI, and Flutter APIs.
 - Restored headless-bundle FFI loading.
 - Restored race-free force-loading for the iOS XCFramework.
+- Synchronized the public-API snapshot with the restored surface and fixed the
+  fully qualified FFI rustdoc link used by the Linux `-D warnings` gate.
 
 ## [1.2.0] — 2026-07-15
 
