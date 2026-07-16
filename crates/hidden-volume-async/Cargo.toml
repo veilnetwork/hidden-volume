@@ -1,6 +1,6 @@
 [package]
 name = "hidden-volume-async"
-version = "1.1.0"
+version = "1.2.1"
 edition = "2024"
 rust-version = "1.89"
 description = "Tokio-based async wrapper around the hidden-volume sync core"
@@ -14,11 +14,11 @@ path = "src/lib.rs"
 [dependencies]
 # Path + version: cargo-deny requires a version constraint on
 # path dependencies (RUSTSEC-style wildcard ban).
-hidden-volume = { path = "../hidden-volume", version = "1.1.0" }
+hidden-volume = { path = "../hidden-volume", version = "1.2.1" }
 # Audit pass 8 (E5+E6 full): shared internal helpers — `OwnedSpace`
 # self-referential pattern + `run_blocking` adapter. Used to be
 # duplicated between this crate and `hidden-volume-ffi`.
-hidden-volume-rt = { path = "../hidden-volume-rt", version = "1.1.0" }
+hidden-volume-rt = { path = "../hidden-volume-rt", version = "1.2.1" }
 # Tokio runtime + spawn_blocking. The sync core (hidden-volume) does
 # NOT depend on tokio; this wrapper layer is the only place tokio
 # enters the dependency graph. Using `rt` + `sync` features keeps
