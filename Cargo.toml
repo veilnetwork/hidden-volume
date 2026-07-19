@@ -20,6 +20,17 @@ codegen-units = 1
 opt-level = 3
 panic = "abort"
 
+# Debug xVeil builds ship this cdylib too.  Leaving the storage core and its
+# crypto dependencies at opt-level 0 turns the constant-time discovery scan
+# into a multi-minute CPU loop on an aged container (about 311k 4-KiB slots in
+# the current desktop fixture).  Keep debug assertions and symbols, but compile
+# the hot native code like production so a Flutter debug build remains usable.
+[profile.dev.package.hidden-volume]
+opt-level = 3
+
+[profile.dev.package."*"]
+opt-level = 3
+
 [profile.bench]
 inherits = "release"
 debug = true
