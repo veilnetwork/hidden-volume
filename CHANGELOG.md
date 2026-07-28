@@ -12,6 +12,57 @@ format.
 
 ## [Unreleased]
 
+## [1.2.2] — 2026-07-28
+
+Bug-fix release. The on-disk format and the public Rust + FFI API are
+unchanged; `PARAMS_VERSION` stays at 3.
+
+### Fixed
+
+- **A confirmed commit could be lost silently.** Both Superblock publishers
+  append N replicas and adopt the new superblock only after the final `fsync`.
+  A failure in between — ENOSPC on the second replica on a nearly-full disk, a
+  failed `fsync` — left a replica of seq N+1 on disk while `superblock.seq`
+  still named the previous era. The next commit derived its seq from that stale
+  value and published a DIFFERENT payload under the same N+1, and the open scan
+  resolved a same-seq collision by taking the LOWER slot, i.e. the older of the
+  two. A commit that had already returned `Ok` therefore disappeared, and
+  nothing detected it: the surviving superblock is self-consistent so
+  `verify_integrity` passes, and N+1 is present in `commit_history` so the
+  multi-device triage in the sync guide sees no fork. The bit-equality
+  invariant the scan relied on was held only by a `debug_assert`, compiled out
+  of release builds.
+
+  `SpaceState` now tracks the highest seq that may already be on disk. Both
+  publishers burn that number before their first append and derive the next seq
+  from it, so a partially-published seq is never handed out again. It is seeded
+  on open from the highest seq seen anywhere in the scan rather than from the
+  winning superblock, so a seq burnt by a crash is skipped across restarts too.
+  Publishing a self-heal checkpoint bumps and publishes the superblock seq, so
+  that path carries the same rule despite being documented as an optimisation
+  hint.
+
+- **Same-seq collision resolution is now explicit and last-writer-wins.** Slots
+  are append-only, so the higher slot is the later commit; first-wins silently
+  reverted to the older one. This also makes the two scan paths agree —
+  `find_latest_superblock_reverse` scans backward and so already kept the
+  highest slot. Containers written by older builds that already hold a
+  divergence now recover the newer commit instead of the older.
+
+- A parser-fuzz test passed for the wrong reason: `header_decode_short_input`
+  looped to a literal 80, the v2 header length, while a v3 header is 48 — sizes
+  48..79 had stopped exercising the length gate and were failing later, on
+  zeroed Argon2 params. The boundary is now derived from a real encoded header,
+  with an explicit one-byte-short case.
+
+### Documentation
+
+- Threat model §3: the same-seq rule is documented (I2 specified max-seq but
+  was silent *within* a seq — exactly the underspecification the defect above
+  exploited), and two stale code references are corrected —
+  `ContainerFile::write_slot` does not exist, and `Space::owned_slots` is a
+  private field whose accessor is `audit_owned_chunk_count`.
+
 ## [1.2.1] — 2026-07-16
 
 Corrective release that restores three signed commits accidentally omitted

@@ -258,7 +258,15 @@ verify_integrity).
   (`superblock_replicas`, по умолчанию 3). Single-chunk corruption
   переживается за счёт оставшихся реплик.
 - Open path выбирает Superblock с max-seq, который AEAD-decrypts,
-  и игнорирует остальные.
+  и игнорирует остальные. Внутри одного `seq` побеждает ПОСЛЕДНИЙ
+  писатель (наибольший слот; слоты append-only). Двух разных
+  payload'ов под одним seq быть не должно — публикующий «сжигает»
+  свой `seq` до того, как первая реплика попадёт на диск
+  (`SpaceState::attempted_seq`), поэтому частично опубликованный
+  коммит больше не отдаёт этот номер повторно, — но контейнер,
+  записанный старой сборкой, может уже содержать расхождение, и
+  last-wins восстанавливает более НОВЫЙ коммит, а не молча
+  откатывается к старому.
 
 **Code paths.** `space/mod.rs::commit_tx` (3-fsync барьеры),
 `container/mod.rs::ContainerOptions::superblock_replicas`,
@@ -281,17 +289,17 @@ write paths A трогают только слоты, которыми влад�
 - Per-space ключи (Argon2id на пароль). Ключи, выведенные из
   пароля X, не могут AEAD-open чанки, запечатанные под паролем Y.
 - Append-only формат файла: записи идут в свежие слоты, никогда
-  не перезаписывают произвольные позиции. Примитивы scrub /
-  overwrite (`scrub_slot`, `write_slot`) требуют слот, которым
-  владеет caller; модуль это документирует, и тесты верифицируют
-  ownership tracking.
+  не перезаписывают произвольные позиции. Единственный in-place
+  примитив (`scrub_slot`) требует слот, которым владеет caller —
+  каждая точка вызова гейтится успешным AEAD-open, — модуль это
+  документирует, и тесты верифицируют ownership tracking.
 - DataBatch-чанки пишутся исключительно тем Tx, который их
   закоммитил; pointer-слоты хранятся в KV-индексе того namespace,
   недостижимы из другого namespace.
 
 **Code paths.** `crypto/derive.rs::SpaceKeys`,
-`container/file.rs::ContainerFile::{scrub_slot, write_slot}`,
-`space/mod.rs::Space::owned_slots`.
+`container/file.rs::ContainerFile::scrub_slot`,
+`space/mod.rs::Space::audit_owned_chunk_count`.
 
 **Аудит.** `docs/ru/security/audits/memory.md` + `docs/ru/security/audits/plaintext.md`. Тестируется
 `tests/multi_device.rs::cross_space_history_isolation`,
