@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-07-16T06:51:19Z
+# Captured: 2026-07-28T08:52:47Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -167,13 +167,13 @@ lib.rs:  217:pub const PLAINTEXT_LEN: usize = CHUNK_SIZE - NONCE_LEN - TAG_LEN;
 multi.rs:  30:pub struct MultiSpace {
 multi.rs:  50:    pub fn new(container: Container) -> Self {
 multi.rs:  60:    pub fn derive_space_keys(&self, password: &[u8]) -> Result<SpaceKeys> {
-multi.rs:  67:    pub fn open_space(&mut self, keys: SpaceKeys) -> Result<usize> {
-multi.rs:  77:    pub fn open_space_constant_time(&mut self, keys: SpaceKeys) -> Result<usize> {
-multi.rs:  86:    pub fn create_space(&mut self, keys: SpaceKeys) -> Result<usize> {
-multi.rs:  94:    pub fn len(&self) -> usize {
-multi.rs:  100:    pub fn is_empty(&self) -> bool {
-multi.rs:  106:    pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
-multi.rs:  121:    pub fn with_space<R>(&mut self, id: usize, f: impl FnOnce(&mut Space<'_>) -> R) -> Result<R> {
+multi.rs:  84:    pub fn open_space(&mut self, keys: SpaceKeys) -> Result<usize> {
+multi.rs:  98:    pub fn open_space_constant_time(&mut self, keys: SpaceKeys) -> Result<usize> {
+multi.rs:  110:    pub fn create_space(&mut self, keys: SpaceKeys) -> Result<usize> {
+multi.rs:  121:    pub fn len(&self) -> usize {
+multi.rs:  127:    pub fn is_empty(&self) -> bool {
+multi.rs:  133:    pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
+multi.rs:  148:    pub fn with_space<R>(&mut self, id: usize, f: impl FnOnce(&mut Space<'_>) -> R) -> Result<R> {
 open/mod.rs:  121:pub const MAX_OPEN_SCAN_CHUNKS: u64 = 16 * 1024 * 1024;
 padding/mod.rs:  36:pub enum PaddingPolicy {
 padding/mod.rs:  69:    pub const DEFAULT: Self = Self::BucketGrowth { bucket_chunks: 256 };
@@ -228,22 +228,22 @@ space/mod.rs:  45:pub struct SpaceStats {
 space/mod.rs:  77:    pub fn total_entries(&self) -> usize {
 space/mod.rs:  101:    pub fn utilization_ratio(&self) -> f64 {
 space/mod.rs:  123:pub struct IntegrityReport {
-space/mod.rs:  205:pub struct Space<'f> {
-space/mod.rs:  340:    pub fn commit_seq(&self) -> u64 {
-space/mod.rs:  356:    pub fn space_keys(&self) -> SpaceKeys {
-space/mod.rs:  394:    pub fn commit_history(&self) -> &[u64] {
-space/mod.rs:  414:    pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
-space/mod.rs:  425:    pub fn padding_policy(&self) -> crate::padding::PaddingPolicy {
-space/mod.rs:  437:    pub fn last_padding_error(&self) -> Option<&crate::Error> {
-space/mod.rs:  446:    pub fn audit_owned_chunk_count(&self) -> usize {
-space/mod.rs:  462:    pub fn stats(&mut self) -> Result<SpaceStats> {
-space/mod.rs:  480:    pub fn begin_tx<'s>(&'s mut self) -> Tx<'s, 'f> {
-space/mod.rs:  492:    pub fn get(&mut self, namespace: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>> {
-space/mod.rs:  530:    pub fn list(&mut self, namespace: Namespace) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-space/mod.rs:  543:    pub fn count(&mut self, namespace: Namespace) -> Result<usize> {
-space/mod.rs:  595:    pub fn erase_namespace(&mut self, namespace: Namespace) -> Result<usize> {
-space/mod.rs:  620:    pub fn list_namespaces(&mut self) -> Result<Vec<Namespace>> {
-space/mod.rs:  632:    pub fn list_namespaces_with_kind(
+space/mod.rs:  223:pub struct Space<'f> {
+space/mod.rs:  358:    pub fn commit_seq(&self) -> u64 {
+space/mod.rs:  374:    pub fn space_keys(&self) -> SpaceKeys {
+space/mod.rs:  412:    pub fn commit_history(&self) -> &[u64] {
+space/mod.rs:  432:    pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
+space/mod.rs:  443:    pub fn padding_policy(&self) -> crate::padding::PaddingPolicy {
+space/mod.rs:  455:    pub fn last_padding_error(&self) -> Option<&crate::Error> {
+space/mod.rs:  464:    pub fn audit_owned_chunk_count(&self) -> usize {
+space/mod.rs:  480:    pub fn stats(&mut self) -> Result<SpaceStats> {
+space/mod.rs:  498:    pub fn begin_tx<'s>(&'s mut self) -> Tx<'s, 'f> {
+space/mod.rs:  510:    pub fn get(&mut self, namespace: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>> {
+space/mod.rs:  548:    pub fn list(&mut self, namespace: Namespace) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+space/mod.rs:  561:    pub fn count(&mut self, namespace: Namespace) -> Result<usize> {
+space/mod.rs:  613:    pub fn erase_namespace(&mut self, namespace: Namespace) -> Result<usize> {
+space/mod.rs:  638:    pub fn list_namespaces(&mut self) -> Result<Vec<Namespace>> {
+space/mod.rs:  650:    pub fn list_namespaces_with_kind(
 space/superblock.rs:  30:pub const NO_RECORD: u64 = u64::MAX;
 space/superblock.rs:  37:pub struct Superblock {
 space/superblock.rs:  72:    pub const ENCODED_LEN: usize = 8 + 8 + 32;
