@@ -316,11 +316,17 @@ fn accumulate_owned_slot(acc: &mut ScanAcc, slot: u64, pt: Plaintext) {
                 Entry::Vacant(e) => {
                     e.insert(pt.payload);
                 },
-                Entry::Occupied(e) => {
-                    debug_assert!(
-                        e.get() == &pt.payload,
-                        "same-seq Superblock replicas must be bit-equal"
-                    );
+                Entry::Occupied(mut e) => {
+                    // LAST writer wins. Replicas of one publish are bit-equal, so this only
+                    // decides a collision between two DIFFERENT payloads under one seq —
+                    // which `attempted_seq` now prevents us from creating, but a container
+                    // written by an older build may already hold one. Slots are append-only
+                    // and the reduce is ordered, so the later entry is the later commit;
+                    // first-wins silently reverted to the older one, losing a commit that
+                    // had already returned Ok. It also matches
+                    // `find_latest_superblock_reverse`, which scans backward and so already
+                    // kept the highest slot.
+                    e.insert(pt.payload);
                 },
             }
         }
@@ -369,6 +375,10 @@ fn finalize_scan(keys: SpaceKeys, container_id: [u8; 32], acc: ScanAcc) -> Resul
         container_id,
         superblock,
         owned_slots,
+        // Every Superblock chunk the scan decrypted contributed its seq here,
+        // including replicas of a publish that never completed — so the max is
+        // exactly "the highest number that may already be on disk".
+        attempted_seq: commit_history.iter().copied().max().unwrap_or(0),
         commit_history,
         last_padding_error: None,
         roots_payload_cache: None,
@@ -706,11 +716,17 @@ fn scan_and_recover_parallel_inner(
                                 Entry::Vacant(e) => {
                                     e.insert(pt.payload);
                                 },
-                                Entry::Occupied(e) => {
-                                    debug_assert!(
-                                        e.get() == &pt.payload,
-                                        "same-seq Superblock replicas must be bit-equal"
-                                    );
+                                Entry::Occupied(mut e) => {
+                                    // LAST writer wins. Replicas of one publish are bit-equal, so this only
+                                    // decides a collision between two DIFFERENT payloads under one seq —
+                                    // which `attempted_seq` now prevents us from creating, but a container
+                                    // written by an older build may already hold one. Slots are append-only
+                                    // and the reduce is ordered, so the later entry is the later commit;
+                                    // first-wins silently reverted to the older one, losing a commit that
+                                    // had already returned Ok. It also matches
+                                    // `find_latest_superblock_reverse`, which scans backward and so already
+                                    // kept the highest slot.
+                                    e.insert(pt.payload);
                                 },
                             }
                         }
@@ -730,11 +746,17 @@ fn scan_and_recover_parallel_inner(
                         Entry::Vacant(e) => {
                             e.insert(payload);
                         },
-                        Entry::Occupied(e) => {
-                            debug_assert!(
-                                e.get() == &payload,
-                                "same-seq Superblock replicas must be bit-equal across threads"
-                            );
+                        Entry::Occupied(mut e) => {
+                            // LAST writer wins. Replicas of one publish are bit-equal, so this only
+                            // decides a collision between two DIFFERENT payloads under one seq —
+                            // which `attempted_seq` now prevents us from creating, but a container
+                            // written by an older build may already hold one. Slots are append-only
+                            // and the reduce is ordered, so the later entry is the later commit;
+                            // first-wins silently reverted to the older one, losing a commit that
+                            // had already returned Ok. It also matches
+                            // `find_latest_superblock_reverse`, which scans backward and so already
+                            // kept the highest slot.
+                            e.insert(payload);
                         },
                     }
                 }
@@ -779,6 +801,10 @@ fn scan_and_recover_parallel_inner(
         container_id,
         superblock,
         owned_slots,
+        // Every Superblock chunk the scan decrypted contributed its seq here,
+        // including replicas of a publish that never completed — so the max is
+        // exactly "the highest number that may already be on disk".
+        attempted_seq: commit_history.iter().copied().max().unwrap_or(0),
         commit_history,
         last_padding_error: None,
         roots_payload_cache: None,
@@ -909,11 +935,17 @@ fn scan_and_recover_mmap_inner(
                     Entry::Vacant(e) => {
                         e.insert(pt.payload);
                     },
-                    Entry::Occupied(e) => {
-                        debug_assert!(
-                            e.get() == &pt.payload,
-                            "same-seq Superblock replicas must be bit-equal"
-                        );
+                    Entry::Occupied(mut e) => {
+                        // LAST writer wins. Replicas of one publish are bit-equal, so this only
+                        // decides a collision between two DIFFERENT payloads under one seq —
+                        // which `attempted_seq` now prevents us from creating, but a container
+                        // written by an older build may already hold one. Slots are append-only
+                        // and the reduce is ordered, so the later entry is the later commit;
+                        // first-wins silently reverted to the older one, losing a commit that
+                        // had already returned Ok. It also matches
+                        // `find_latest_superblock_reverse`, which scans backward and so already
+                        // kept the highest slot.
+                        e.insert(pt.payload);
                     },
                 }
             }
@@ -945,6 +977,10 @@ fn scan_and_recover_mmap_inner(
         container_id,
         superblock,
         owned_slots,
+        // Every Superblock chunk the scan decrypted contributed its seq here,
+        // including replicas of a publish that never completed — so the max is
+        // exactly "the highest number that may already be on disk".
+        attempted_seq: commit_history.iter().copied().max().unwrap_or(0),
         commit_history,
         last_padding_error: None,
         roots_payload_cache: None,

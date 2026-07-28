@@ -173,6 +173,23 @@ pub(crate) struct SpaceState {
     /// decrypted plaintext, held in [`Zeroizing`] and scrubbed on drop / replace
     /// so they never outlive their commit era in cleartext.
     pub roots_payload_cache: Option<(u64, Zeroizing<Vec<u8>>)>,
+    /// Highest `seq` for which a Superblock replica may already be on disk,
+    /// whether or not the publish that wrote it completed.
+    ///
+    /// Both publishers (`commit_tx`, `write_self_heal_checkpoint`) append N
+    /// replicas and adopt `superblock` only after the final `fsync`. A failure
+    /// in between — ENOSPC on the second replica, a failed `fsync` — leaves a
+    /// replica of that seq on disk while `superblock.seq` still names the
+    /// previous era. Deriving the next seq from `superblock.seq` alone then
+    /// re-used that number for a DIFFERENT payload, and the open scan resolves
+    /// a same-seq collision by slot order: one of the two commits vanished
+    /// silently, with `verify_integrity` satisfied (the winner is
+    /// self-consistent) and the commit-history anchor showing no fork.
+    ///
+    /// Seeded from the highest seq observed ANYWHERE in the open scan, not
+    /// from the winning superblock, so a seq burnt by a crash is skipped
+    /// across restarts too.
+    pub attempted_seq: u64,
 }
 
 impl SpaceState {
@@ -190,6 +207,7 @@ impl SpaceState {
             commit_history: Vec::new(),
             last_padding_error: None,
             roots_payload_cache: None,
+            attempted_seq: 0,
         }
     }
 }

@@ -249,7 +249,13 @@ state is exposed; no panic; no UB.
   default 3). Single-chunk corruption survives via remaining
   replicas.
 - Open path picks max-seq Superblock that AEAD-decrypts and ignores
-  the rest.
+  the rest. Within one `seq` the LAST writer wins (highest slot; slots
+  are append-only). Two different payloads under one seq should not
+  exist — a publisher burns its `seq` before the first replica reaches
+  the disk (`SpaceState::attempted_seq`), so a partially-published
+  commit never hands that number out again — but a container written by
+  an older build can hold one, and last-wins recovers the newer commit
+  instead of silently reverting to the older.
 
 **Code paths.** `space/mod.rs::commit_tx` (3-fsync barriers),
 `container/mod.rs::ContainerOptions::superblock_replicas`,
@@ -271,16 +277,17 @@ opaque garbage to A.
 - Per-space keys (Argon2id per password). Keys derived from password
   X cannot AEAD-open chunks sealed under password Y.
 - Append-only file format: writes go to fresh slots, never overwrite
-  arbitrary positions. Scrub / overwrite primitives
-  (`scrub_slot`, `write_slot`) require a slot the caller owns; the
-  module documents this and tests verify ownership tracking.
+  arbitrary positions. The one in-place primitive (`scrub_slot`)
+  requires a slot the caller owns — every call site gates on a
+  successful AEAD open — and the module documents this; tests verify
+  ownership tracking.
 - DataBatch chunks are written exclusively by the Tx that committed
   them; pointer slots are stored in that namespace's KV index, not
   reachable from another namespace.
 
 **Code paths.** `crypto/derive.rs::SpaceKeys`,
-`container/file.rs::ContainerFile::{scrub_slot, write_slot}`,
-`space/mod.rs::Space::owned_slots`.
+`container/file.rs::ContainerFile::scrub_slot`,
+`space/mod.rs::Space::audit_owned_chunk_count`.
 
 **Audit.** `docs/en/security/audits/memory.md` + `docs/en/security/audits/plaintext.md`. Tested
 by `tests/multi_device.rs::cross_space_history_isolation`,

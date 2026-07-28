@@ -371,11 +371,36 @@ fn batch_decode_rejects_random_non_zstd() {
 
 #[test]
 fn header_decode_short_input_rejected() {
-    // HEADER_LEN = 80; anything shorter must be rejected.
-    for size in 0..80 {
+    // The boundary is taken from a REAL header, not a literal. The literal
+    // here used to say 80 — the v2 layout — while a v3 header is 48 bytes, so
+    // sizes 48..79 had stopped testing "too short" at all: `decode` got past
+    // the length gate and failed later, on zeroed Argon2 params. The test
+    // stayed green while the boundary it names went uncovered.
+    let encoded = Header::new_random(Argon2Params::MIN)
+        .unwrap()
+        .encode_first_chunk()
+        .unwrap();
+    let header_len = Header::decode(&encoded)
+        .map(|_| ())
+        .map(|()| {
+            // Shrink to the shortest prefix that still decodes: that IS the
+            // header length, whatever the constant is called today.
+            (1..=encoded.len())
+                .find(|&n| Header::decode(&encoded[..n]).is_ok())
+                .expect("a full first chunk must decode")
+        })
+        .expect("a freshly built header must decode");
+
+    for size in 0..header_len {
         let buf = vec![0u8; size];
         assert!(Header::decode(&buf).is_err(), "size={size} should reject");
     }
+    // The real boundary: one byte short of a header that DOES decode.
+    assert!(
+        Header::decode(&encoded[..header_len - 1]).is_err(),
+        "a header truncated by one byte must be rejected"
+    );
+    assert!(Header::decode(&encoded[..header_len]).is_ok());
 }
 
 #[test]

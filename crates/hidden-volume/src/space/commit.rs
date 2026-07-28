@@ -78,10 +78,14 @@ impl<'f> Space<'f> {
         // commits), but a malformed AEAD-valid Superblock could push
         // `seq` to `u64::MAX` and crash a subsequent commit on
         // overflow. Convert to an explicit `Error::Internal` instead.
+        // Derived from `attempted_seq`, not `superblock.seq`: a previous
+        // publish may have put a replica of a higher seq on disk and then
+        // failed, and re-using that number for a different payload loses one
+        // of the two commits silently. See [`SpaceState::attempted_seq`].
         let new_seq = self
             .state
-            .superblock
-            .seq
+            .attempted_seq
+            .max(self.state.superblock.seq)
             .checked_add(1)
             .ok_or(Error::Internal("commit seq overflow"))?;
 
@@ -287,6 +291,10 @@ impl<'f> Space<'f> {
             checkpoint_slot: self.state.superblock.checkpoint_slot,
         };
         let replicas = self.file.superblock_replicas.max(1);
+        // Burn the number BEFORE the first replica can reach the disk: if one
+        // lands and a later replica (or the fsync) fails, this seq must never
+        // be handed out again.
+        self.state.attempted_seq = new_seq;
         for _ in 0..replicas {
             self.append_superblock(&new_sb)?;
         }
@@ -481,4 +489,96 @@ fn pack_into_leaves(ns: Namespace, entries: &[(Vec<u8>, Vec<u8>)]) -> Result<Vec
     }
 
     Ok(leaves)
+}
+
+#[cfg(test)]
+mod seq_allocation_tests {
+    use crate::container::Container;
+    use crate::crypto::kdf::Argon2Params;
+    use crate::space::index::Namespace;
+
+    fn scratch() -> std::path::PathBuf {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let p = tmp.path().to_owned();
+        drop(tmp);
+        p
+    }
+
+    /// A seq whose replica may already be on disk must never be handed out
+    /// again.
+    ///
+    /// Both publishers append N Superblock replicas and adopt the new
+    /// superblock only after the final fsync. If a replica lands and the next
+    /// one (or the fsync) fails — ENOSPC on a nearly-full disk is the mobile
+    /// case — the disk holds seq N+1 while `superblock.seq` still says N.
+    /// Deriving the next seq from `superblock.seq` alone published a DIFFERENT
+    /// payload under that same N+1, and the open scan resolves a same-seq
+    /// collision by slot order, so one of the two commits disappeared. Nothing
+    /// detected it: the winner is self-consistent so `verify_integrity`
+    /// passes, and N+1 is present in `commit_history` so the multi-device
+    /// triage sees no fork.
+    ///
+    /// The partial publish itself needs an I/O fault to induce, so this drives
+    /// the state it leaves behind: `attempted_seq` set without `superblock`
+    /// advancing, exactly as `commit_tx` does before its first append.
+    #[test]
+    fn a_burnt_seq_is_never_reused() {
+        let path = scratch();
+        {
+            let mut c = Container::create(&path, Argon2Params::MIN).unwrap();
+            let mut s = c.create_space(b"pw").unwrap();
+            let mut tx = s.begin_tx();
+            tx.put(Namespace::SETTINGS, b"k", b"v1").unwrap();
+            tx.commit().unwrap();
+            let durable = s.commit_seq();
+
+            // A publish of `durable + 1` got a replica onto the disk and then
+            // failed; `superblock` was never adopted.
+            s.state.attempted_seq = durable + 1;
+
+            let mut tx = s.begin_tx();
+            tx.put(Namespace::SETTINGS, b"k", b"v2").unwrap();
+            tx.commit().unwrap();
+            assert_eq!(
+                s.commit_seq(),
+                durable + 2,
+                "the next commit must skip the seq a failed publish may have \
+                 already written"
+            );
+        }
+        // ...and the container still opens on the era that was actually
+        // published.
+        let mut c = Container::open(&path).unwrap();
+        let mut s = c.open_space(b"pw").unwrap();
+        assert_eq!(
+            s.get(Namespace::SETTINGS, b"k").unwrap().as_deref(),
+            Some(&b"v2"[..])
+        );
+        drop(s);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Reopening seeds the burn mark from the whole scan, not from the winning
+    /// superblock — otherwise a seq burnt by a crash comes back on restart.
+    #[test]
+    fn the_burn_mark_survives_a_reopen() {
+        let path = scratch();
+        {
+            let mut c = Container::create(&path, Argon2Params::MIN).unwrap();
+            let mut s = c.create_space(b"pw").unwrap();
+            let mut tx = s.begin_tx();
+            tx.put(Namespace::SETTINGS, b"k", b"v1").unwrap();
+            tx.commit().unwrap();
+        }
+        let mut c = Container::open(&path).unwrap();
+        let s = c.open_space(b"pw").unwrap();
+        assert!(
+            s.state.attempted_seq >= s.commit_seq(),
+            "attempted_seq {} must cover the published era {}",
+            s.state.attempted_seq,
+            s.commit_seq()
+        );
+        drop(s);
+        let _ = std::fs::remove_file(&path);
+    }
 }
