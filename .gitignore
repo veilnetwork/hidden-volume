@@ -1,5 +1,7 @@
 # Rust build artifacts.
 /target
+.rustc_info.json
+debug
 
 # the local tooling session data (this directory's prompts/state).
 /.agent/
