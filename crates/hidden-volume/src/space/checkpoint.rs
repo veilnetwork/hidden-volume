@@ -271,10 +271,14 @@ impl<'f> Space<'f> {
             "owned slots must be below the checkpoint high-water"
         );
 
+        // Same rule as `commit_tx`: never re-use a seq whose replica may
+        // already be on disk from a failed publish. Publishing a checkpoint
+        // bumps and publishes the superblock `seq`, so this path carries
+        // correctness state despite being "an optimisation hint".
         let cp_seq = self
             .state
-            .superblock
-            .seq
+            .attempted_seq
+            .max(self.state.superblock.seq)
             .checked_add(1)
             .ok_or(Error::Internal("checkpoint seq overflow"))?;
 
@@ -291,6 +295,7 @@ impl<'f> Space<'f> {
             checkpoint_slot: head,
         };
         let replicas = self.file.superblock_replicas.max(1);
+        self.state.attempted_seq = cp_seq;
         for _ in 0..replicas {
             self.append_superblock(&new_sb)?;
         }
