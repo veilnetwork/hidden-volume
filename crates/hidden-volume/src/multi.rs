@@ -61,10 +61,30 @@ impl MultiSpace {
         self.container.derive_space_keys(password)
     }
 
+    /// True if a space with this per-space `container_id` is already hosted.
+    ///
+    /// Hosting the same space through two ids is a data-loss trap: each
+    /// `SpaceState` computes its next commit `seq` from its own (now stale)
+    /// superblock, so two commits — one per handle — both land at the same
+    /// `seq` with different payloads, breaking the "same-seq replicas are
+    /// bit-equal" open invariant. On reopen the first-wins selection keeps one
+    /// and silently discards the other acknowledged commit (and a debug build
+    /// panics on the divergence assertion). Guard against it up front.
+    fn already_hosts(&self, container_id: &[u8; 32]) -> bool {
+        self.spaces.iter().flatten().any(|state| {
+            // Constant-time compare is unnecessary: the caller holds the keys.
+            &state.container_id == container_id
+        })
+    }
+
     /// Open an existing space by its [`SpaceKeys`] and host it; returns its
     /// **space id** (a small index used by [`Self::with_space`]). Returns
-    /// [`Error::AuthFailed`] if no space in the container matches the keys.
+    /// [`Error::AuthFailed`] if no space in the container matches the keys, or
+    /// [`Error::SpaceAlreadyExists`] if that space is already hosted here.
     pub fn open_space(&mut self, keys: SpaceKeys) -> Result<usize> {
+        if self.already_hosts(&keys.container_id) {
+            return Err(Error::SpaceAlreadyExists);
+        }
         let state = scan_and_recover(&mut self.container.file, keys)?;
         self.spaces.push(Some(state));
         Ok(self.spaces.len() - 1)
@@ -73,8 +93,12 @@ impl MultiSpace {
     /// Constant-time-scan variant of [`Self::open_space`]. Equalizes the
     /// discovery scan so the host time can't leak which space (or none) matched
     /// — the F-TM1 mitigation, for hosts that open in a coercion-prone setting.
-    /// Returns [`Error::AuthFailed`] if no space in the container matches.
+    /// Returns [`Error::AuthFailed`] if no space in the container matches, or
+    /// [`Error::SpaceAlreadyExists`] if that space is already hosted here.
     pub fn open_space_constant_time(&mut self, keys: SpaceKeys) -> Result<usize> {
+        if self.already_hosts(&keys.container_id) {
+            return Err(Error::SpaceAlreadyExists);
+        }
         let state = scan_and_recover_constant_time(&mut self.container.file, keys)?;
         self.spaces.push(Some(state));
         Ok(self.spaces.len() - 1)
@@ -82,8 +106,11 @@ impl MultiSpace {
 
     /// Create a new space in the container by its [`SpaceKeys`] and host it;
     /// returns its space id. Returns [`Error::SpaceAlreadyExists`] if the keys
-    /// already map to a space.
+    /// already map to a space (on disk or already hosted here).
     pub fn create_space(&mut self, keys: SpaceKeys) -> Result<usize> {
+        if self.already_hosts(&keys.container_id) {
+            return Err(Error::SpaceAlreadyExists);
+        }
         let state = Space::create(&mut self.container.file, keys)?.into_state();
         self.spaces.push(Some(state));
         Ok(self.spaces.len() - 1)

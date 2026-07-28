@@ -105,6 +105,60 @@ fn open_space_with_wrong_keys_is_auth_failed() {
 }
 
 #[test]
+fn double_hosting_one_space_is_rejected_and_data_survives() {
+    // Regression: hosting the same space through two ids let each detached
+    // SpaceState compute the next commit seq from its own stale superblock, so
+    // two commits landed at the same seq with different payloads and one
+    // acknowledged commit was silently lost on reopen. The guard must reject
+    // the second host, and a single hosted handle must persist correctly.
+    let path = scratch_path();
+    let ka = {
+        let mut c = Container::create_with_options(&path, fast_options()).unwrap();
+        c.create_space(b"pa").unwrap();
+        c.derive_space_keys(b"pa").unwrap()
+    };
+
+    let mut ms = MultiSpace::new(Container::open(&path).unwrap());
+    let a = ms.open_space(ka.clone()).unwrap();
+
+    // A second host of the very same space (by keys) is refused.
+    match ms.open_space(ka.clone()) {
+        Err(Error::SpaceAlreadyExists) => {},
+        other => panic!("expected SpaceAlreadyExists, got {other:?}"),
+    }
+    // create_space with the same keys is likewise refused before touching disk.
+    match ms.create_space(ka) {
+        Err(Error::SpaceAlreadyExists) => {},
+        other => panic!("expected SpaceAlreadyExists, got {other:?}"),
+    }
+    assert_eq!(ms.len(), 1, "no extra space slot was pushed");
+
+    // The single hosted handle commits normally...
+    ms.with_space(a, |s| {
+        let mut tx = s.begin_tx();
+        tx.put(Namespace::SETTINGS, b"k", b"v1").unwrap();
+        tx.commit().unwrap();
+    })
+    .unwrap();
+    ms.with_space(a, |s| {
+        let mut tx = s.begin_tx();
+        tx.put(Namespace::SETTINGS, b"k", b"v2").unwrap();
+        tx.commit().unwrap();
+    })
+    .unwrap();
+    drop(ms);
+
+    // ...and both commits are intact on reopen (latest value wins, no loss).
+    let mut ms = MultiSpace::new(Container::open(&path).unwrap());
+    let kre = ms.derive_space_keys(b"pa").unwrap();
+    let a = ms.open_space(kre).unwrap();
+    let got = ms
+        .with_space(a, |s| s.get(Namespace::SETTINGS, b"k").unwrap())
+        .unwrap();
+    assert_eq!(got.as_deref(), Some(&b"v2"[..]));
+}
+
+#[test]
 fn with_space_rejects_unknown_id() {
     let path = scratch_path();
     {
