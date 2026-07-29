@@ -88,8 +88,16 @@ impl<'f> Space<'f> {
             to_drop.insert(slot);
             scrubbed += 1;
         }
+        // fsync only when bytes actually changed, but drop the slots whenever
+        // there are any to drop. A slot reaches `to_drop` through the
+        // `AuthFailed` arm when an earlier pass already scrubbed it: gating the
+        // retain on `scrubbed > 0` left those in `owned_slots` forever, so
+        // every later open re-read and re-failed on the same dead slots and the
+        // checkpoint kept carrying them.
         if scrubbed > 0 {
             self.file.fsync()?;
+        }
+        if !to_drop.is_empty() {
             self.state.owned_slots.retain(|s| !to_drop.contains(s));
         }
         Ok(scrubbed)
@@ -214,8 +222,16 @@ impl<'f> Space<'f> {
             to_drop.insert(slot);
             scrubbed += 1;
         }
+        // fsync only when bytes actually changed, but drop the slots whenever
+        // there are any to drop. A slot reaches `to_drop` through the
+        // `AuthFailed` arm when an earlier pass already scrubbed it: gating the
+        // retain on `scrubbed > 0` left those in `owned_slots` forever, so
+        // every later open re-read and re-failed on the same dead slots and the
+        // checkpoint kept carrying them.
         if scrubbed > 0 {
             self.file.fsync()?;
+        }
+        if !to_drop.is_empty() {
             self.state.owned_slots.retain(|s| !to_drop.contains(s));
         }
         Ok(scrubbed)

@@ -14,6 +14,19 @@ format.
 
 ### Fixed
 
+- **`repack` rewrote the container it was only supposed to read.** An
+  out-of-place repack documents the source as untouched, but opened it writable
+  and `open_space` runs the post-open vacuum — so taking a backup altered the
+  original, and it no longer hashed to what it was taken from. The source is now
+  opened read-only; a shared lock still excludes writers, so the consistency the
+  exclusive open gave is unchanged.
+- **`hv inspect` mutated the container it was inspecting**, for the same reason:
+  a writable open runs the vacuum and the checkpoint self-heal. Read-only now.
+- **`vacuum_orphans` kept re-reading slots it had already scrubbed.** The
+  `owned_slots` retain was gated on `scrubbed > 0`, so a pass that only found
+  already-scrubbed slots (the `AuthFailed` arm) dropped none of them: every
+  later open re-read and re-failed on the same dead slots and the checkpoint
+  kept carrying them. The fsync stays conditional; the retain no longer is.
 - **`MultiSpace` never scrubbed the values a previous session deleted.** A
   writable `Container::open_space*` runs `vacuum_orphans` as part of the open —
   the index nodes an update or delete retires stay valid AEAD, so anyone who
