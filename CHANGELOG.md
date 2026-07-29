@@ -14,6 +14,15 @@ format.
 
 ### Fixed
 
+- **The constant-time open modes silently took the checkpoint fast path.**
+  `open_space_constant_time` publishes one property — the host's wall-clock does
+  not leak which space, or none, matched — and the fast path visits a working
+  set instead of every slot, so a correct password finished early while a wrong
+  one paid the full sweep. Per-chunk equalisation cannot hide a signal carried
+  by the NUMBER of chunks visited. The CT modes now always take the full scan;
+  the default path keeps the fast open unchanged, so nobody who did not ask for
+  equal timing pays for it. Its callers already accept roughly double the open
+  time, which is what they were buying.
 - **`repack` rewrote the container it was only supposed to read.** An
   out-of-place repack documents the source as untouched, but opened it writable
   and `open_space` runs the post-open vacuum — so taking a backup altered the
