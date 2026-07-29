@@ -186,11 +186,22 @@ impl ContainerFile {
     /// [`Argon2Params::DEFAULT`] for the mobile baseline).
     pub fn create<P: AsRef<Path>>(path: P, params: Argon2Params) -> Result<Self> {
         params.validate()?;
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(path)?;
+        let mut opts = OpenOptions::new();
+        opts.read(true).write(true).create_new(true);
+        // Owner-only from the moment it exists. The contents are encrypted, so
+        // this is not what protects them — but a deniable container whose
+        // EXISTENCE and size any other local user can stat is advertising the
+        // one fact the design is built to avoid, and a world-readable file can
+        // be copied wholesale for an offline attack at the attacker's leisure.
+        // Set through the open flags rather than a chmod afterwards: a mode
+        // applied later leaves a window in which the file is already there at
+        // 0644 & !umask.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut file = opts.open(path)?;
         // Exclusive flock for the file's lifetime — auto-released when
         // `file` (and thus this struct) drops. Prevents concurrent
         // holders from corrupting the append-only chunk grid.
