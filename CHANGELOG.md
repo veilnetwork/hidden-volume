@@ -12,6 +12,12 @@ format.
 
 ## [Unreleased]
 
+## [1.2.3] — 2026-07-29
+
+Security and correctness release from a read-only audit pass. The on-disk
+format and the public Rust + FFI API are unchanged; `PARAMS_VERSION` stays
+at 3.
+
 ### Fixed
 
 - **A failed `create` left the path occupied.** The header is written first and
