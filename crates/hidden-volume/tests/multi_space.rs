@@ -175,3 +175,53 @@ fn with_space_rejects_unknown_id() {
         other => panic!("expected Malformed, got {other:?}"),
     }
 }
+
+/// Hosting a space here must not be quietly weaker than opening it through
+/// [`Container`].
+///
+/// `Container::open_space*` vacuums orphans on every writable handle, so the
+/// index nodes a previous session deleted or overwrote stop being decryptable
+/// — they remain valid AEAD otherwise, and anyone who later obtains the
+/// password plus an old snapshot of the file can read the deleted values back.
+/// `MultiSpace::open_space` went straight from the recovery scan to a stored
+/// state and skipped that step entirely, which is the path xVeil's all-online
+/// mode takes for every identity on every unlock.
+#[test]
+fn hosting_a_space_vacuums_what_a_single_space_open_would() {
+    let path = scratch_path();
+    let keys = {
+        let mut c = Container::create_with_options(&path, fast_options()).unwrap();
+        c.create_space(b"pw").unwrap();
+        c.derive_space_keys(b"pw").unwrap()
+    };
+
+    // Leave orphans behind: write several keys, then delete them. The deletes
+    // retire index nodes that stay decryptable until something scrubs them.
+    {
+        let mut ms = MultiSpace::new(Container::open(&path).unwrap());
+        let id = ms.open_space(keys.clone()).unwrap();
+        ms.with_space(id, |s| {
+            let mut tx = s.begin_tx();
+            for i in 0..16u8 {
+                tx.put(Namespace::SETTINGS, &[i], &[i; 64]).unwrap();
+            }
+            tx.commit().unwrap();
+            let mut tx = s.begin_tx();
+            for i in 0..16u8 {
+                tx.delete(Namespace::SETTINGS, &[i]).unwrap();
+            }
+            tx.commit().unwrap();
+        })
+        .unwrap();
+    } // dropped → lock released, orphans still on disk
+
+    // Re-host it. The open itself must do the scrubbing.
+    let mut ms = MultiSpace::new(Container::open(&path).unwrap());
+    let id = ms.open_space(keys).unwrap();
+    let left = ms.with_space(id, |s| s.vacuum_orphans().unwrap()).unwrap();
+    assert_eq!(
+        left, 0,
+        "open_space left {left} decryptable orphan(s) behind; a deleted value \
+         is still readable to anyone who later gets the password"
+    );
+}

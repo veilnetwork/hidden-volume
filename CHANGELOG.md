@@ -12,6 +12,25 @@ format.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`MultiSpace` never scrubbed the values a previous session deleted.** A
+  writable `Container::open_space*` runs `vacuum_orphans` as part of the open —
+  the index nodes an update or delete retires stay valid AEAD, so anyone who
+  later obtains the password and an old snapshot of the file can decrypt them
+  back. `MultiSpace::open_space` and `open_space_constant_time` went straight
+  from the recovery scan to a stored `SpaceState` and skipped it, so a host that
+  keeps every identity open at once — the reason `MultiSpace` exists — never
+  scrubbed anything at all. Both now run the same finaliser. Read-only hosts are
+  left alone: `vacuum_orphans` answers `Err(ReadOnly)` under a shared lock, and
+  refusing to open a container mounted read-only would be the worse bug.
+- **A new container was created at the process umask** (0644 on a typical
+  desktop) rather than owner-only. The contents are encrypted either way; a
+  deniable container whose existence and size any other local account can stat
+  defeats the point, and a readable one can be copied for an unhurried offline
+  attack. Now `0o600`, set through the open flags so there is no window in which
+  the file exists at the looser mode.
+
 ## [1.2.2] — 2026-07-28
 
 Bug-fix release. The on-disk format and the public Rust + FFI API are

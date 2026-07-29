@@ -86,8 +86,39 @@ impl MultiSpace {
             return Err(Error::SpaceAlreadyExists);
         }
         let state = scan_and_recover(&mut self.container.file, keys)?;
+        let state = self.finalize_open(state)?;
         self.spaces.push(Some(state));
         Ok(self.spaces.len() - 1)
+    }
+
+    /// Run the post-open work a single-space open runs, so hosting a space
+    /// here is not quietly weaker than opening it through [`Container`].
+    ///
+    /// `Container::open_space*` vacuums orphans on every writable handle
+    /// (`open_space_with_keys_inner_opts`) precisely so that values a previous
+    /// session deleted or overwrote stop being decryptable — the old index
+    /// nodes are still valid AEAD, so anyone who later obtains the password
+    /// and an old snapshot of the file can read them back. Hosting through
+    /// `MultiSpace` went straight from `scan_and_recover` to a stored state
+    /// and skipped it, so a host that opens every identity this way — which is
+    /// what xVeil's all-online mode does, for every identity, every unlock —
+    /// never scrubbed anything at all.
+    ///
+    /// Read-only hosts are left alone: `vacuum_orphans` is strict and answers
+    /// `Err(ReadOnly)` under a shared lock, and refusing to open a container
+    /// someone mounted read-only would be a worse bug than the one this fixes.
+    fn finalize_open(&mut self, state: SpaceState) -> Result<SpaceState> {
+        if self.container.is_readonly() {
+            return Ok(state);
+        }
+        let mut space = Space::from_state(&mut self.container.file, state);
+        let vacuumed = space.vacuum_orphans();
+        // Take the state back BEFORE propagating: losing it on a vacuum error
+        // would drop the caller's space entirely, which is a far larger
+        // failure than the scrub that did not happen.
+        let state = space.into_state();
+        vacuumed?;
+        Ok(state)
     }
 
     /// Constant-time-scan variant of [`Self::open_space`]. Equalizes the
@@ -100,6 +131,7 @@ impl MultiSpace {
             return Err(Error::SpaceAlreadyExists);
         }
         let state = scan_and_recover_constant_time(&mut self.container.file, keys)?;
+        let state = self.finalize_open(state)?;
         self.spaces.push(Some(state));
         Ok(self.spaces.len() - 1)
     }
