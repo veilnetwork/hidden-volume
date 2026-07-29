@@ -166,10 +166,28 @@ impl Container {
             Some(idx) => options.argon2.with_padding_policy_index(idx),
             None => options.argon2,
         };
+        let path = path.as_ref();
         let mut file = ContainerFile::create(path, argon2_for_header)?;
-        if options.initial_garbage_chunks > 0 {
-            file.append_garbage_chunks(options.initial_garbage_chunks)?;
-            file.fsync()?;
+        // A failure AFTER the file exists must not leave it behind. The header
+        // is written by `create`, so a create that then fails to lay down its
+        // initial garbage — `ContainerTooLarge` for an over-large request,
+        // ENOSPC on a full disk — used to return Err and leave a 4096-byte
+        // stub. `ContainerFile::create` opens with `create_new`, so the retry
+        // the caller obviously makes next hits AlreadyExists and the path is
+        // unusable until someone deletes a file they never knowingly made.
+        let filled = (|| -> Result<()> {
+            if options.initial_garbage_chunks > 0 {
+                file.append_garbage_chunks(options.initial_garbage_chunks)?;
+                file.fsync()?;
+            }
+            Ok(())
+        })();
+        if let Err(e) = filled {
+            // Drop first: the handle holds the exclusive flock, and unlinking
+            // under it is needlessly platform-dependent.
+            drop(file);
+            let _ = std::fs::remove_file(path);
+            return Err(e);
         }
         file.padding_policy = options.padding_policy;
         file.superblock_replicas = options.superblock_replicas.max(1);
