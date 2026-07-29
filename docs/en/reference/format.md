@@ -497,6 +497,17 @@ for password guessing), and a decoy open never touches another space's
 slots (its wall-clock reflects only the decoy's own working set, never
 the existence of hidden spaces). Checkpoints are per-space only.
 
+**The constant-time open modes skip the fast path entirely.** The
+paragraph above defends it on the default path, where speed is the
+point and the residual is an accepted trade. It does not carry over to
+`open_space_constant_time`, whose published contract is that the host's
+wall-clock cannot leak which space — or none — matched: "reflects only
+the decoy's own working set" is precisely the signal that API exists to
+remove, and per-chunk equalisation cannot hide a difference carried by
+the NUMBER of chunks visited. A caller of the constant-time API has
+already accepted roughly double the open time; handing the speed back
+would return the leak they paid to avoid.
+
 ## 5. Tx commit protocol (write path)
 
 A successful Tx commit MUST execute the following sequence (DESIGN

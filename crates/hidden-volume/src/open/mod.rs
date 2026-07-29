@@ -176,6 +176,14 @@ pub(crate) fn scan_and_recover(
 /// parallel-scan ([`scan_and_recover_parallel_constant_time`]),
 /// and mmap ([`scan_and_recover_mmap_constant_time`]). All three
 /// use the same per-chunk equalizer.
+///
+/// **No checkpoint fast path.** All three CT modes scan every slot.
+/// The selective fast-open visits only a working set, so its duration
+/// is a function of what the space holds — a correct password finishes
+/// early, a wrong one pays the full sweep, and equalizing per-chunk
+/// work cannot hide a signal carried by the NUMBER of chunks visited.
+/// That is the exact leak this entry point exists to remove, so it
+/// takes the full scan the doubled cost above already describes.
 pub(crate) fn scan_and_recover_constant_time(
     container: &mut ContainerFile,
     keys: SpaceKeys,
@@ -224,7 +232,23 @@ fn scan_and_recover_inner(
     // never touches another space's slots, so a decoy open's wall-
     // clock reflects only the decoy's own working set, never the
     // existence of hidden spaces. See `crate::space::checkpoint`.
-    let fast_enabled = {
+    // ...but NOT under the constant-time contract. The paragraph above is a
+    // fair defence of the fast path on the DEFAULT scan, where speed is the
+    // point and the residual leak is an accepted trade. It does not hold for
+    // `scan_and_recover_constant_time`, whose entire published purpose is that
+    // the host's wall-clock "can't leak which space (or none) matched": the
+    // sentence "a decoy open's wall-clock reflects only the decoy's own
+    // working set" IS the leak that API exists to remove. Equalising each
+    // chunk does not help when the number of chunks visited is itself the
+    // signal — a correct password touches a working set, a wrong one pays the
+    // full O(total) scan, and an observer of unlock time can tell those apart
+    // and estimate the working set besides.
+    //
+    // No speed is lost by anyone who did not ask for this. The constant-time
+    // entry point is opt-in and already documents that it roughly doubles open
+    // time; its callers have paid for equal timing and were quietly being
+    // handed back the speed instead.
+    let fast_enabled = !constant_time && {
         #[cfg(test)]
         {
             !test_hooks::disabled()

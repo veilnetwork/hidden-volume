@@ -668,19 +668,36 @@ mod tests {
         }
     }
 
-    /// The constant-time open path also engages the fast path and
-    /// returns all data.
+    /// The constant-time open path must NOT engage the fast path — and must
+    /// still return all data.
+    ///
+    /// This test previously asserted the opposite, and that was the bug: the
+    /// selective scan visits a working set instead of every slot, so its
+    /// duration is a function of what the space CONTAINS. A correct password
+    /// then finishes quickly while a wrong one pays the full O(total) scan,
+    /// and an observer of unlock wall-clock learns both that something opened
+    /// and roughly how much is in it. Equalising per-chunk work cannot fix a
+    /// signal carried by the NUMBER of chunks visited.
+    ///
+    /// That trade is fine on the default path, where speed is the point.
+    /// `open_space_constant_time` is the opt-in API whose published contract
+    /// is that the host's timing "can't leak which space (or none) matched",
+    /// and whose docs already warn it roughly doubles open time — its callers
+    /// bought equal timing and were being handed back the speed instead.
     #[test]
-    fn constant_time_open_uses_fast_path() {
+    fn constant_time_open_does_not_engage_the_fast_path() {
         let path = scratch_path();
         build_with_checkpoint(&path);
         test_hooks::set_disable(false);
         test_hooks::reset_hits();
         let mut c = Container::open(&path).unwrap();
         let mut s = c.open_space_constant_time(b"pw").unwrap();
-        assert!(
-            test_hooks::hits() >= 1,
-            "constant-time open must also engage the fast path"
+        assert_eq!(
+            test_hooks::hits(),
+            0,
+            "constant-time open took the checkpoint fast path; its duration \
+             now reflects the working set, which is what that API exists to \
+             hide"
         );
         for i in 0..N_KEYS {
             let want = if DELETED.contains(&i) {
