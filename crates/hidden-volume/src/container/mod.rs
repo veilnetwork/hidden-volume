@@ -891,7 +891,17 @@ impl Container {
         // claimed the lock was "dropped after Phase 1", which was
         // wrong — pass-11 M1 already plumbed `&mut src` through
         // both phases.
-        let mut src = Container::open(source)?;
+        // READ-ONLY source. An out-of-place repack documents the source as
+        // untouched, and a writable open broke that quietly: `open_space` runs
+        // the auto-vacuum, so reading the source to copy it rewrote its bytes.
+        // A backup taken this way no longer matches the hash of what it was
+        // taken from, which is exactly what a forensic copy is for.
+        //
+        // A shared lock still excludes writers — `LOCK_SH` blocks `LOCK_EX` —
+        // so the consistency the exclusive open provided is unchanged; what is
+        // gone is our own ability to mutate. The auto-vacuum skips itself on a
+        // read-only handle, so nothing here needs to opt out of it.
+        let mut src = Container::open_readonly(source)?;
         Self::repack_into_dest(&mut src, dest, password_map, options, cancel)
     }
 
