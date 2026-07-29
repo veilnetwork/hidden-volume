@@ -14,6 +14,12 @@ format.
 
 ### Fixed
 
+- **A failed `create` left the path occupied.** The header is written first and
+  the file is opened with `create_new`, so a create that then failed — an
+  over-large `initial_garbage_chunks`, ENOSPC — returned Err and left a
+  4096-byte stub. The retry a caller obviously makes next hit AlreadyExists, and
+  the path stayed unusable until someone deleted a file they never knowingly
+  made. The partial file is now removed before the error is returned.
 - **The constant-time open modes silently took the checkpoint fast path.**
   `open_space_constant_time` publishes one property — the host's wall-clock does
   not leak which space, or none, matched — and the fast path visits a working
