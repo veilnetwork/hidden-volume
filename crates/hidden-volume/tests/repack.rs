@@ -643,3 +643,48 @@ fn streaming_repack_multi_space_mixed_kinds() {
     std::fs::remove_file(&src).ok();
     std::fs::remove_file(&dst).ok();
 }
+
+/// An out-of-place repack must leave the SOURCE byte-for-byte identical.
+///
+/// It used to open the source writable, and `open_space` runs the post-open
+/// vacuum — so merely reading a container in order to copy it rewrote the
+/// original. A backup taken that way no longer hashes to what it was taken
+/// from, which defeats the point of taking one, and any forensic copy made
+/// with this API silently altered the evidence.
+#[test]
+fn repack_leaves_the_source_byte_identical() {
+    let src = scratch_path();
+    let dst = scratch_path();
+
+    {
+        let mut c = Container::create(&src, fast_params()).unwrap();
+        let mut s = c.create_space(b"pw").unwrap();
+        let mut tx = s.begin_tx();
+        for i in 0..8u8 {
+            tx.put(Namespace::SETTINGS, &[i], &[i; 32]).unwrap();
+        }
+        tx.commit().unwrap();
+        // Delete some, so the source carries orphans the vacuum would want to
+        // scrub. Without them the writable open had nothing to change and the
+        // bug would not reproduce.
+        let mut tx = s.begin_tx();
+        for i in 0..4u8 {
+            tx.delete(Namespace::SETTINGS, &[i]).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+
+    let before = std::fs::read(&src).unwrap();
+    Container::repack(&src, &dst, &[b"pw"], fast_repack_options()).unwrap();
+    let after = std::fs::read(&src).unwrap();
+
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "repack changed the source file's length"
+    );
+    assert!(
+        before == after,
+        "repack rewrote the source container it was only supposed to read"
+    );
+}

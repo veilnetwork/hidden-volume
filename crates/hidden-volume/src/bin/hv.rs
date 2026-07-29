@@ -297,7 +297,11 @@ fn cmd_create_space(path: PathBuf) -> Result<()> {
 
 fn cmd_inspect(path: PathBuf) -> Result<()> {
     let pw = read_password("password: ")?;
-    let mut c = Container::open(&path)?;
+    // Read-only: `inspect` reports what is in a container and must not be a
+    // way to change it. A writable open runs the post-open vacuum and the
+    // checkpoint self-heal, so looking at a container rewrote it — the one
+    // thing a diagnostic command must never do to evidence.
+    let mut c = Container::open_readonly(&path)?;
     let mut s = c.open_space(&pw)?;
     println!("commit_seq: {}", s.commit_seq());
     let namespaces = s.list_namespaces()?;
