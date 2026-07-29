@@ -1,6 +1,6 @@
 [package]
 name = "hidden-volume-ffi"
-version = "1.2.2"
+version = "1.2.3"
 edition = "2024"
 rust-version = "1.89"
 description = "uniffi-based FFI bindings for the hidden-volume container library — generates Kotlin/Swift/Python bindings."
