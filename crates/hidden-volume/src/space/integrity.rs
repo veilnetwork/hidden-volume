@@ -11,7 +11,7 @@ use crate::{Error, Result};
 use super::IntegrityReport;
 use super::Space;
 use super::index::{IndexNode, Namespace};
-use super::log::{decode_batch, parse_batch_slot_value};
+use super::log::{decode_batch, parse_batch_slot_value, parse_log_id_key};
 use super::superblock::NO_RECORD;
 
 impl<'f> Space<'f> {
@@ -148,14 +148,18 @@ impl<'f> Space<'f> {
         root_slot: u64,
         report: &mut IntegrityReport,
     ) -> Result<()> {
-        let mut batch_slots = Vec::new();
-        self.collect_log_batch_slots(root_slot, &mut batch_slots)?;
-        // Dedup: many log entries can fit in one DataBatch chunk; verify
-        // each unique slot once.
-        batch_slots.sort_unstable();
-        batch_slots.dedup();
+        // (batch_slot, log_id) pairs, so sorting groups every record that
+        // claims to live in one chunk together.
+        let mut pairs = Vec::new();
+        self.collect_log_batch_slots(root_slot, &mut pairs)?;
+        pairs.sort_unstable();
+        pairs.dedup();
 
-        for slot in batch_slots {
+        let mut idx = 0;
+        while idx < pairs.len() {
+            let slot = pairs[idx].0;
+            let end = idx + pairs[idx..].partition_point(|(s, _)| *s == slot);
+
             let pt = self.read_chunk_for_verify(slot, "owned-chunk AEAD failure on DataBatch")?;
             if pt.kind != ChunkKind::DataBatch {
                 return Err(Error::IntegrityFailure {
@@ -163,11 +167,30 @@ impl<'f> Space<'f> {
                     slot,
                 });
             }
-            decode_batch(&pt.payload).map_err(|_| Error::IntegrityFailure {
+            let records = decode_batch(&pt.payload).map_err(|_| Error::IntegrityFailure {
                 detail: "DataBatch decode failed during integrity walk",
                 slot,
             })?;
+
+            // Verifying that the chunk decodes says nothing about whether the
+            // record the index pointed at is in it. A state where a leaf maps
+            // log_id -> slot and that slot's batch never contained log_id is
+            // AEAD-valid, decodes cleanly, passes the old walk, and then fails
+            // at read_log — the integrity check reported healthy about the one
+            // thing the reader cannot do.
+            let present: std::collections::HashSet<u64> =
+                records.iter().map(|(id, _)| *id).collect();
+            for (_, log_id) in &pairs[idx..end] {
+                if !present.contains(log_id) {
+                    return Err(Error::IntegrityFailure {
+                        detail: "log index points at a DataBatch that does not hold its record",
+                        slot,
+                    });
+                }
+            }
+
             report.data_batches_verified += 1;
+            idx = end;
         }
         Ok(())
     }
@@ -175,7 +198,7 @@ impl<'f> Space<'f> {
     /// Walk subtree rooted at `slot`, accumulating every leaf-entry's
     /// 8-byte LE-encoded batch_slot pointer. Caller dedups.
     /// Depth-capped via [`super::index::MAX_TREE_DEPTH`].
-    fn collect_log_batch_slots(&mut self, slot: u64, out: &mut Vec<u64>) -> Result<()> {
+    fn collect_log_batch_slots(&mut self, slot: u64, out: &mut Vec<(u64, u64)>) -> Result<()> {
         self.collect_log_batch_slots_at(slot, 0, out)
     }
 
@@ -183,7 +206,7 @@ impl<'f> Space<'f> {
         &mut self,
         slot: u64,
         depth: u8,
-        out: &mut Vec<u64>,
+        out: &mut Vec<(u64, u64)>,
     ) -> Result<()> {
         if depth > super::index::MAX_TREE_DEPTH {
             return Err(Error::IntegrityFailure {
@@ -204,13 +227,20 @@ impl<'f> Space<'f> {
         })?;
         match node {
             IndexNode::Leaf(leaf) => {
-                for (_key, value) in leaf.entries {
+                for (key, value) in leaf.entries {
+                    // The key IS the log_id; it was discarded here, which is
+                    // why nothing downstream could check that the batch holds
+                    // the record the index promised.
+                    let log_id = parse_log_id_key(&key).map_err(|_| Error::IntegrityFailure {
+                        detail: "log leaf entry key not 8 bytes (log_id)",
+                        slot,
+                    })?;
                     let batch_slot =
                         parse_batch_slot_value(&value).map_err(|_| Error::IntegrityFailure {
                             detail: "log leaf entry value not 8 bytes (batch_slot)",
                             slot,
                         })?;
-                    out.push(batch_slot);
+                    out.push((batch_slot, log_id));
                 }
             },
             IndexNode::Internal(internal) => {
