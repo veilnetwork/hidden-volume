@@ -307,6 +307,15 @@ fn scan_and_recover_inner(
 /// chunk, physically-improbable bit corruption that AEAD missed), we
 /// must fall back to the next-highest-seq SB — so candidates are
 /// collected and decoded at the end in descending-seq order.
+///
+/// How many distinct-seq Superblock payloads that fallback may hold at once.
+/// Audit pass 20 bounded each entry to a canonical superblock length; the
+/// COUNT stayed open, so a key-holder could forge one distinct-seq Superblock
+/// per scanned chunk and have us hold all of them. Reaching the Nth candidate
+/// means N consecutive superblocks were forged or corrupt, and 64 is far past
+/// any state a writer produces.
+const MAX_SB_CANDIDATES: usize = 64;
+
 #[derive(Default)]
 struct ScanAcc {
     owned_slots: Vec<u64>,
@@ -352,6 +361,18 @@ fn accumulate_owned_slot(acc: &mut ScanAcc, slot: u64, pt: Plaintext) {
                     // kept the highest slot.
                     e.insert(pt.payload);
                 },
+            }
+            // Keep only the highest `MAX_SB_CANDIDATES` seqs. Audit pass 20
+            // bounded each entry to a canonical superblock length; the COUNT
+            // stayed open, so a key-holder could still forge one distinct-seq
+            // Superblock per scanned chunk and have us hold all of them at
+            // once. `finalize_scan` walks candidates in descending seq and
+            // stops at the first that decodes, so everything below the top few
+            // is only ever reached if that many consecutive superblocks are
+            // malformed-but-AEAD-valid — the fall-through survives, the
+            // unbounded map does not.
+            while acc.sb_candidates.len() > MAX_SB_CANDIDATES {
+                acc.sb_candidates.pop_first();
             }
         }
     }

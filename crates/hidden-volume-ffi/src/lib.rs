@@ -750,6 +750,12 @@ impl SpaceHandle {
     /// deniable space and never persist or log it in the clear.
     #[uniffi::constructor]
     pub fn open_with_keys(path: String, keys: Vec<u8>) -> HvResult<std::sync::Arc<Self>> {
+        // The Vec becomes ours the moment uniffi hands it over, so it is ours
+        // to wipe. Without this the space's AEAD root - the value that opens
+        // the space without its password - stays in a freed heap block for the
+        // rest of the process's life. The foreign-side copy is the caller's to
+        // zero; see the note on `space_keys`.
+        let keys = zeroize::Zeroizing::new(keys);
         let keys = decode_space_keys(&keys)?;
         let p = PathBuf::from(path);
         let container = Box::new(Container::open(&p)?);
@@ -768,6 +774,13 @@ impl SpaceHandle {
     /// password. **Sensitive** — the per-space decryption root; the caller MUST
     /// keep the bytes inside a deniable space and never log or persist them in
     /// the clear (doing so bypasses Argon2's brute-force protection).
+    ///
+    /// The returned buffer crosses into the foreign runtime, which copies it
+    /// and owns the copy. Rust cannot wipe that copy, so zeroing it is the
+    /// caller's job — Kotlin/Swift should overwrite the array as soon as the
+    /// keys are stored, and must not let it reach a garbage-collected `String`
+    /// or a log line on the way. What this side can wipe, it does: see
+    /// [`Self::open_with_keys`].
     pub fn space_keys(&self) -> HvResult<Vec<u8>> {
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
         Ok(g.with_space_mut(|s| {
@@ -1152,6 +1165,8 @@ impl AsyncSpaceHandle {
     /// already derived).
     #[uniffi::constructor]
     pub async fn open_with_keys(path: String, keys: Vec<u8>) -> HvResult<Arc<Self>> {
+        // Ours to wipe once uniffi hands it over — see the sync open_with_keys.
+        let keys = zeroize::Zeroizing::new(keys);
         let keys = decode_space_keys(&keys)?;
         let p = PathBuf::from(path);
         let inner = run_blocking(move || -> HvResult<OwnedSpace> {
