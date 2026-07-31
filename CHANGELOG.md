@@ -12,6 +12,23 @@ format.
 
 ## [Unreleased]
 
+### Security — audit follow-through
+
+- **The open scan holds a bounded number of Superblock candidates.** Audit pass
+  20 capped each candidate's payload to a canonical superblock length, but not
+  how many there could be: a key-holder could forge one distinct-seq Superblock
+  per scanned chunk and have `ScanAcc` hold every one of them at once, up to
+  `MAX_OPEN_SCAN_CHUNKS`. Only the highest `MAX_SB_CANDIDATES` (64) are kept.
+  The audit-D2 fall-through is unaffected — reaching the 64th candidate would
+  mean 64 consecutive superblocks were forged or corrupt.
+- **`open_with_keys` wipes the key buffer it is handed.** The `Vec<u8>` carrying
+  a space's `aead_root` — the value that opens the space without its password —
+  becomes ours when uniffi passes it in, and was dropped without zeroing,
+  leaving it in a freed heap block for the life of the process. Both the sync
+  and async constructors now wrap it in `Zeroizing`. The copy on the foreign
+  side is the caller's to clear, and `space_keys` now says so instead of leaving
+  it implied.
+
 ## [1.2.3] — 2026-07-29
 
 Security and correctness release from a read-only audit pass. The on-disk
