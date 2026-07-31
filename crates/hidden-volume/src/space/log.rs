@@ -279,6 +279,24 @@ pub fn log_id_key(log_id: u64) -> [u8; 8] {
     log_id.to_be_bytes()
 }
 
+/// Decode the key produced by [`log_id_key`].
+///
+/// Deliberately separate from [`parse_batch_slot_value`], and not a matter of
+/// taste: log KEYS are big-endian so their byte order matches numeric order in
+/// the B+ tree, while log VALUES are little-endian. Decoding one with the
+/// other's function does not fail — it returns a different, entirely plausible
+/// number.
+pub fn parse_log_id_key(key: &[u8]) -> Result<u64> {
+    if key.len() != 8 {
+        return Err(Error::WrongNamespaceKind(
+            "log entry key not 8 bytes (namespace is not a log)",
+        ));
+    }
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(key);
+    Ok(u64::from_be_bytes(buf))
+}
+
 /// Decode a KV value into a batch slot pointer.
 ///
 /// Returns [`Error::WrongNamespaceKind`] (not `Malformed`) when the
@@ -300,4 +318,37 @@ pub fn parse_batch_slot_value(value: &[u8]) -> Result<u64> {
 #[must_use]
 pub fn encode_batch_slot_value(batch_slot: u64) -> [u8; 8] {
     batch_slot.to_le_bytes()
+}
+
+#[cfg(test)]
+mod endianness_tests {
+    use super::*;
+
+    /// Keys and values are encoded with OPPOSITE byte orders, and neither
+    /// decoder rejects the other's bytes — it returns a different number that
+    /// looks entirely reasonable. The integrity walk decoded a log key with
+    /// `parse_batch_slot_value` and reported healthy containers as corrupt;
+    /// the failure named a missing record rather than a byte order.
+    #[test]
+    fn a_log_key_is_not_a_log_value() {
+        let id: u64 = 0x0102_0304_0506_0708;
+        assert_eq!(parse_log_id_key(&log_id_key(id)).unwrap(), id);
+        assert_eq!(
+            parse_batch_slot_value(&encode_batch_slot_value(id)).unwrap(),
+            id
+        );
+
+        // The trap: the wrong decoder succeeds.
+        let wrong = parse_batch_slot_value(&log_id_key(id)).unwrap();
+        assert_ne!(wrong, id, "byte-swapped, and silently so");
+        assert_eq!(wrong, id.swap_bytes());
+    }
+
+    /// A palindromic id decodes the same either way, so a test that used one
+    /// would pass with the decoders crossed.
+    #[test]
+    fn the_regression_value_is_not_byte_order_agnostic() {
+        let id: u64 = 0x0102_0304_0506_0708;
+        assert_ne!(id, id.swap_bytes());
+    }
 }

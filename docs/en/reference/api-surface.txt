@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-07-31T20:37:04Z
+# Captured: 2026-07-31T20:42:33Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -214,8 +214,9 @@ space/log.rs:  150:pub fn encode_batches_split(records: &[(u64, Vec<u8>)]) -> Re
 space/log.rs:  196:pub fn decode_batch(compressed: &[u8]) -> Result<Vec<(u64, Vec<u8>)>> {
 space/log.rs:  268:pub fn find_in_batch(records: &[(u64, Vec<u8>)], log_id: u64) -> Option<&Vec<u8>> {
 space/log.rs:  278:pub fn log_id_key(log_id: u64) -> [u8; 8] {
-space/log.rs:  288:pub fn parse_batch_slot_value(value: &[u8]) -> Result<u64> {
-space/log.rs:  301:pub fn encode_batch_slot_value(batch_slot: u64) -> [u8; 8] {
+space/log.rs:  289:pub fn parse_log_id_key(key: &[u8]) -> Result<u64> {
+space/log.rs:  306:pub fn parse_batch_slot_value(value: &[u8]) -> Result<u64> {
+space/log.rs:  319:pub fn encode_batch_slot_value(batch_slot: u64) -> [u8; 8] {
 space/log_iter.rs:  27:    pub fn iter_log(&mut self, namespace: Namespace) -> Result<Vec<(u64, Vec<u8>)>> {
 space/log_iter.rs:  46:    pub fn iter_log_after(
 space/log_iter.rs:  81:    pub fn iter_log_before(

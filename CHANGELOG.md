@@ -14,6 +14,19 @@ format.
 
 ### Security — audit follow-through
 
+- **`verify_integrity` checks that a log's DataBatch holds the record the index
+  promised.** The walk collected every leaf's batch_slot, deduplicated the
+  slots, and confirmed each chunk decoded — never that the `log_id` the leaf
+  pointed at was inside it. A state where the index maps `log_id -> slot` and
+  that batch never contained `log_id` is AEAD-valid, decodes cleanly, passed
+  the walk, and then failed at `read_log`: the integrity check reported healthy
+  about the one thing the reader could not do. Each `(log_id, batch_slot)` pair
+  is now verified.
+- **New `log::parse_log_id_key`.** Log keys are big-endian (so byte order
+  matches numeric order in the B+ tree) and log values are little-endian.
+  Neither decoder rejects the other's bytes — it returns a different, plausible
+  number — so the pair now exists explicitly, with a test that pins it.
+
 - **The open scan holds a bounded number of Superblock candidates.** Audit pass
   20 capped each candidate's payload to a canonical superblock length, but not
   how many there could be: a key-holder could forge one distinct-seq Superblock
