@@ -14,6 +14,39 @@ format.
 
 ### Security — audit follow-through
 
+- **Every B+ tree walker now shares a traversal guard.** `MAX_TREE_DEPTH`
+  bounds how *deep* a walk goes and says nothing about how *wide*. Nothing in
+  the encoding forces an `InternalNode`'s `child_slot` pointers to be distinct,
+  so a node whose ~90 children all name the same next node is AEAD-valid,
+  Merkle-consistent (the same child hash is correct under every parent that
+  names it) and passed every check: at the depth cap that is `90³ ≈ 7.3 × 10⁵`
+  chunk reads — an AEAD-decrypt and a BLAKE3 each — out of four distinct
+  chunks, from a container of a few KiB. The prior finding reasoned about
+  *cycles*, which the hash chain does rule out; a DAG costs the attacker
+  nothing. `space/walk.rs` adds a visited set (a chunk reachable twice is a
+  structural failure, not work to repeat — this also covers two children of one
+  node sharing a slot, and two namespaces claiming one chunk) plus a budget
+  equal to the space's owned-chunk count, and `verify_integrity`, `list`,
+  `count`, `iter_log_after/before/range` and `vacuum_orphans` all go through
+  it. `iter_log_*`'s `limit` was never a defence here: it bounds the output,
+  not the chunk reads.
+- **`verify_integrity` checks sibling key ranges.** Every key under
+  `children[i]` must fall in `[children[i].first_key, children[i+1].first_key)`,
+  the last child inheriting its parent's upper bound. `LeafNode::decode`
+  enforces order only *within* one leaf, so sibling leaves could overlap or sit
+  out of order with every hash still matching — and the entries in the overlap
+  are unreachable through `Space::get`, which binary-searches `first_key` on
+  the way down. `flatten_tree` would then reject the namespace at the next
+  commit. That is the verified-but-unreadable state `verify_integrity` exists
+  to rule out, and it reported healthy.
+- **The integrity walk reads a log namespace once, not twice.** The hash
+  descent and the `DataBatch`-pointer collection were separate full walks of
+  the same tree; they are one walk now, and the batch pass shares the tree
+  walk's guard, so a log pointer naming a chunk of its own index tree is
+  reported as aliasing. Batch pointers from all log namespaces are pooled
+  before deduplication, so a slot is read once per call rather than once per
+  namespace.
+
 - **`verify_integrity` checks that a log's DataBatch holds the record the index
   promised.** The walk collected every leaf's batch_slot, deduplicated the
   slots, and confirmed each chunk decoded — never that the `log_id` the leaf
