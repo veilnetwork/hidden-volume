@@ -14,6 +14,23 @@ format.
 
 ### Security — audit follow-through
 
+- **The `iter_log_*` decoded-batch cache is bounded in bytes and entries.**
+  `MAX_DECODED_BATCH_LEN` caps **one** batch at ≈ 8.4 MiB; the cache kept one
+  decoded batch per distinct `batch_slot` on the page, with no aggregate bound.
+  A page of N entries naming N crafted batches held `N × 8.4 MiB` at once — and
+  N is the caller's `limit`, with `iter_log` having no limit at all, so 512
+  entries is ~4.3 GiB out of a container that fits in a couple of MiB of
+  ciphertext. A per-item cap is not a budget. New `MAX_CACHED_BATCH_BYTES`
+  (8 MiB) and `MAX_CACHED_BATCHES` (64) bound the cache; the entry cap is there
+  because a near-empty batch weighs almost nothing yet still costs a map entry,
+  which would move the cost into eviction bookkeeping. Eviction is
+  least-recently-used and never fails a call: re-reading and re-decoding a
+  batch is always possible, so no result depends on what stayed resident. Peak
+  decoded bytes per call is now the budget plus the single batch being decoded
+  — under ~16.4 MiB at any `limit`. New `log::batch_footprint` charges payload
+  bytes plus per-record `Vec` overhead, so many-record tiny-payload batches are
+  not counted as free.
+
 - **Every B+ tree walker now shares a traversal guard.** `MAX_TREE_DEPTH`
   bounds how *deep* a walk goes and says nothing about how *wide*. Nothing in
   the encoding forces an `InternalNode`'s `child_slot` pointers to be distinct,

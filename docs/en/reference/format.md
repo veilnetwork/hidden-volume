@@ -653,6 +653,7 @@ See `docs/en/guide/migration.md` for the procedure.
 | `MAX_LOG_PAYLOAD_LEN` | 8192 | Per-log-entry payload cap (pre-compression). |
 | `MAX_RECORDS_PER_BATCH` | 1024 | DataBatch entry-count cap. |
 | `MAX_RAW_BATCH_LEN` | 1 048 576 | DataBatch raw size soft cap (1 MiB). |
+| `MAX_CACHED_BATCH_BYTES` / `MAX_CACHED_BATCHES` | 8 MiB / 64 | Aggregate bound on the `iter_log_*` per-call decoded-batch cache. `MAX_DECODED_BATCH_LEN` caps **one** batch; without an aggregate bound a page of N entries naming N crafted batches held `N × 8.4 MiB` at once (512 entries ≈ 4.3 GiB), and N is the caller's `limit` — unbounded for `iter_log`. The cache evicts least-recently-used instead of failing: re-reading and re-decoding a batch is always possible, so no result depends on what stayed resident. Peak decoded bytes per call = budget + one batch being decoded (< ~16.4 MiB at any `limit`). The entry cap exists because near-empty batches cost almost no bytes yet still cost a map entry. |
 | `MAX_RECORDS_PER_TX` | 100 | Records (plus IndexNodes) per single CommitPayload. |
 | `DEFAULT_SUPERBLOCK_REPLICAS` | 3 | SB replicas per commit. |
 | `params_version.format_version` | 3 | On-disk format generation; encoded as low 16 bits of the 4-byte `params.version` (§1.2). v3 readers refuse v1/v2 files, and v3 readers are refused by hypothetical v4 readers. |

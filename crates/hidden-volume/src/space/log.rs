@@ -70,6 +70,52 @@ pub const MAX_LOG_PAYLOAD_LEN: usize = 8 * 1024;
 /// past this cap returns `Error::Malformed`.
 pub const MAX_DECODED_BATCH_LEN: usize = 4 + MAX_RECORDS_PER_BATCH * (12 + MAX_LOG_PAYLOAD_LEN);
 
+/// Aggregate cap on decoded batch bytes the `iter_log_*` per-call cache
+/// may hold at once (8 MiB).
+///
+/// [`MAX_DECODED_BATCH_LEN`] bounds **one** batch. The iteration cache
+/// held one decoded batch per distinct `batch_slot` on the page with no
+/// aggregate bound, so a page of N entries each pointing at a different
+/// crafted batch resident `N × 8.4 MiB` at once — 512 entries is
+/// ~4.3 GiB, out of a container that fits in a couple of MiB of
+/// ciphertext. Callers choose N themselves via `limit`, and
+/// [`crate::space::Space::iter_log`] has no limit at all.
+///
+/// The cache is a pure optimization — every batch can be re-read and
+/// re-decoded — so exceeding the budget evicts rather than failing, and
+/// no legitimate call changes its result. Real batches decompress from
+/// a ≤ 4040-byte chunk to some tens of KiB, so hundreds fit; only
+/// crafted near-`MAX_DECODED_BATCH_LEN` batches evict.
+///
+/// Peak decoded bytes during a call is this budget plus the one batch
+/// being decoded, i.e. under ~16.4 MiB regardless of `limit`.
+pub const MAX_CACHED_BATCH_BYTES: usize = 8 * 1024 * 1024;
+
+/// Cap on how many decoded batches the `iter_log_*` per-call cache may
+/// hold at once, independent of their size.
+///
+/// [`MAX_CACHED_BATCH_BYTES`] alone would admit an unbounded number of
+/// *empty* batches (a 0-record batch decodes to almost nothing), which
+/// costs a map entry each and makes eviction bookkeeping the DoS
+/// instead. Entries are cheap to lose: a miss is one chunk read plus
+/// one zstd decompress. Log pages arrive in key order and a batch packs
+/// a contiguous run of ids, so the working set is a handful of batches
+/// even mid-eviction.
+pub const MAX_CACHED_BATCHES: usize = 64;
+
+/// Heap footprint charged for one decoded batch: payload bytes plus the
+/// per-record cost of the `Vec<(u64, Vec<u8>)>` holding them (a `u64`
+/// tag and a `Vec` header each). Counting payload bytes alone would let
+/// many-record, tiny-payload batches sit far above their real cost.
+#[must_use]
+pub fn batch_footprint(records: &[(u64, Vec<u8>)]) -> usize {
+    const PER_RECORD_OVERHEAD: usize = std::mem::size_of::<(u64, Vec<u8>)>();
+    records
+        .iter()
+        .map(|(_, p)| p.len().saturating_add(PER_RECORD_OVERHEAD))
+        .fold(0usize, usize::saturating_add)
+}
+
 /// Maximum size of an in-tx pending log buffer (uncompressed). Soft cap
 /// to bail out of obviously-too-large batches before zstd compresses.
 const MAX_RAW_BATCH_LEN: usize = 1024 * 1024;
