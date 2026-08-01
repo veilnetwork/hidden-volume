@@ -25,6 +25,24 @@ pub enum Error {
     #[error("authentication failed")]
     AuthFailed,
 
+    /// A superblock that decrypted under this space's key, carried a HIGHER
+    /// `seq` than the era we opened, and could not be parsed by this build.
+    ///
+    /// The space is READABLE — the open falls back to the newest superblock it
+    /// understands, and a corrupt or forged one must not be able to brick a
+    /// container. What is refused is anything that would act on that stale
+    /// view: `vacuum_orphans` (which deletes what the newer writer wrote) and
+    /// `commit_tx` (which forks the space by descending from a superseded
+    /// root).
+    ///
+    /// In practice this means the container was written by a NEWER library.
+    /// Upgrade, or open it with the version that wrote it.
+    ///
+    /// Not a deniability leak: reaching this requires the space key, so the
+    /// caller already knows the space exists.
+    #[error("this container holds state written by a newer format this build cannot read")]
+    UnreadableNewerState,
+
     /// `Container::create_space` was called with a password that already
     /// has a space in this container. Internal-only — never written to
     /// disk, never observable by an adversary holding the file. Distinct

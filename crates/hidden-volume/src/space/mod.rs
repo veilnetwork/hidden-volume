@@ -192,6 +192,26 @@ pub(crate) struct SpaceState {
     /// from the winning superblock, so a seq burnt by a crash is skipped
     /// across restarts too.
     pub attempted_seq: u64,
+    /// A Superblock chunk that decrypted under THIS space's key, carried a
+    /// HIGHER `seq` than the one we settled on, and could not be parsed.
+    ///
+    /// AEAD-passing means it is genuinely ours, not noise — so this is a
+    /// writer we do not understand having published state newer than the state
+    /// we are about to present. The open still succeeds from the best readable
+    /// superblock (a corrupt or forged superblock must not be able to brick a
+    /// space — that fallback is deliberate), but everything that would ACT on
+    /// the stale view is refused:
+    ///
+    ///  * `vacuum_orphans`, which would delete every chunk unreachable from the
+    ///    stale root — including all of the newer writer's;
+    ///  * `commit_tx`, which would branch the space by committing on top of it;
+    ///  * the checkpoint self-heal, which would record the stale set as truth.
+    ///
+    /// This is the invariant whose absence turned a format extension into
+    /// silent data loss: the scan dropped the superblock it could not parse,
+    /// fell back to an older one, and proceeded straight to destructive
+    /// maintenance. A version gate stops one known case; this stops the class.
+    pub unreadable_newer_superblock: Option<u64>,
 }
 
 impl SpaceState {
@@ -199,6 +219,7 @@ impl SpaceState {
         Self {
             keys,
             container_id,
+            unreadable_newer_superblock: None,
             superblock: Superblock {
                 seq: 0,
                 root_slot: NO_RECORD,
