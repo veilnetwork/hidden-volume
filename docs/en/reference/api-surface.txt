@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-07-31T20:42:33Z
+# Captured: 2026-08-01T04:00:00Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -205,7 +205,7 @@ space/index.rs:  382:    pub fn encoded_len(&self) -> usize {
 space/index.rs:  395:    pub fn encode(&self) -> Result<Vec<u8>> {
 space/index.rs:  439:    pub fn decode(bytes: &[u8]) -> Result<Self> {
 space/index.rs:  519:    pub fn child_index_for(&self, key: &[u8]) -> usize {
-space/integrity.rs:  52:    pub fn verify_integrity(&mut self) -> Result<IntegrityReport> {
+space/integrity.rs:  115:    pub fn verify_integrity(&mut self) -> Result<IntegrityReport> {
 space/log.rs:  58:pub const MAX_RECORDS_PER_BATCH: usize = 1024;
 space/log.rs:  62:pub const MAX_LOG_PAYLOAD_LEN: usize = 8 * 1024;
 space/log.rs:  71:pub const MAX_DECODED_BATCH_LEN: usize = 4 + MAX_RECORDS_PER_BATCH * (12 + MAX_LOG_PAYLOAD_LEN);
@@ -217,34 +217,34 @@ space/log.rs:  278:pub fn log_id_key(log_id: u64) -> [u8; 8] {
 space/log.rs:  289:pub fn parse_log_id_key(key: &[u8]) -> Result<u64> {
 space/log.rs:  306:pub fn parse_batch_slot_value(value: &[u8]) -> Result<u64> {
 space/log.rs:  319:pub fn encode_batch_slot_value(batch_slot: u64) -> [u8; 8] {
-space/log_iter.rs:  27:    pub fn iter_log(&mut self, namespace: Namespace) -> Result<Vec<(u64, Vec<u8>)>> {
-space/log_iter.rs:  46:    pub fn iter_log_after(
-space/log_iter.rs:  81:    pub fn iter_log_before(
-space/log_iter.rs:  130:    pub fn iter_log_range(
-space/log_iter.rs:  228:    pub fn read_log(&mut self, namespace: Namespace, log_id: u64) -> Result<Option<Vec<u8>>> {
+space/log_iter.rs:  28:    pub fn iter_log(&mut self, namespace: Namespace) -> Result<Vec<(u64, Vec<u8>)>> {
+space/log_iter.rs:  47:    pub fn iter_log_after(
+space/log_iter.rs:  82:    pub fn iter_log_before(
+space/log_iter.rs:  131:    pub fn iter_log_range(
+space/log_iter.rs:  229:    pub fn read_log(&mut self, namespace: Namespace, log_id: u64) -> Result<Option<Vec<u8>>> {
 space/mod.rs:  3:pub mod index;
 space/mod.rs:  4:pub mod log;
 space/mod.rs:  5:pub mod superblock;
-space/mod.rs:  45:pub struct SpaceStats {
-space/mod.rs:  77:    pub fn total_entries(&self) -> usize {
-space/mod.rs:  101:    pub fn utilization_ratio(&self) -> f64 {
-space/mod.rs:  123:pub struct IntegrityReport {
-space/mod.rs:  223:pub struct Space<'f> {
-space/mod.rs:  358:    pub fn commit_seq(&self) -> u64 {
-space/mod.rs:  374:    pub fn space_keys(&self) -> SpaceKeys {
-space/mod.rs:  412:    pub fn commit_history(&self) -> &[u64] {
-space/mod.rs:  432:    pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
-space/mod.rs:  443:    pub fn padding_policy(&self) -> crate::padding::PaddingPolicy {
-space/mod.rs:  455:    pub fn last_padding_error(&self) -> Option<&crate::Error> {
-space/mod.rs:  464:    pub fn audit_owned_chunk_count(&self) -> usize {
-space/mod.rs:  480:    pub fn stats(&mut self) -> Result<SpaceStats> {
-space/mod.rs:  498:    pub fn begin_tx<'s>(&'s mut self) -> Tx<'s, 'f> {
-space/mod.rs:  510:    pub fn get(&mut self, namespace: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>> {
-space/mod.rs:  548:    pub fn list(&mut self, namespace: Namespace) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-space/mod.rs:  561:    pub fn count(&mut self, namespace: Namespace) -> Result<usize> {
-space/mod.rs:  613:    pub fn erase_namespace(&mut self, namespace: Namespace) -> Result<usize> {
-space/mod.rs:  638:    pub fn list_namespaces(&mut self) -> Result<Vec<Namespace>> {
-space/mod.rs:  650:    pub fn list_namespaces_with_kind(
+space/mod.rs:  47:pub struct SpaceStats {
+space/mod.rs:  79:    pub fn total_entries(&self) -> usize {
+space/mod.rs:  103:    pub fn utilization_ratio(&self) -> f64 {
+space/mod.rs:  125:pub struct IntegrityReport {
+space/mod.rs:  225:pub struct Space<'f> {
+space/mod.rs:  360:    pub fn commit_seq(&self) -> u64 {
+space/mod.rs:  376:    pub fn space_keys(&self) -> SpaceKeys {
+space/mod.rs:  414:    pub fn commit_history(&self) -> &[u64] {
+space/mod.rs:  434:    pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
+space/mod.rs:  445:    pub fn padding_policy(&self) -> crate::padding::PaddingPolicy {
+space/mod.rs:  457:    pub fn last_padding_error(&self) -> Option<&crate::Error> {
+space/mod.rs:  466:    pub fn audit_owned_chunk_count(&self) -> usize {
+space/mod.rs:  482:    pub fn stats(&mut self) -> Result<SpaceStats> {
+space/mod.rs:  500:    pub fn begin_tx<'s>(&'s mut self) -> Tx<'s, 'f> {
+space/mod.rs:  512:    pub fn get(&mut self, namespace: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>> {
+space/mod.rs:  550:    pub fn list(&mut self, namespace: Namespace) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+space/mod.rs:  563:    pub fn count(&mut self, namespace: Namespace) -> Result<usize> {
+space/mod.rs:  615:    pub fn erase_namespace(&mut self, namespace: Namespace) -> Result<usize> {
+space/mod.rs:  640:    pub fn list_namespaces(&mut self) -> Result<Vec<Namespace>> {
+space/mod.rs:  652:    pub fn list_namespaces_with_kind(
 space/superblock.rs:  30:pub const NO_RECORD: u64 = u64::MAX;
 space/superblock.rs:  37:pub struct Superblock {
 space/superblock.rs:  72:    pub const ENCODED_LEN: usize = 8 + 8 + 32;
@@ -252,8 +252,8 @@ space/superblock.rs:  76:    pub const ENCODED_LEN_WITH_CHECKPOINT: usize = Self
 space/superblock.rs:  84:    pub fn is_valid_encoded_len(len: usize) -> bool {
 space/superblock.rs:  100:    pub fn encode(&self) -> Vec<u8> {
 space/superblock.rs:  130:    pub fn decode(bytes: &[u8]) -> Result<Self> {
-space/vacuum.rs:  42:    pub fn vacuum_orphans(&mut self) -> Result<usize> {
-space/vacuum.rs:  162:    pub fn vacuum_data_batches(&mut self) -> Result<usize> {
+space/vacuum.rs:  43:    pub fn vacuum_orphans(&mut self) -> Result<usize> {
+space/vacuum.rs:  164:    pub fn vacuum_data_batches(&mut self) -> Result<usize> {
 tx/commit.rs:  39:pub const MAX_NAMESPACES_PER_TX: usize = (PAYLOAD_CAP - 2 - 32) / (1 + 1 + 8 + 32);
 tx/commit.rs:  54:pub enum NamespaceKind {
 tx/commit.rs:  68:    pub fn as_u8(self) -> u8 {
