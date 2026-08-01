@@ -73,6 +73,14 @@ impl<'f> Space<'f> {
             return Ok(self.state.superblock.seq);
         }
 
+        // Committing on top of a stale root FORKS the space: the newer writer's
+        // era and ours both claim descent from different states, and the open
+        // scan resolves that by seq alone. Reading such a container is fine —
+        // writing to it is not. See `SpaceState::unreadable_newer_superblock`.
+        if self.state.unreadable_newer_superblock.is_some() {
+            return Err(Error::UnreadableNewerState);
+        }
+
         // Audit pass 11 (L3): defensive `checked_add`. Practically
         // unreachable through honest use (would require `u64::MAX`
         // commits), but a malformed AEAD-valid Superblock could push

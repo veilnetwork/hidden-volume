@@ -316,11 +316,35 @@ fn scan_and_recover_inner(
 /// any state a writer produces.
 const MAX_SB_CANDIDATES: usize = 64;
 
+/// Fold one owned-but-unparsable Superblock `seq` into the running maximum.
+///
+/// The three scan backends (sequential, parallel, mmap) each keep their own
+/// copy of the candidate loop — that duplication is what let the audit's
+/// candidate cap ship in one backend only. The RULE lives here so at least it
+/// cannot drift, even while the loops do.
+fn note_unparsable_sb(cur: &mut Option<u64>, seq: u64) {
+    *cur = Some(cur.map_or(seq, |s: u64| s.max(seq)));
+}
+
+/// Resolve `SpaceState::unreadable_newer_superblock`.
+///
+/// Only state NEWER than the era we settled on is dangerous; an unreadable
+/// superblock at or below it is superseded history, not a writer that got
+/// ahead of us.
+fn newer_unreadable_sb(undecodable: Option<u64>, chosen_seq: u64) -> Option<u64> {
+    undecodable.filter(|s| *s > chosen_seq)
+}
+
 #[derive(Default)]
 struct ScanAcc {
     owned_slots: Vec<u64>,
     commit_history: Vec<u64>,
     sb_candidates: std::collections::BTreeMap<u64, Vec<u8>>,
+    /// Highest `seq` of an owned Superblock chunk whose payload this build
+    /// could not parse. See `SpaceState::unreadable_newer_superblock` — a
+    /// chunk that AEAD-passed is ours, so failing to parse it means a writer
+    /// we do not understand got here first.
+    unparsable_sb_seq: Option<u64>,
 }
 
 /// Fold one owned (AEAD-passing) slot's plaintext into the accumulator.
@@ -343,6 +367,13 @@ fn accumulate_owned_slot(acc: &mut ScanAcc, slot: u64, pt: Plaintext) {
         // payload. Non-matching payloads still counted toward
         // `commit_history` above. `Superblock::decode` is the
         // canonical-form authority downstream.
+        if !Superblock::is_valid_encoded_len(pt.payload.len()) {
+            // Not a length this build knows. Older builds hit exactly this
+            // branch on the 56-byte checkpoint-bearing form and simply moved
+            // on, silently presenting an older era and then vacuuming the
+            // newer one away.
+            note_unparsable_sb(&mut acc.unparsable_sb_seq, pt.seq);
+        }
         if Superblock::is_valid_encoded_len(pt.payload.len()) {
             use std::collections::btree_map::Entry;
             match acc.sb_candidates.entry(pt.seq) {
@@ -386,6 +417,7 @@ fn finalize_scan(keys: SpaceKeys, container_id: [u8; 32], acc: ScanAcc) -> Resul
         owned_slots,
         mut commit_history,
         sb_candidates,
+        unparsable_sb_seq,
     } = acc;
 
     // Recoverable-commit anchors for host-app rollback / multi-device
@@ -403,17 +435,25 @@ fn finalize_scan(keys: SpaceKeys, container_id: [u8; 32], acc: ScanAcc) -> Resul
     // decoded `Superblock.seq` disagrees with the chunk-level
     // `Plaintext.seq` (audit pass 14) — a mismatch indicates a
     // writer-bug or post-AEAD tamper by a key-holder.
+    // A candidate that passes the length gate but fails `decode` counts the
+    // same as one that failed the gate: it is ours, and we cannot read it.
+    let mut undecodable_seq = unparsable_sb_seq;
     let superblock = sb_candidates
         .iter()
         .rev()
-        .find_map(|(chunk_seq, payload)| {
-            Superblock::decode(payload)
-                .ok()
-                .filter(|sb| sb.seq == *chunk_seq)
+        .find_map(|(chunk_seq, payload)| match Superblock::decode(payload) {
+            Ok(sb) if sb.seq == *chunk_seq => Some(sb),
+            _ => {
+                note_unparsable_sb(&mut undecodable_seq, *chunk_seq);
+                None
+            },
         })
         .ok_or(Error::Malformed(
             "every recoverable Superblock failed to decode",
         ))?;
+    // Only NEWER unreadable state is dangerous. One at or below the era we
+    // settled on is superseded history, not a writer that got ahead of us.
+    let unreadable_newer_superblock = newer_unreadable_sb(undecodable_seq, superblock.seq);
 
     Ok(SpaceState {
         keys,
@@ -427,6 +467,7 @@ fn finalize_scan(keys: SpaceKeys, container_id: [u8; 32], acc: ScanAcc) -> Resul
         commit_history,
         last_padding_error: None,
         roots_payload_cache: None,
+        unreadable_newer_superblock,
     })
 }
 
@@ -685,6 +726,10 @@ fn scan_and_recover_parallel_inner(
         owned_slots: Vec<u64>,
         commit_history: Vec<u64>,
         sb_candidates: std::collections::BTreeMap<u64, Vec<u8>>,
+        /// Mirrors `ScanAcc`'s field. The parallel backend keeps its own
+        /// accumulator, and a guard that lands in only one backend is exactly
+        /// how the audit's candidate cap ended up half-applied.
+        unparsable_sb_seq: Option<u64>,
     }
 
     // Coarse-grained chunking: each parallel work item processes
@@ -754,7 +799,12 @@ fn scan_and_recover_parallel_inner(
                         acc.commit_history.push(pt.seq);
                         // Audit pass 7 (D4): see sequential variant for rationale.
                         // Audit pass 20: length-gate the candidate (memory bound).
-                        // Accepts both canonical lengths (48 / 56).
+                        // Accepts both canonical lengths (48 / 56); anything
+                        // else is a superblock this build cannot read — see
+                        // `SpaceState::unreadable_newer_superblock`.
+                        if !Superblock::is_valid_encoded_len(pt.payload.len()) {
+                            note_unparsable_sb(&mut acc.unparsable_sb_seq, pt.seq);
+                        }
                         use std::collections::btree_map::Entry;
                         if Superblock::is_valid_encoded_len(pt.payload.len()) {
                             match acc.sb_candidates.entry(pt.seq) {
@@ -782,6 +832,12 @@ fn scan_and_recover_parallel_inner(
             .try_reduce(Acc::default, |mut a, b| -> Result<Acc> {
                 a.owned_slots.extend(b.owned_slots);
                 a.commit_history.extend(b.commit_history);
+                // Without this the flag survives only if the unreadable
+                // superblock happened to land in the accumulator that won the
+                // reduce — i.e. it would hold on some runs and not others.
+                if let Some(seq) = b.unparsable_sb_seq {
+                    note_unparsable_sb(&mut a.unparsable_sb_seq, seq);
+                }
                 // Merge candidates from both halves. Same-seq cross-thread
                 // replicas must be bit-equal (writer wrote them as one
                 // batch with identical payload) — audit pass 7 (D4).
@@ -813,6 +869,7 @@ fn scan_and_recover_parallel_inner(
         mut owned_slots,
         mut commit_history,
         sb_candidates,
+        unparsable_sb_seq,
     } = acc;
 
     // Parallel walk doesn't preserve slot order — sort to match the
@@ -829,17 +886,21 @@ fn scan_and_recover_parallel_inner(
     // fall back to lower-seq SB if highest fails to decode.
     // Audit pass 14: also require `Superblock.seq == chunk seq`
     // (mismatch ⇒ writer-bug or key-holder tamper, fall through).
+    let mut undecodable_seq = unparsable_sb_seq;
     let superblock = sb_candidates
         .iter()
         .rev()
-        .find_map(|(chunk_seq, payload)| {
-            Superblock::decode(payload)
-                .ok()
-                .filter(|sb| sb.seq == *chunk_seq)
+        .find_map(|(chunk_seq, payload)| match Superblock::decode(payload) {
+            Ok(sb) if sb.seq == *chunk_seq => Some(sb),
+            _ => {
+                note_unparsable_sb(&mut undecodable_seq, *chunk_seq);
+                None
+            },
         })
         .ok_or(Error::Malformed(
             "every recoverable Superblock failed to decode",
         ))?;
+    let unreadable_newer_superblock = newer_unreadable_sb(undecodable_seq, superblock.seq);
 
     Ok(crate::space::SpaceState {
         keys,
@@ -853,6 +914,7 @@ fn scan_and_recover_parallel_inner(
         commit_history,
         last_padding_error: None,
         roots_payload_cache: None,
+        unreadable_newer_superblock,
     })
 }
 
@@ -948,6 +1010,9 @@ fn scan_and_recover_mmap_inner(
     // order at the end with fallback. See `scan_and_recover` doc.
     let mut sb_candidates: std::collections::BTreeMap<u64, Vec<u8>> =
         std::collections::BTreeMap::new();
+    // Highest seq of an owned Superblock this build could not parse — see
+    // `SpaceState::unreadable_newer_superblock`.
+    let mut unparsable_sb_seq: Option<u64> = None;
 
     for slot in 0..total {
         let offset = (1 + slot) as usize * crate::CHUNK_SIZE;
@@ -975,6 +1040,9 @@ fn scan_and_recover_mmap_inner(
             // alongside the 56-byte long-form addition. Non-matching
             // payloads still counted toward `commit_history` above.
             use std::collections::btree_map::Entry;
+            if !Superblock::is_valid_encoded_len(pt.payload.len()) {
+                note_unparsable_sb(&mut unparsable_sb_seq, pt.seq);
+            }
             if Superblock::is_valid_encoded_len(pt.payload.len()) {
                 match sb_candidates.entry(pt.seq) {
                     Entry::Vacant(e) => {
@@ -1005,17 +1073,21 @@ fn scan_and_recover_mmap_inner(
     }
     // Audit pass 14: same chunk-vs-decoded seq cross-check as the
     // sequential / parallel scan paths.
+    let mut undecodable_seq = unparsable_sb_seq;
     let superblock = sb_candidates
         .iter()
         .rev()
-        .find_map(|(chunk_seq, payload)| {
-            Superblock::decode(payload)
-                .ok()
-                .filter(|sb| sb.seq == *chunk_seq)
+        .find_map(|(chunk_seq, payload)| match Superblock::decode(payload) {
+            Ok(sb) if sb.seq == *chunk_seq => Some(sb),
+            _ => {
+                note_unparsable_sb(&mut undecodable_seq, *chunk_seq);
+                None
+            },
         })
         .ok_or(Error::Malformed(
             "every recoverable Superblock failed to decode",
         ))?;
+    let unreadable_newer_superblock = newer_unreadable_sb(undecodable_seq, superblock.seq);
 
     Ok(crate::space::SpaceState {
         keys,
@@ -1029,6 +1101,7 @@ fn scan_and_recover_mmap_inner(
         commit_history,
         last_padding_error: None,
         roots_payload_cache: None,
+        unreadable_newer_superblock,
     })
 }
 
@@ -1074,5 +1147,33 @@ fn try_decrypt_with_options(
             }
             None
         },
+    }
+}
+
+#[cfg(test)]
+mod unreadable_superblock_rule_tests {
+    use super::{newer_unreadable_sb, note_unparsable_sb};
+
+    #[test]
+    fn the_highest_unparsable_seq_wins() {
+        let mut cur = None;
+        note_unparsable_sb(&mut cur, 7);
+        note_unparsable_sb(&mut cur, 3);
+        note_unparsable_sb(&mut cur, 11);
+        assert_eq!(cur, Some(11));
+    }
+
+    /// Only state NEWER than the era we opened is dangerous.
+    ///
+    /// An unreadable superblock at or below it is superseded history — a
+    /// leftover from a crashed publish, or a replica of an era we already moved
+    /// past. Treating those as "a newer writer got here" would make every
+    /// container with one stale malformed chunk permanently unwritable.
+    #[test]
+    fn only_seqs_above_the_chosen_era_are_dangerous() {
+        assert_eq!(newer_unreadable_sb(Some(9), 8), Some(9));
+        assert_eq!(newer_unreadable_sb(Some(8), 8), None);
+        assert_eq!(newer_unreadable_sb(Some(7), 8), None);
+        assert_eq!(newer_unreadable_sb(None, 8), None);
     }
 }
