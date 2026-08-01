@@ -41,6 +41,19 @@ impl<'f> Space<'f> {
     /// suppressed on read-only handles before reaching this method
     /// (forward-secrecy is, intentionally, a writer-only property).
     pub fn vacuum_orphans(&mut self) -> Result<usize> {
+        // A superblock NEWER than the one we settled on decrypted under our key
+        // and could not be parsed — something we do not understand published
+        // state after us. Vacuum deletes every chunk unreachable from OUR root,
+        // which is exactly that writer's data. Refuse.
+        //
+        // This is the invariant whose absence made a format extension into
+        // silent data loss: a 1.1.0 reader dropped the 56-byte superblock it
+        // could not decode, fell back to an older era, and scrubbed the newer
+        // one away on the next writable open.
+        if let Some(seq) = self.state.unreadable_newer_superblock {
+            let _ = seq;
+            return Err(Error::UnreadableNewerState);
+        }
         if self.file.lock_mode == crate::container::file::LockMode::Shared {
             return Err(Error::ReadOnly);
         }
@@ -278,5 +291,66 @@ impl<'f> Space<'f> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod newer_state_guard_tests {
+    use crate::space::index::Namespace;
+    use crate::{Container, Error};
+
+    fn container() -> (std::path::PathBuf, Container) {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_owned();
+        drop(tmp);
+        let c = Container::create(&path, crate::crypto::kdf::Argon2Params::MIN).unwrap();
+        (path, c)
+    }
+
+    /// With a newer superblock we could not read, the space stays READABLE but
+    /// refuses everything that would act on the stale view.
+    ///
+    /// Readable matters as much as refusing: a corrupt or forged superblock
+    /// must not be able to brick a container, which is why the open still falls
+    /// back to the newest era it understands.
+    #[test]
+    fn an_unreadable_newer_superblock_blocks_destruction_but_not_reads() {
+        let (_path, mut c) = container();
+        let mut s = c.create_space(b"pw").unwrap();
+        let mut tx = s.begin_tx();
+        tx.put(Namespace::SETTINGS, b"k", b"v").unwrap();
+        tx.commit().unwrap();
+
+        // Someone newer published an era we cannot parse.
+        s.state.unreadable_newer_superblock = Some(s.state.superblock.seq + 1);
+
+        assert!(
+            matches!(s.get(Namespace::SETTINGS, b"k"), Ok(Some(_))),
+            "reads must keep working — the data is still there"
+        );
+        assert!(
+            matches!(s.vacuum_orphans(), Err(Error::UnreadableNewerState)),
+            "vacuum would delete exactly the newer writer's chunks"
+        );
+
+        let mut tx = s.begin_tx();
+        tx.put(Namespace::SETTINGS, b"k2", b"v2").unwrap();
+        assert!(
+            matches!(tx.commit(), Err(Error::UnreadableNewerState)),
+            "committing on a superseded root forks the space"
+        );
+    }
+
+    /// Clearing the flag restores normal operation — the guard is about the
+    /// observed state, not a permanent brand on the container.
+    #[test]
+    fn a_space_without_newer_state_is_unaffected() {
+        let (_path, mut c) = container();
+        let mut s = c.create_space(b"pw").unwrap();
+        let mut tx = s.begin_tx();
+        tx.put(Namespace::SETTINGS, b"k", b"v").unwrap();
+        tx.commit().unwrap();
+        assert!(s.state.unreadable_newer_superblock.is_none());
+        assert!(s.vacuum_orphans().is_ok());
     }
 }
