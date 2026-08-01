@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-01T04:00:00Z
+# Captured: 2026-08-01T04:16:45Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -209,19 +209,22 @@ space/integrity.rs:  115:    pub fn verify_integrity(&mut self) -> Result<Integr
 space/log.rs:  58:pub const MAX_RECORDS_PER_BATCH: usize = 1024;
 space/log.rs:  62:pub const MAX_LOG_PAYLOAD_LEN: usize = 8 * 1024;
 space/log.rs:  71:pub const MAX_DECODED_BATCH_LEN: usize = 4 + MAX_RECORDS_PER_BATCH * (12 + MAX_LOG_PAYLOAD_LEN);
-space/log.rs:  88:pub fn encode_batch(records: &[(u64, Vec<u8>)]) -> Result<Vec<u8>> {
-space/log.rs:  150:pub fn encode_batches_split(records: &[(u64, Vec<u8>)]) -> Result<Vec<(Vec<u64>, Vec<u8>)>> {
-space/log.rs:  196:pub fn decode_batch(compressed: &[u8]) -> Result<Vec<(u64, Vec<u8>)>> {
-space/log.rs:  268:pub fn find_in_batch(records: &[(u64, Vec<u8>)], log_id: u64) -> Option<&Vec<u8>> {
-space/log.rs:  278:pub fn log_id_key(log_id: u64) -> [u8; 8] {
-space/log.rs:  289:pub fn parse_log_id_key(key: &[u8]) -> Result<u64> {
-space/log.rs:  306:pub fn parse_batch_slot_value(value: &[u8]) -> Result<u64> {
-space/log.rs:  319:pub fn encode_batch_slot_value(batch_slot: u64) -> [u8; 8] {
-space/log_iter.rs:  28:    pub fn iter_log(&mut self, namespace: Namespace) -> Result<Vec<(u64, Vec<u8>)>> {
-space/log_iter.rs:  47:    pub fn iter_log_after(
-space/log_iter.rs:  82:    pub fn iter_log_before(
-space/log_iter.rs:  131:    pub fn iter_log_range(
-space/log_iter.rs:  229:    pub fn read_log(&mut self, namespace: Namespace, log_id: u64) -> Result<Option<Vec<u8>>> {
+space/log.rs:  92:pub const MAX_CACHED_BATCH_BYTES: usize = 8 * 1024 * 1024;
+space/log.rs:  104:pub const MAX_CACHED_BATCHES: usize = 64;
+space/log.rs:  111:pub fn batch_footprint(records: &[(u64, Vec<u8>)]) -> usize {
+space/log.rs:  134:pub fn encode_batch(records: &[(u64, Vec<u8>)]) -> Result<Vec<u8>> {
+space/log.rs:  196:pub fn encode_batches_split(records: &[(u64, Vec<u8>)]) -> Result<Vec<(Vec<u64>, Vec<u8>)>> {
+space/log.rs:  242:pub fn decode_batch(compressed: &[u8]) -> Result<Vec<(u64, Vec<u8>)>> {
+space/log.rs:  314:pub fn find_in_batch(records: &[(u64, Vec<u8>)], log_id: u64) -> Option<&Vec<u8>> {
+space/log.rs:  324:pub fn log_id_key(log_id: u64) -> [u8; 8] {
+space/log.rs:  335:pub fn parse_log_id_key(key: &[u8]) -> Result<u64> {
+space/log.rs:  352:pub fn parse_batch_slot_value(value: &[u8]) -> Result<u64> {
+space/log.rs:  365:pub fn encode_batch_slot_value(batch_slot: u64) -> [u8; 8] {
+space/log_iter.rs:  123:    pub fn iter_log(&mut self, namespace: Namespace) -> Result<Vec<(u64, Vec<u8>)>> {
+space/log_iter.rs:  144:    pub fn iter_log_after(
+space/log_iter.rs:  179:    pub fn iter_log_before(
+space/log_iter.rs:  228:    pub fn iter_log_range(
+space/log_iter.rs:  336:    pub fn read_log(&mut self, namespace: Namespace, log_id: u64) -> Result<Option<Vec<u8>>> {
 space/mod.rs:  3:pub mod index;
 space/mod.rs:  4:pub mod log;
 space/mod.rs:  5:pub mod superblock;

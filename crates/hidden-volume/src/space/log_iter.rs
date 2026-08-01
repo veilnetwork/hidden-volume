@@ -11,6 +11,98 @@ use super::index::{self, IndexNode, Namespace};
 use super::log;
 use super::walk::TreeWalk;
 
+/// One decoded log record: `(log_id, payload)`.
+type LogRecord = (u64, Vec<u8>);
+/// A decoded `DataBatch`'s records, in append order.
+type DecodedBatch = Vec<LogRecord>;
+/// A resident cache entry: the tick of its last use plus the batch.
+type CachedBatch = (u64, DecodedBatch);
+
+/// Per-call cache of decoded `DataBatch` chunks, bounded in both bytes
+/// and entries ([`log::MAX_CACHED_BATCH_BYTES`],
+/// [`log::MAX_CACHED_BATCHES`]) so a page cannot make the decoder hold
+/// an arbitrary multiple of [`log::MAX_DECODED_BATCH_LEN`].
+///
+/// Eviction is least-recently-used, by an insertion/access counter
+/// rather than an intrusive list: the entry cap keeps the "find the
+/// oldest" scan at ≤ 64 comparisons, which is cheaper than maintaining
+/// order across a map. Evicting is always safe — the batch can be
+/// re-read and re-decoded — so results never depend on what stayed
+/// resident.
+struct BatchCache {
+    /// `batch_slot -> (last-use tick, decoded records)`.
+    entries: std::collections::HashMap<u64, CachedBatch>,
+    /// Sum of [`log::batch_footprint`] over `entries`.
+    bytes: usize,
+    max_bytes: usize,
+    max_entries: usize,
+    tick: u64,
+}
+
+impl BatchCache {
+    fn new(max_entries: usize, max_bytes: usize) -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            bytes: 0,
+            max_bytes,
+            max_entries,
+            tick: 0,
+        }
+    }
+
+    /// Look up a decoded batch, marking it most-recently-used.
+    fn get(&mut self, slot: u64) -> Option<&[LogRecord]> {
+        self.tick += 1;
+        let tick = self.tick;
+        let (last_use, records) = self.entries.get_mut(&slot)?;
+        *last_use = tick;
+        Some(records.as_slice())
+    }
+
+    /// Admit a decoded batch, evicting least-recently-used entries until
+    /// it fits. A batch too large for the whole budget is simply not
+    /// cached — it was already decoded for this one lookup, and holding
+    /// it would evict everything for a single-use entry.
+    fn insert(&mut self, slot: u64, records: DecodedBatch) {
+        let cost = log::batch_footprint(&records);
+        if cost > self.max_bytes || self.max_entries == 0 {
+            return;
+        }
+        // Re-inserting a slot already resident (possible only if a
+        // caller decoded it twice) must not double-count its bytes.
+        if let Some((_, old)) = self.entries.remove(&slot) {
+            self.bytes = self.bytes.saturating_sub(log::batch_footprint(&old));
+        }
+        while self.entries.len() >= self.max_entries
+            || self.bytes.saturating_add(cost) > self.max_bytes
+        {
+            if !self.evict_one() {
+                break;
+            }
+        }
+        self.tick += 1;
+        self.bytes = self.bytes.saturating_add(cost);
+        self.entries.insert(slot, (self.tick, records));
+    }
+
+    /// Drop the least-recently-used entry. Returns `false` when there
+    /// was nothing left to drop.
+    fn evict_one(&mut self) -> bool {
+        let Some(oldest) = self
+            .entries
+            .iter()
+            .min_by_key(|(_, (last_use, _))| *last_use)
+            .map(|(slot, _)| *slot)
+        else {
+            return false;
+        };
+        if let Some((_, records)) = self.entries.remove(&oldest) {
+            self.bytes = self.bytes.saturating_sub(log::batch_footprint(&records));
+        }
+        true
+    }
+}
+
 impl<'f> Space<'f> {
     /// Enumerate all log entries in `namespace`, in ascending log_id
     /// order. Each entry's containing DataBatch chunk is read at most
@@ -18,13 +110,16 @@ impl<'f> Space<'f> {
     ///
     /// Cost: O(K) chunk reads where K is the number of distinct batches
     /// referenced by the namespace's index, plus one zstd decompress
-    /// per batch. Memory: holds all decoded batches simultaneously
-    /// during the call.
+    /// per batch (more if the batch cache evicts).
+    ///
+    /// Memory: the returned entries — the whole namespace's payloads,
+    /// which is what was asked for — plus the batch cache, which is
+    /// bounded by [`log::MAX_CACHED_BATCH_BYTES`] and
+    /// [`log::MAX_CACHED_BATCHES`] rather than by K.
     ///
     /// **For large namespaces use [`Self::iter_log_after`] /
-    /// [`Self::iter_log_before`] instead** — those page bounded counts
-    /// and bound memory by O(limit) decoded entries plus a few touched
-    /// batches.
+    /// [`Self::iter_log_before`] instead** — those page bounded counts,
+    /// so the *result* is bounded too.
     pub fn iter_log(&mut self, namespace: Namespace) -> Result<Vec<(u64, Vec<u8>)>> {
         let entries = self.list(namespace)?;
         self.decode_log_entries(entries)
@@ -39,8 +134,10 @@ impl<'f> Space<'f> {
     ///
     /// Cost: walks B+ tree leaves left-to-right, stopping after `limit`
     /// matching entries. Memory bound: at most `limit` decoded entries
-    /// plus the few touched DataBatch chunks (cached during the call,
-    /// dropped after return). Independent of total namespace size.
+    /// plus the batch cache, which is capped at
+    /// [`log::MAX_CACHED_BATCH_BYTES`] / [`log::MAX_CACHED_BATCHES`] no
+    /// matter how many distinct batches the page spans. Independent of
+    /// total namespace size.
     ///
     /// This is the messenger-pagination primitive: oldest-first feed
     /// scrolling, "load more" buttons, export streams.
@@ -74,8 +171,8 @@ impl<'f> Space<'f> {
     ///
     /// Cost: walks B+ tree leaves right-to-left, stopping after `limit`
     /// matching entries. Memory bound: at most `limit` decoded entries
-    /// plus the few touched DataBatch chunks. Independent of total
-    /// namespace size.
+    /// plus the capped batch cache (see [`Self::iter_log_after`]).
+    /// Independent of total namespace size.
     ///
     /// This is the messenger-pagination primitive for "scroll up to
     /// see older messages" — the canonical chat-UI pattern.
@@ -120,9 +217,9 @@ impl<'f> Space<'f> {
     ///
     /// Cost: walks B+ tree leaves left-to-right, short-circuiting as
     /// soon as either `limit` is reached or an entry `>= end` is
-    /// observed. Memory bound: O(limit) decoded entries plus the
-    /// touched `DataBatch` chunks (cached during the call). Walk does
-    /// not visit subtrees rooted to the right of `end`.
+    /// observed. Memory bound: O(limit) decoded entries plus the capped
+    /// batch cache (see [`Self::iter_log_after`]). Walk does not visit
+    /// subtrees rooted to the right of `end`.
     ///
     /// This is the messenger primitive for "give me messages in a
     /// time window" — pair it with `log_id`s that encode wallclock
@@ -154,13 +251,16 @@ impl<'f> Space<'f> {
 
     /// Shared decoder for log KV-pair pages: turns `(log_id_key,
     /// batch_slot_value)` pairs into `(log_id, payload)` entries.
-    /// Touches each DataBatch chunk at most once via a per-call cache.
+    ///
+    /// A batch is decoded once per run of entries that point at it, via
+    /// a [`BatchCache`] bounded in both bytes and entries. The cache is
+    /// an optimization only: an eviction costs a re-read plus a
+    /// re-decode and cannot change what this returns.
     fn decode_log_entries(
         &mut self,
         kv_pairs: Vec<(Vec<u8>, Vec<u8>)>,
     ) -> Result<Vec<(u64, Vec<u8>)>> {
-        let mut batch_cache: std::collections::HashMap<u64, Vec<(u64, Vec<u8>)>> =
-            std::collections::HashMap::new();
+        let mut batch_cache = BatchCache::new(log::MAX_CACHED_BATCHES, log::MAX_CACHED_BATCH_BYTES);
         let mut out = Vec::with_capacity(kv_pairs.len());
         for (key, value) in kv_pairs {
             if key.len() != 8 {
@@ -175,9 +275,16 @@ impl<'f> Space<'f> {
             let log_id = u64::from_be_bytes(id_buf);
             let batch_slot = log::parse_batch_slot_value(&value)?;
 
-            let batch = match batch_cache.entry(batch_slot) {
-                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-                std::collections::hash_map::Entry::Vacant(e) => {
+            // `map`, not `and_then`: the outer Option is "was the batch
+            // resident", the inner is "did it hold this id". Collapsing
+            // them would send a cached-but-id-absent entry down the
+            // decode path instead of straight to the error.
+            let hit = batch_cache
+                .get(batch_slot)
+                .map(|batch| log::find_in_batch(batch, log_id).cloned());
+            let payload = match hit {
+                Some(found) => found,
+                None => {
                     let pt = self.read_owned_chunk(batch_slot)?;
                     if pt.kind != ChunkKind::DataBatch {
                         // Pointed slot exists but isn't DataBatch —
@@ -187,12 +294,12 @@ impl<'f> Space<'f> {
                         ));
                     }
                     let records = log::decode_batch(&pt.payload)?;
-                    e.insert(records)
+                    let found = log::find_in_batch(&records, log_id).cloned();
+                    batch_cache.insert(batch_slot, records);
+                    found
                 },
             };
-            let payload = log::find_in_batch(batch, log_id)
-                .cloned()
-                .ok_or(Error::Malformed("log_id not found in pointed batch"))?;
+            let payload = payload.ok_or(Error::Malformed("log_id not found in pointed batch"))?;
             out.push((log_id, payload));
         }
         Ok(out)
@@ -523,5 +630,95 @@ impl<'f> Space<'f> {
                 Ok(false)
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod batch_cache_tests {
+    use super::*;
+
+    /// `n` records of `payload_len` bytes each, ids `0..n`.
+    fn records(n: usize, payload_len: usize) -> DecodedBatch {
+        (0..n)
+            .map(|i| (i as u64, vec![0xAB; payload_len]))
+            .collect()
+    }
+
+    /// The bound the finding was about: no matter how many distinct
+    /// batches a page names, resident bytes stay under the budget.
+    #[test]
+    fn resident_bytes_never_exceed_the_budget() {
+        let budget = 64 * 1024;
+        let mut c = BatchCache::new(1024, budget);
+        for slot in 0..200u64 {
+            c.insert(slot, records(4, 1024));
+            assert!(
+                c.bytes <= budget,
+                "slot {slot}: {} bytes resident, budget {budget}",
+                c.bytes
+            );
+        }
+        assert!(c.entries.len() < 200, "nothing was evicted");
+    }
+
+    /// The entry cap is the other half: empty batches cost almost no
+    /// bytes, so without it a page of them would grow the map without
+    /// limit and make eviction itself the expensive part.
+    #[test]
+    fn the_entry_cap_bounds_batches_that_weigh_nothing() {
+        let mut c = BatchCache::new(8, 1024 * 1024);
+        for slot in 0..100u64 {
+            c.insert(slot, Vec::new());
+        }
+        assert_eq!(c.entries.len(), 8);
+    }
+
+    /// A batch too large for the entire budget is not cached — it must
+    /// not evict every resident entry to admit a single-use one.
+    #[test]
+    fn an_oversized_batch_is_not_admitted() {
+        let mut c = BatchCache::new(16, 8 * 1024);
+        c.insert(1, records(1, 512));
+        let resident_before = c.entries.len();
+        c.insert(2, records(1, 64 * 1024));
+        assert_eq!(c.entries.len(), resident_before, "the small entry survived");
+        assert!(c.get(2).is_none(), "the oversized batch was not cached");
+        assert!(c.get(1).is_some());
+    }
+
+    /// Eviction is by least-recent *use*, not by insertion order: a
+    /// batch that keeps being read must outlive one that was inserted
+    /// later and never touched again.
+    #[test]
+    fn eviction_drops_the_least_recently_used_entry() {
+        // Three entries fit; the fourth forces exactly one eviction.
+        let one = log::batch_footprint(&records(1, 1000));
+        let mut c = BatchCache::new(16, one * 3 + one / 2);
+
+        c.insert(1, records(1, 1000));
+        c.insert(2, records(1, 1000));
+        c.insert(3, records(1, 1000));
+        // Touch 1 and 3, leaving 2 as the least recently used.
+        assert!(c.get(1).is_some());
+        assert!(c.get(3).is_some());
+
+        c.insert(4, records(1, 1000));
+        assert!(c.get(2).is_none(), "the least recently used should go");
+        assert!(c.get(1).is_some());
+        assert!(c.get(3).is_some());
+        assert!(c.get(4).is_some());
+    }
+
+    /// Re-admitting a slot already resident must not count its bytes
+    /// twice — otherwise the accounting drifts up and the cache evicts
+    /// itself down to nothing.
+    #[test]
+    fn re_inserting_a_resident_slot_does_not_double_count() {
+        let mut c = BatchCache::new(16, 1024 * 1024);
+        c.insert(7, records(2, 500));
+        let after_first = c.bytes;
+        c.insert(7, records(2, 500));
+        assert_eq!(c.bytes, after_first);
+        assert_eq!(c.entries.len(), 1);
     }
 }

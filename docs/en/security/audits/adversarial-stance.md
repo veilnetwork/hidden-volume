@@ -545,6 +545,21 @@ pass commit.
   cap → `Error::Malformed("batch decompressed size exceeds cap")`.
 - **Verdict.** **Defended.**
 - **Severity.** INFO.
+- **Follow-up (2026-08-01).** The cap is per **batch**, and the
+  `iter_log_*` decoder kept one decoded batch per distinct
+  `batch_slot` on the page with no aggregate bound — so N pointers to
+  N crafted batches resident `N × 8.4 MiB` at once. The caller picks N
+  via `limit`, and `iter_log` has no limit at all: a page of 512 is
+  ~4.3 GiB out of a container of a couple of MiB. A per-item cap is
+  not a budget. The cache is now bounded in both bytes and entries
+  ([`MAX_CACHED_BATCH_BYTES`] = 8 MiB, [`MAX_CACHED_BATCHES`] = 64) and
+  evicts least-recently-used rather than failing, since re-decoding a
+  batch is always possible and no result depends on what stayed
+  resident. Peak decoded bytes per call is now the budget plus the one
+  batch being decoded — under ~16.4 MiB for any `limit`.
+
+[`MAX_CACHED_BATCH_BYTES`]: ../../../../crates/hidden-volume/src/space/log.rs
+[`MAX_CACHED_BATCHES`]: ../../../../crates/hidden-volume/src/space/log.rs
 
 #### F-A3. B+ tree node-count allocation amplifier
 

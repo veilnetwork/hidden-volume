@@ -517,3 +517,90 @@ fn r13_sparse_ids_only_existing_returned() {
     let ids: Vec<u64> = r.iter().map(|(id, _)| *id).collect();
     assert_eq!(ids, vec![25, 30, 31, 32]);
 }
+
+// --- batch-cache eviction (audit: aggregate decoded-byte budget) ---
+
+/// Deterministic incompressible bytes. zstd cannot shrink these, so a
+/// payload near `PAYLOAD_CAP` forces roughly one record per DataBatch —
+/// the cheapest way to make a namespace span far more batches than the
+/// cache is allowed to hold.
+fn noise(seed: u64, len: usize) -> Vec<u8> {
+    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    (0..len)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 24) as u8
+        })
+        .collect()
+}
+
+/// Every entry lands in its own DataBatch, so reading the namespace
+/// spans far more batches than [`MAX_CACHED_BATCHES`] — the cache must
+/// evict, and eviction must not change a single byte of the answer.
+/// Before the bound, the decoder simply held all of them at once.
+#[test]
+fn a_log_spanning_more_batches_than_the_cache_holds_reads_back_intact() {
+    use hidden_volume::space::log::MAX_CACHED_BATCHES;
+
+    let total = (MAX_CACHED_BATCHES * 3) as u64;
+    let payload_len = 3000; // incompressible, so ~1 record per batch
+
+    let path = scratch_path();
+    let mut c = Container::create(&path, fast_params()).unwrap();
+    let mut s = c.create_space(b"pw").unwrap();
+    for chunk_start in (1..=total).step_by(32) {
+        let mut tx = s.begin_tx();
+        for id in chunk_start..(chunk_start + 32).min(total + 1) {
+            tx.append_log(Namespace::MESSAGE_LOG, id, &noise(id, payload_len))
+                .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+
+    // The premise: this really does span more batches than the cache
+    // may hold. Without it the test would pass on a namespace that
+    // never evicts, proving nothing.
+    let distinct_batches = s
+        .list(Namespace::MESSAGE_LOG)
+        .unwrap()
+        .iter()
+        .map(|(_, v)| v.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    assert!(
+        distinct_batches > MAX_CACHED_BATCHES,
+        "premise failed: {distinct_batches} batches, cache holds {MAX_CACHED_BATCHES}"
+    );
+
+    let all = s.iter_log(Namespace::MESSAGE_LOG).unwrap();
+    assert_eq!(all.len(), total as usize);
+    for (i, (id, payload)) in all.iter().enumerate() {
+        let expected_id = i as u64 + 1;
+        assert_eq!(*id, expected_id);
+        assert_eq!(
+            payload,
+            &noise(expected_id, payload_len),
+            "id {expected_id}"
+        );
+    }
+
+    // Same through the paginated path, in one oversized page.
+    let paged = s
+        .iter_log_after(Namespace::MESSAGE_LOG, None, total as usize + 10)
+        .unwrap();
+    assert_eq!(paged, all);
+
+    // And in reverse, where the walk revisits batches in the opposite
+    // order from the one they were admitted in.
+    let mut reversed = s
+        .iter_log_before(Namespace::MESSAGE_LOG, None, total as usize + 10)
+        .unwrap();
+    reversed.reverse();
+    assert_eq!(reversed, all);
+
+    drop(s);
+    drop(c);
+    let _ = std::fs::remove_file(&path);
+}

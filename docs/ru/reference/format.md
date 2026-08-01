@@ -671,6 +671,7 @@ In-place миграция не предоставляется. Чтобы пер
 | `MAX_LOG_PAYLOAD_LEN` | 8192 | Per-log-entry payload cap (pre-compression). |
 | `MAX_RECORDS_PER_BATCH` | 1024 | DataBatch entry-count cap. |
 | `MAX_RAW_BATCH_LEN` | 1 048 576 | DataBatch raw size soft cap (1 MiB). |
+| `MAX_CACHED_BATCH_BYTES` / `MAX_CACHED_BATCHES` | 8 МиБ / 64 | Совокупный предел на кеш декодированных batch'ей внутри одного вызова `iter_log_*`. `MAX_DECODED_BATCH_LEN` ограничивает **один** batch; без совокупного предела страница из N записей, называющих N подделанных batch'ей, держала `N × 8,4 МиБ` разом (512 записей ≈ 4,3 ГиБ), а N — это `limit` вызывающего, у `iter_log` не ограниченный вовсе. Кеш вытесняет least-recently-used, а не падает: batch всегда можно перечитать и передекодировать, поэтому ни один результат не зависит от того, что осталось резидентным. Пик декодированных байт за вызов = бюджет + один декодируемый batch (< ~16,4 МиБ при любом `limit`). Предел по числу записей нужен потому, что почти пустые batch'и весят почти ноль байт, но всё равно занимают запись в map'е. |
 | `MAX_RECORDS_PER_TX` | 100 | Records (plus IndexNodes) per single CommitPayload. |
 | `DEFAULT_SUPERBLOCK_REPLICAS` | 3 | SB replicas per commit. |
 | `params_version.format_version` | 3 | Поколение on-disk формата; кодируется в младших 16 битах 4-байтного `params.version` (§1.2). v3-читатели отказываются открывать v1/v2-файлы, а v3-читатели отвергаются гипотетическими v4-читателями. |
