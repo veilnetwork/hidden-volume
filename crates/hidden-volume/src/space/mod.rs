@@ -12,6 +12,7 @@ mod commit;
 mod integrity;
 mod log_iter;
 mod vacuum;
+mod walk;
 
 use zeroize::Zeroizing;
 
@@ -28,6 +29,7 @@ use crate::{CHUNK_SIZE, Error, NONCE_LEN, Result};
 
 use self::index::{IndexNode, Namespace};
 use self::superblock::{NO_RECORD, Superblock};
+use self::walk::TreeWalk;
 
 /// Aggregate statistics for a [`Space`] — the structured form host-apps
 /// typically render in a "Storage" / "About this profile" UI page.
@@ -666,20 +668,29 @@ impl<'f> Space<'f> {
     // factored these out of a single 1578-LOC file. Keep contracts
     // documented here.
 
+    /// A fresh traversal guard sized for this space: at most one read
+    /// per owned chunk. Every recursive tree walk starts here — see
+    /// [`walk`] for why the depth cap alone is not enough.
+    pub(in crate::space) fn new_tree_walk(&self) -> TreeWalk {
+        TreeWalk::with_budget(self.state.owned_slots.len())
+    }
+
     /// Recursively flatten every IndexNode subtree rooted at `slot`
     /// into a flat `(key, value)` Vec. Used by `Space::list` and the
     /// `commit.rs` flatten-and-rebuild path.
     ///
     /// **Errors:** propagates AEAD failure or `Malformed` from
     /// [`Self::read_index_node_at`]; returns `Malformed` if depth
-    /// exceeds [`index::MAX_TREE_DEPTH`].
+    /// exceeds [`index::MAX_TREE_DEPTH`], if a chunk is reachable
+    /// twice, or if the walk outruns its traversal budget.
     pub(super) fn collect_leaves(
         &mut self,
         slot: u64,
         namespace: Namespace,
         out: &mut Vec<(Vec<u8>, Vec<u8>)>,
     ) -> Result<()> {
-        self.collect_leaves_at(slot, namespace, 0, out)
+        let mut walk = self.new_tree_walk();
+        self.collect_leaves_at(slot, namespace, 0, &mut walk, out)
     }
 
     fn collect_leaves_at(
@@ -687,11 +698,13 @@ impl<'f> Space<'f> {
         slot: u64,
         namespace: Namespace,
         depth: u8,
+        walk: &mut TreeWalk,
         out: &mut Vec<(Vec<u8>, Vec<u8>)>,
     ) -> Result<()> {
         if depth > index::MAX_TREE_DEPTH {
             return Err(Error::Malformed("tree depth exceeded MAX_TREE_DEPTH"));
         }
+        walk.admit(slot)?;
         let node = self.read_index_node_at_expected(slot, namespace)?;
         match node {
             IndexNode::Leaf(l) => {
@@ -700,7 +713,7 @@ impl<'f> Space<'f> {
             },
             IndexNode::Internal(i) => {
                 for c in i.children {
-                    self.collect_leaves_at(c.child_slot, namespace, depth + 1, out)?;
+                    self.collect_leaves_at(c.child_slot, namespace, depth + 1, walk, out)?;
                 }
                 Ok(())
             },
@@ -708,20 +721,28 @@ impl<'f> Space<'f> {
     }
 
     fn count_leaves(&mut self, slot: u64, namespace: Namespace) -> Result<usize> {
-        self.count_leaves_at(slot, namespace, 0)
+        let mut walk = self.new_tree_walk();
+        self.count_leaves_at(slot, namespace, 0, &mut walk)
     }
 
-    fn count_leaves_at(&mut self, slot: u64, namespace: Namespace, depth: u8) -> Result<usize> {
+    fn count_leaves_at(
+        &mut self,
+        slot: u64,
+        namespace: Namespace,
+        depth: u8,
+        walk: &mut TreeWalk,
+    ) -> Result<usize> {
         if depth > index::MAX_TREE_DEPTH {
             return Err(Error::Malformed("tree depth exceeded MAX_TREE_DEPTH"));
         }
+        walk.admit(slot)?;
         let node = self.read_index_node_at_expected(slot, namespace)?;
         match node {
             IndexNode::Leaf(l) => Ok(l.entries.len()),
             IndexNode::Internal(i) => {
                 let mut total = 0;
                 for c in i.children {
-                    total += self.count_leaves_at(c.child_slot, namespace, depth + 1)?;
+                    total += self.count_leaves_at(c.child_slot, namespace, depth + 1, walk)?;
                 }
                 Ok(total)
             },

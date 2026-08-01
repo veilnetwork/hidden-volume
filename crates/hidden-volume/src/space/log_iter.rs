@@ -9,6 +9,7 @@ use crate::{Error, Result};
 use super::Space;
 use super::index::{self, IndexNode, Namespace};
 use super::log;
+use super::walk::TreeWalk;
 
 impl<'f> Space<'f> {
     /// Enumerate all log entries in `namespace`, in ascending log_id
@@ -284,9 +285,16 @@ impl<'f> Space<'f> {
         limit: usize,
         out: &mut Vec<(Vec<u8>, Vec<u8>)>,
     ) -> Result<()> {
-        self.collect_leaves_after_at(slot, namespace, after, limit, 0, out)
+        let mut walk = self.new_tree_walk();
+        self.collect_leaves_after_at(slot, namespace, after, limit, 0, &mut walk, out)
     }
 
+    // `limit` bounds `out`, not the number of chunks read: a subtree
+    // whose entries all fail the `after` filter contributes nothing to
+    // `out` and the walk keeps going. So the traversal guard is what
+    // actually bounds this walk on adversarial input — see
+    // [`super::walk`].
+    #[allow(clippy::too_many_arguments)]
     fn collect_leaves_after_at(
         &mut self,
         slot: u64,
@@ -294,6 +302,7 @@ impl<'f> Space<'f> {
         after: Option<u64>,
         limit: usize,
         depth: u8,
+        walk: &mut TreeWalk,
         out: &mut Vec<(Vec<u8>, Vec<u8>)>,
     ) -> Result<()> {
         if depth > index::MAX_TREE_DEPTH {
@@ -302,6 +311,7 @@ impl<'f> Space<'f> {
         if out.len() >= limit {
             return Ok(());
         }
+        walk.admit(slot)?;
         let node = self.read_index_node_at_expected(slot, namespace)?;
         match node {
             IndexNode::Leaf(l) => {
@@ -335,6 +345,7 @@ impl<'f> Space<'f> {
                         after,
                         limit,
                         depth + 1,
+                        walk,
                         out,
                     )?;
                 }
@@ -356,9 +367,13 @@ impl<'f> Space<'f> {
         limit: usize,
         out: &mut Vec<(Vec<u8>, Vec<u8>)>,
     ) -> Result<()> {
-        self.collect_leaves_before_at(slot, namespace, before, limit, 0, out)
+        let mut walk = self.new_tree_walk();
+        self.collect_leaves_before_at(slot, namespace, before, limit, 0, &mut walk, out)
     }
 
+    // Guarded for the same reason as [`Self::collect_leaves_after_at`]:
+    // `limit` bounds the output, not the chunk reads.
+    #[allow(clippy::too_many_arguments)]
     fn collect_leaves_before_at(
         &mut self,
         slot: u64,
@@ -366,6 +381,7 @@ impl<'f> Space<'f> {
         before: Option<u64>,
         limit: usize,
         depth: u8,
+        walk: &mut TreeWalk,
         out: &mut Vec<(Vec<u8>, Vec<u8>)>,
     ) -> Result<()> {
         if depth > index::MAX_TREE_DEPTH {
@@ -374,6 +390,7 @@ impl<'f> Space<'f> {
         if out.len() >= limit {
             return Ok(());
         }
+        walk.admit(slot)?;
         let node = self.read_index_node_at_expected(slot, namespace)?;
         match node {
             IndexNode::Leaf(l) => {
@@ -407,6 +424,7 @@ impl<'f> Space<'f> {
                         before,
                         limit,
                         depth + 1,
+                        walk,
                         out,
                     )?;
                 }
@@ -432,14 +450,14 @@ impl<'f> Space<'f> {
         limit: usize,
         out: &mut Vec<(Vec<u8>, Vec<u8>)>,
     ) -> Result<bool> {
-        self.collect_leaves_in_range_at(slot, namespace, start, end, limit, 0, out)
+        let mut walk = self.new_tree_walk();
+        self.collect_leaves_in_range_at(slot, namespace, start, end, limit, 0, &mut walk, out)
     }
 
     // Recursive walker with namespace-aware namespace cross-check
-    // (audit pass 19 round 6). Eight parameters is one over clippy's
-    // default cap; bundling into a state struct would just shift the
-    // boilerplate to construction. The walker stays linear and
-    // readable as-is.
+    // (audit pass 19 round 6). Over clippy's default parameter cap;
+    // bundling into a state struct would just shift the boilerplate to
+    // construction. The walker stays linear and readable as-is.
     #[allow(clippy::too_many_arguments)]
     fn collect_leaves_in_range_at(
         &mut self,
@@ -449,6 +467,7 @@ impl<'f> Space<'f> {
         end: Option<u64>,
         limit: usize,
         depth: u8,
+        walk: &mut TreeWalk,
         out: &mut Vec<(Vec<u8>, Vec<u8>)>,
     ) -> Result<bool> {
         if depth > index::MAX_TREE_DEPTH {
@@ -457,6 +476,7 @@ impl<'f> Space<'f> {
         if out.len() >= limit {
             return Ok(true);
         }
+        walk.admit(slot)?;
         let node = self.read_index_node_at_expected(slot, namespace)?;
         match node {
             IndexNode::Leaf(l) => {
@@ -493,6 +513,7 @@ impl<'f> Space<'f> {
                         end,
                         limit,
                         depth + 1,
+                        walk,
                         out,
                     )?;
                     if stop {

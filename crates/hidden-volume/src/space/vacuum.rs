@@ -10,6 +10,7 @@ use crate::{Error, Result};
 use super::Space;
 use super::index::IndexNode;
 use super::superblock::NO_RECORD;
+use super::walk::TreeWalk;
 
 impl<'f> Space<'f> {
     /// Scrub orphan IndexNode chunks — owned chunks (decrypt under our
@@ -53,8 +54,9 @@ impl<'f> Space<'f> {
         let mut reachable: std::collections::HashSet<u64> = std::collections::HashSet::new();
         reachable.insert(self.state.superblock.root_slot);
         let prior_roots = self.load_prior_roots()?;
+        let mut walk = self.new_tree_walk();
         for r in prior_roots {
-            self.collect_tree_chunks_into_set(r.index_slot, &mut reachable)?;
+            self.collect_tree_chunks_into_set(r.index_slot, &mut walk, &mut reachable)?;
         }
 
         // Owned but not reachable.
@@ -239,31 +241,40 @@ impl<'f> Space<'f> {
 
     /// Walk the tree rooted at `slot` and append every IndexNode chunk
     /// slot (Leaves and Internal nodes) into `out`. Used at vacuum time.
-    /// Depth-capped via [`super::index::MAX_TREE_DEPTH`] to defend
-    /// against cyclic IndexNode chains (writer-bug regression or
-    /// adversarial key-holder).
+    /// Depth-capped via [`super::index::MAX_TREE_DEPTH`] and guarded by
+    /// `walk` (visited set + traversal budget) to defend against cyclic
+    /// or DAG-shaped IndexNode chains — writer-bug regression or
+    /// adversarial key-holder. `out` deduplicates the *result*, so
+    /// before the guard a DAG cost `fanout^depth` reads to produce a
+    /// handful of distinct slots; see [`super::walk`].
+    ///
+    /// The caller shares one `walk` across every namespace root, since
+    /// no two roots legitimately reach the same chunk.
     fn collect_tree_chunks_into_set(
         &mut self,
         slot: u64,
+        walk: &mut TreeWalk,
         out: &mut std::collections::HashSet<u64>,
     ) -> Result<()> {
-        self.collect_tree_chunks_into_set_at(slot, 0, out)
+        self.collect_tree_chunks_into_set_at(slot, 0, walk, out)
     }
 
     fn collect_tree_chunks_into_set_at(
         &mut self,
         slot: u64,
         depth: u8,
+        walk: &mut TreeWalk,
         out: &mut std::collections::HashSet<u64>,
     ) -> Result<()> {
         if depth > super::index::MAX_TREE_DEPTH {
             return Err(Error::Malformed("tree depth exceeded MAX_TREE_DEPTH"));
         }
+        walk.admit(slot)?;
         out.insert(slot);
         let node = self.read_index_node_at(slot)?;
         if let IndexNode::Internal(i) = node {
             for c in i.children {
-                self.collect_tree_chunks_into_set_at(c.child_slot, depth + 1, out)?;
+                self.collect_tree_chunks_into_set_at(c.child_slot, depth + 1, walk, out)?;
             }
         }
         Ok(())

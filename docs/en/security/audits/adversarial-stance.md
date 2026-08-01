@@ -603,6 +603,22 @@ pass commit.
 - **Verdict.** **Acknowledged, out-of-strict-threat-model, defense-
   in-depth opportunity.**
 - **Severity.** INFO.
+- **Follow-up (2026-08-01).** Closed, and wider than the finding as
+  written. The `MAX_TREE_DEPTH = 3` cap shipped first (2026-05-28) and
+  covers the cycle. What it does not cover is a **DAG**: the finding
+  reasons about cycles because a cycle is what breaks a *hash* chain,
+  but repeating a child pointer breaks nothing — `H(B)` is the same
+  value under every parent that names B, so a node whose ~90 children
+  all point at one next node is AEAD-valid, Merkle-consistent, and
+  passes `verify_integrity`. At the depth cap that is `90³ ≈ 7.3 × 10⁵`
+  chunk reads out of four distinct chunks. Every recursive walker now
+  shares a traversal guard
+  ([`space/walk.rs`](../../../../crates/hidden-volume/src/space/walk.rs))
+  holding a visited set (a chunk reachable twice is a structural
+  failure, not work to repeat) and a budget equal to the space's
+  owned-chunk count. So the "no visited-set" clause above is no longer
+  accurate for any walker. `verify_integrity` additionally checks
+  sibling key ranges, which the hash chain likewise cannot express.
 
 ### Build / supply-chain
 
