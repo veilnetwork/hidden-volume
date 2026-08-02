@@ -17,7 +17,7 @@ decisions. Update on every change to crypto / space / tx modules.
 - Trace lifetime: where allocated, what scope, when dropped, whether
   bytes are scrubbed before the heap region is freed.
 - Distinguish: **secret material** (zeroize required) vs **public
-  material** (no obligation; e.g., container_id, salt, BLAKE3 hashes).
+  material** (no obligation; e.g., salt, BLAKE3 hashes).
 
 ## Findings (current state)
 
@@ -28,6 +28,7 @@ decisions. Update on every change to crypto / space / tx modules.
 | Argon2-derived master key | `derive_master_key` return | `Zeroizing<[u8; 32]>` |
 | `SpaceKeys.aead_root` | `crypto/derive.rs` | `#[derive(ZeroizeOnDrop)]` on the struct (2026-05-02: `master` and `kdf` fields were unused — removed as dead code) |
 | `SpaceState.keys` | `space/mod.rs` | propagated `SpaceKeys` |
+| `container_id` (`[u8; 32]`) | inside `SpaceKeys` | Zeroized with the rest of `SpaceKeys`. **Corrected 2026-08-02 (audit H-06):** this row used to sit under §B "public material" saying "stored cleartext in header". That was true in v2; v3 #10 derives `container_id` from the versioned master key and removed it from the cleartext header, so it became secret-derived while the doc still called it public — and `SpaceState` still kept a second plain `[u8; 32]` copy that nothing erased. The duplicate is gone; read `state.keys.container_id`. |
 | Per-slot AEAD key | `derive_chunk_key` return | `Zeroizing<[u8; 32]>` (fixed in this audit) |
 | BLAKE3 keyed-hash subkey | `derive_subkey` return | `Zeroizing<[u8; 32]>` (fixed in this audit) |
 | `XChaCha20Poly1305` cipher state | inside `ChunkAead` | `Zeroize` impl on RustCrypto cipher state — automatic via the `cipher` crate's `ZeroizeOnDrop` (no explicit feature gate needed for this crate version) |
@@ -37,7 +38,6 @@ decisions. Update on every change to crypto / space / tx modules.
 
 | Item | Why not secret |
 |---|---|
-| `container_id` (`[u8; 32]`) | Stored cleartext in header; serves as AAD prefix |
 | Container salt (`[u8; 32]`) | Stored cleartext in header |
 | Argon2 params (`u32 × 4`) | Stored cleartext in header |
 | Per-record `payload_hash` (BLAKE3) | Hash of already-encrypted ciphertext; reveals nothing |
@@ -45,7 +45,7 @@ decisions. Update on every change to crypto / space / tx modules.
 | `IndexRoot.payload_hash` | Same |
 | `ChildPointer.child_hash` | Same |
 | AEAD nonces (`[u8; 24]`) | Random per-write; OK to retain |
-| AEAD AAD (`[u8; 40]`) | `container_id || slot` — both public |
+| AEAD AAD (`[u8; 40]`) | `container_id \|\| slot`. NOT public since v3 — see §A. The AAD is written to disk beside every chunk regardless, so it is not a retention question; it is listed here only so the table accounts for it. |
 
 ### C. User-secret data — NOT zeroized (deferred)
 
