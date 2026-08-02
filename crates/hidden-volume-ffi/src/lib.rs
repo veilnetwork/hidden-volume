@@ -1539,6 +1539,22 @@ impl MultiSpaceHandle {
         Ok(g.open_space_constant_time(keys)? as u32)
     }
 
+    /// Run the post-open scrub for a hosted space.
+    ///
+    /// [`Self::open_space`] deliberately does NOT do this inline: the scrub's
+    /// duration depends on the space's history, so running it as part of the
+    /// constant-time unlock made a successful open measurably longer than a
+    /// failed one and undid the equalized scan (audit HV-02).
+    ///
+    /// The host calls this once unlock is complete — the work still has to
+    /// happen, or values a previous session deleted stay decryptable to anyone
+    /// who later obtains the password and an old snapshot. Safe to call more
+    /// than once; a read-only container answers Ok with nothing done.
+    pub fn vacuum_space(&self, id: u32) -> HvResult<()> {
+        let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
+        Ok(g.vacuum_hosted(id as usize)?)
+    }
+
     /// Number of hosted spaces.
     pub fn space_count(&self) -> HvResult<u32> {
         let g = self.inner.lock().map_err(|_| poisoned_mutex())?;

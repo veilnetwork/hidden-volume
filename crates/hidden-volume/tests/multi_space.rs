@@ -225,3 +225,62 @@ fn hosting_a_space_vacuums_what_a_single_space_open_would() {
          is still readable to anyone who later gets the password"
     );
 }
+
+/// The constant-time open leaves the scrub undone — on purpose — and
+/// `vacuum_hosted` is what finishes it.
+///
+/// `finalize_open` used to vacuum inline for every hosted open. That leaked:
+/// the scrub's duration depends on how much a space has deleted over its life,
+/// so a real space took measurably longer to open than a decoy, and the
+/// ChaCha20 timing-equalizer that makes a wrong password cost the same as a
+/// right one stopped hiding which was which (audit HV-02).
+///
+/// Moving it out is only safe if the erase still happens. This pins both
+/// halves: the constant-time open does NOT reclaim, and the explicit call
+/// does.
+#[test]
+fn constant_time_open_defers_the_scrub_and_vacuum_hosted_performs_it() {
+    let path = scratch_path();
+
+    let keys = {
+        let mut c = Container::create_with_options(&path, fast_options()).unwrap();
+        let mut s = c.create_space(b"pw").unwrap();
+        // Write, then delete: the deletion only unlinks. Until a vacuum runs,
+        // those chunks are still on disk and still decryptable with the
+        // password — which is exactly what an adversary holding an old
+        // snapshot would go after.
+        let mut tx = s.begin_tx();
+        for i in 0..20u32 {
+            tx.put(Namespace::SETTINGS, format!("k{i:02}").as_bytes(), b"v")
+                .unwrap();
+        }
+        tx.commit().unwrap();
+        let mut tx = s.begin_tx();
+        for i in 0..20u32 {
+            tx.delete(Namespace::SETTINGS, format!("k{i:02}").as_bytes())
+                .unwrap();
+        }
+        tx.commit().unwrap();
+        c.derive_space_keys(b"pw").unwrap()
+    };
+
+    let mut ms = MultiSpace::new(Container::open(&path).unwrap());
+    let id = ms.open_space_constant_time(keys).unwrap();
+
+    let after_open = ms.with_space(id, |s| s.audit_owned_chunk_count()).unwrap();
+    assert!(
+        after_open > 0,
+        "precondition: the deleted entries' chunks must still be owned right \
+         after a constant-time open — if they were already gone, this test \
+         would pass without the explicit vacuum doing anything"
+    );
+
+    ms.vacuum_hosted(id).unwrap();
+    let after_vacuum = ms.with_space(id, |s| s.audit_owned_chunk_count()).unwrap();
+
+    assert!(
+        after_vacuum < after_open,
+        "vacuum_hosted must reclaim what the deferred open left behind \
+         ({after_open} → {after_vacuum})"
+    );
+}
