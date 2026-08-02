@@ -1336,12 +1336,23 @@ where
 
     // M2: fsync parent directory so the rename is durable. On Unix
     // ext4/xfs/etc. without this, a crash after rename can revert the
-    // directory entry. Best-effort (Windows has no equivalent and
-    // some FS error out — we tolerate that).
-    fsync_parent_dir(path);
+    // directory entry — restoring the OLD inode, and with it the old password
+    // or the spaces this rewrite removed.
+    //
+    // This used to be swallowed and the call returned `Ok`, which told a caller
+    // who had just rotated a leaked password that the old one was dead without
+    // grounds to say so (audit HV-03). The rename IS visible either way, so the
+    // failure is reported as its own outcome rather than as "the rewrite
+    // failed" — see `Error::RenameVisibleDurabilityUncertain`.
+    let durability = fsync_parent_dir(path);
 
     drop(tmp_handle);
     drop(src); // explicit: release lock on the (now-orphan) old inode
+    if durability.is_err() {
+        return Err(Error::RenameVisibleDurabilityUncertain(
+            "parent-directory fsync failed after a successful rename",
+        ));
+    }
     Ok(())
 }
 
@@ -1413,18 +1424,42 @@ fn unique_temp_path_in_parent(path: &std::path::Path, prefix: &str) -> Result<st
 /// swallowed, since a successful rename is what we care about — failing
 /// the entire compaction because the parent dir couldn't be opened
 /// would be worse than the small loss-of-durability window.
-fn fsync_parent_dir(path: &std::path::Path) {
+fn fsync_parent_dir(path: &std::path::Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
+        if fsync_parent_dir_should_fail() {
+            return Err(std::io::Error::other("test hook: forced parent-dir fsync failure"));
+        }
         let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-        if let Ok(dir) = std::fs::File::open(parent) {
-            let _ = dir.sync_all();
+        // Retry once on EINTR — a signal arriving mid-fsync is not a durability
+        // problem, and surfacing it as one would fail rotations for no reason.
+        let dir = std::fs::File::open(parent)?;
+        match dir.sync_all() {
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => dir.sync_all(),
+            other => other,
         }
     }
     #[cfg(not(unix))]
     {
-        let _ = path; // no-op on Windows
+        // Windows has no parent-dir fsync concept; `MoveFileEx` already gives
+        // metadata durability, so there is nothing here that can fail.
+        let _ = path;
+        Ok(())
     }
+}
+
+/// Test-only switch that makes [`fsync_parent_dir`] report failure.
+///
+/// The condition it simulates cannot be provoked from outside: revoking read
+/// permission on the parent directory would break the temp-file write long
+/// before the fsync, so there is no way to reach only this step.
+#[cfg(unix)]
+static FSYNC_PARENT_DIR_FAILS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(unix)]
+fn fsync_parent_dir_should_fail() -> bool {
+    FSYNC_PARENT_DIR_FAILS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 fn compact_in_place_impl(
@@ -1448,4 +1483,103 @@ fn change_passwords_impl(
     atomic_rewrite_under_source_lock(path, "hv-rotate", cancel, |src, tmp, cancel| {
         Container::repack_into_dest(src, tmp, mapping, options, cancel)
     })
+}
+
+#[cfg(all(test, unix))]
+mod hv03_tests {
+    use super::*;
+    use crate::padding::PaddingPolicy;
+
+    /// Restores the fsync-failure switch even if the test panics, so a failure
+    /// here cannot leak into whatever runs next in the same process.
+    struct ForcedFsyncFailure;
+
+    impl ForcedFsyncFailure {
+        fn arm() -> Self {
+            FSYNC_PARENT_DIR_FAILS.store(true, std::sync::atomic::Ordering::Relaxed);
+            Self
+        }
+    }
+
+    impl Drop for ForcedFsyncFailure {
+        fn drop(&mut self) {
+            FSYNC_PARENT_DIR_FAILS.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn fast_options() -> ContainerOptions {
+        ContainerOptions {
+            argon2: Argon2Params::MIN,
+            initial_garbage_chunks: 0,
+            padding_policy: PaddingPolicy::None,
+            superblock_replicas: 1,
+        }
+    }
+
+    /// A parent-directory fsync that fails must not be reported as success.
+    ///
+    /// The rewrite swallowed it and returned `Ok`, which told someone who had
+    /// just rotated a leaked password that the old one was dead — while a crash
+    /// in that window can restore the old inode and the old password with it
+    /// (audit HV-03).
+    ///
+    /// It must also not be reported as "the rotation failed": the rename IS
+    /// visible, the new password IS in effect, and a caller who retried with
+    /// the old password would be working from a false picture. This pins both
+    /// halves.
+    #[test]
+    fn rotation_reports_an_unconfirmed_fsync_without_lying_about_what_applied() {
+        let dir = std::env::temp_dir().join(format!("hv03-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("c.bin");
+        let _cleanup = scopeguard(&dir);
+
+        {
+            let mut c = Container::create_with_options(&path, fast_options()).unwrap();
+            let mut s = c.create_space(b"old").unwrap();
+            let mut tx = s.begin_tx();
+            tx.put(crate::space::index::Namespace::SETTINGS, b"k", b"v")
+                .unwrap();
+            tx.commit().unwrap();
+        }
+
+        let err = {
+            let _armed = ForcedFsyncFailure::arm();
+            Container::change_passwords(&path, &[(b"old", b"new")], RepackOptions::default())
+                .expect_err("a failed durability fsync must not be reported as success")
+        };
+        assert!(
+            matches!(err, Error::RenameVisibleDurabilityUncertain(_)),
+            "expected the durability-specific outcome, got {err:?}"
+        );
+
+        // The rotation APPLIED. Anyone reading the error as "nothing happened"
+        // would be wrong in the one direction that matters.
+        let mut c = Container::open(&path).unwrap();
+        let mut s = c
+            .open_space(b"new")
+            .expect("the new password must open the container");
+        assert_eq!(
+            s.get(crate::space::index::Namespace::SETTINGS, b"k").unwrap(),
+            Some(b"v".to_vec()),
+            "the rewritten container must still hold its data"
+        );
+        drop(c);
+
+        let mut c = Container::open(&path).unwrap();
+        assert!(
+            c.open_space(b"old").is_err(),
+            "the old password must be dead — that is what the caller rotated for"
+        );
+    }
+
+    fn scopeguard(dir: &std::path::Path) -> impl Drop {
+        struct G(std::path::PathBuf);
+        impl Drop for G {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        G(dir.to_path_buf())
+    }
 }
