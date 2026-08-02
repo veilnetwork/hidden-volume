@@ -37,10 +37,30 @@ use crate::{Error, Result};
 pub use commit::{CommitPayload, IndexRoot, MAX_NAMESPACES_PER_TX, NamespaceKind};
 
 /// One pending KV change inside a [`Tx`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) enum KvOp {
     Put { key: Vec<u8>, value: Vec<u8> },
     Delete { key: Vec<u8> },
+}
+
+impl core::fmt::Debug for KvOp {
+    /// REDACTED (audit HV-09). The derive printed the KEY and the VALUE — a
+    /// contact record, a message, a setting — so a single `{:?}` on a
+    /// transaction put user plaintext wherever that string went. Lengths say
+    /// everything a diagnostic needs about a pending op.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Put { key, value } => f
+                .debug_struct("Put")
+                .field("key_len", &key.len())
+                .field("value_len", &value.len())
+                .finish(),
+            Self::Delete { key } => f
+                .debug_struct("Delete")
+                .field("key_len", &key.len())
+                .finish(),
+        }
+    }
 }
 
 /// In-progress transaction over a [`Space`]. Accumulates per-namespace

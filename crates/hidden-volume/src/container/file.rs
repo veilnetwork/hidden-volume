@@ -174,6 +174,26 @@ pub struct ContainerFile {
     pub(crate) lock_mode: LockMode,
 }
 
+/// fsync the directory holding `path`, surfacing failures.
+///
+/// The best-effort variant in `container/mod.rs` is right for the rename path;
+/// this one is for `create`, where an undurable directory entry means the file
+/// may simply not be there after a power loss (audit HV-16).
+#[cfg(unix)]
+fn fsync_parent_dir_strict(path: &std::path::Path) -> Result<()> {
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let dir = std::fs::File::open(parent)?;
+    dir.sync_all()?;
+    Ok(())
+}
+
+/// Windows has no parent-directory fsync; `CreateFile` durability is handled by
+/// the filesystem, so this is a no-op rather than a pretence.
+#[cfg(not(unix))]
+fn fsync_parent_dir_strict(_path: &std::path::Path) -> Result<()> {
+    Ok(())
+}
+
 impl ContainerFile {
     /// Create a new container at `path` with the given Argon2 params.
     /// Errors if the file already exists or `params` are below
@@ -201,6 +221,7 @@ impl ContainerFile {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
+        let path = path.as_ref();
         let mut file = opts.open(path)?;
         // Exclusive flock for the file's lifetime — auto-released when
         // `file` (and thus this struct) drops. Prevents concurrent
@@ -210,6 +231,20 @@ impl ContainerFile {
         let first = header.encode_first_chunk()?;
         file.write_all(&first)?;
         file.sync_all()?;
+        // fsync the PARENT too (audit HV-16). `sync_all` makes the file's
+        // CONTENTS durable; it says nothing about the directory entry that
+        // names it. On ext4/xfs/btrfs a power loss right after create could
+        // therefore lose the whole container while `Container::create` had
+        // already returned Ok — the caller believing it holds a store that no
+        // longer exists, having possibly already told the user their identity
+        // was created.
+        //
+        // Propagated, not swallowed: unlike the rename path — where a
+        // successful rename is the thing that matters and failing a whole
+        // compaction over a directory handle would be worse — a create that
+        // cannot be made durable has produced nothing worth keeping, and the
+        // caller's error path removes the partial file.
+        fsync_parent_dir_strict(path)?;
         Ok(Self {
             file,
             header,
@@ -333,15 +368,22 @@ impl ContainerFile {
 
         let mut buf: zeroize::Zeroizing<Vec<u8>> =
             zeroize::Zeroizing::new(vec![0u8; (BATCH_CHUNKS as usize) * CHUNK_SIZE]);
+        // ADVANCE PER BATCH (audit HV-13). `slot_count` used to move only after
+        // the whole run succeeded, so a failure part-way — a full disk, an I/O
+        // error — left the file physically longer than the cursor claimed.
+        // Every later append then wrote OVER the padding already on disk, and
+        // the container's own length disagreed with its slot count until the
+        // next reopen recomputed it. Advancing per batch keeps the cursor true
+        // to what is actually written at every point the loop can fail.
         let mut remaining = n;
         while remaining > 0 {
             let this_batch = remaining.min(BATCH_CHUNKS) as usize;
             let bytes = this_batch * CHUNK_SIZE;
             crate::crypto::rng::fill(&mut buf[..bytes])?;
             self.file.write_all(&buf[..bytes])?;
+            self.slot_count += this_batch as u64;
             remaining -= this_batch as u64;
         }
-        self.slot_count += n;
         Ok(())
     }
 

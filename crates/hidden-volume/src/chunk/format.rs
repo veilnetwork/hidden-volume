@@ -43,7 +43,7 @@ pub const PAYLOAD_CAP: usize = PLAINTEXT_LEN - PLAINTEXT_HEADER_LEN;
 ///
 /// The reserved flags byte at offset 5 is not exposed in this struct —
 /// it is hard-coded to 0 on encode and strictly validated on decode.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Plaintext {
     /// Discriminator for the payload encoding (Superblock / IndexNode
     /// / Commit / DataBatch / …).
@@ -52,6 +52,24 @@ pub struct Plaintext {
     pub seq: u64,
     /// Kind-specific encoded payload bytes (≤ [`PAYLOAD_CAP`]).
     pub payload: Vec<u8>,
+}
+
+impl core::fmt::Debug for Plaintext {
+    /// REDACTED (audit HV-09). The derive printed `payload` — the decrypted
+    /// bytes of a message, an index node or a key/value pair — so any
+    /// `{:?}`, any `assert_eq!` failure and any panic backtrace that happened
+    /// to carry one wrote user plaintext into a log or a crash dump. A
+    /// deniable store cannot have a type whose default formatting undoes it.
+    ///
+    /// Lengths and discriminators are kept: they are what a diagnostic
+    /// actually needs, and they are already inferable from the file's shape.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Plaintext")
+            .field("kind", &self.kind)
+            .field("seq", &self.seq)
+            .field("payload_len", &self.payload.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Plaintext {
