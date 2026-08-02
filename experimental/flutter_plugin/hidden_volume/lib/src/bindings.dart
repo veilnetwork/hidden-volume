@@ -1268,6 +1268,11 @@ final _msOpenSpace =
             int Function(int, RustBuffer, ffi.Pointer<RustCallStatus>)>(
         'uniffi_hidden_volume_ffi_fn_method_multispacehandle_open_space');
 
+final _msVacuumSpace = _dylib.lookupFunction<
+        ffi.Void Function(ffi.Uint64, ffi.Uint32, ffi.Pointer<RustCallStatus>),
+        void Function(int, int, ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_method_multispacehandle_vacuum_space');
+
 final _msSpaceCount = _dylib.lookupFunction<
         ffi.Uint32 Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
         int Function(int, ffi.Pointer<RustCallStatus>)>(
@@ -1367,6 +1372,22 @@ class MultiSpaceHandleBindings {
     final keysBuf = _bufferFromByteVec(keys);
     final h = _clone();
     return rustCall<int>((s) => _msOpenSpace(h, keysBuf, s));
+  }
+
+  /// Run the post-open scrub for a hosted space.
+  ///
+  /// [openSpace] deliberately does NOT do this inline: the scrub's duration
+  /// depends on the space's history, so running it as part of the
+  /// constant-time unlock made a successful open measurably longer than a
+  /// failed one and undid the equalized scan (audit HV-02).
+  ///
+  /// Call it once unlock is complete. The work still has to happen — without
+  /// it, values a previous session deleted stay decryptable to anyone who
+  /// later obtains the password and an old snapshot of the file.
+  void vacuumSpace(int spaceId) {
+    _ensureOpen();
+    final h = _clone();
+    rustCall<void>((s) => _msVacuumSpace(h, spaceId, s));
   }
 
   /// Number of hosted spaces.

@@ -325,6 +325,14 @@ class HvMultiSpace {
   /// Reclaim chunks orphaned by edit/delete in space [id] (deniable scrub).
   int vacuumDataBatches(int id) => _inner.vacuumDataBatches(id);
 
+  /// Run the post-open scrub for hosted space [id].
+  ///
+  /// The constant-time open deliberately leaves this undone: the scrub's
+  /// duration depends on the space's history, so doing it inline made a
+  /// successful open measurably longer than a failed one and undid the
+  /// equalized scan (audit HV-02). Call it once unlock is complete.
+  void vacuumSpace(int id) => _inner.vacuumSpace(id);
+
   /// Release the container lock and free the handle.
   void close() => _inner.close();
 }
