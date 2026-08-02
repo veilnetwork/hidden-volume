@@ -120,6 +120,23 @@ impl AsyncContainer {
     ///
     /// Holds the internal mutex for the duration of the closure.
     /// Concurrent calls from cloned [`AsyncContainer`] handles serialize.
+    ///
+    /// # Do not re-enter
+    ///
+    /// `f` runs while this handle's mutex is held, and the mutex is NOT
+    /// reentrant. A closure that blocks waiting on another operation of the
+    /// *same* container — `handle.run(...)` on this or any clone, driven to
+    /// completion from inside `f` — deadlocks against itself: the inner call
+    /// waits for a lock the outer call will not release until the inner one
+    /// returns. It is a genuine hang, not a slow path, and no timeout unwinds
+    /// it (audit H-05).
+    ///
+    /// This is only reachable by blocking inside `f`. Ordinary concurrent
+    /// calls from separate tasks serialize correctly — that is the whole point
+    /// of the mutex — and `f` returning normally always releases it. Do the
+    /// work in one closure rather than nesting: `f` already has `&mut
+    /// Container`, so there is nothing a nested call could reach that the
+    /// outer one cannot.
     pub async fn run<F, R>(&self, f: F) -> Result<R>
     where
         F: FnOnce(&mut Container) -> Result<R> + Send + 'static,

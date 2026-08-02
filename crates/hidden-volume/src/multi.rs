@@ -73,7 +73,7 @@ impl MultiSpace {
     fn already_hosts(&self, container_id: &[u8; 32]) -> bool {
         self.spaces.iter().flatten().any(|state| {
             // Constant-time compare is unnecessary: the caller holds the keys.
-            &state.container_id == container_id
+            &state.keys.container_id == container_id
         })
     }
 
@@ -173,10 +173,16 @@ impl MultiSpace {
     ///
     /// Returns [`Error::Malformed`] if `id` is not a hosted space.
     ///
-    /// **Panic note.** If `f` panics, the space's state is not restored (the
-    /// slot stays `None` and further calls on that id return `Malformed`); the
-    /// other hosted spaces are unaffected. Operations here do not panic in
-    /// normal use — same posture as the single-space handle.
+    /// **Panics in `f` do not strand the space** (audit H-04). The slot is
+    /// emptied by `Option::take` before `f` runs, so an unwind through `f` used
+    /// to leave it `None` for good: every later call on that id returned
+    /// `Malformed`, and the host had no way to tell that from a genuinely
+    /// unknown id. The state is put back on the unwind path too, and the panic
+    /// then continues as it would have. Nothing on disk was ever at risk — this
+    /// is about the handle remaining usable.
+    ///
+    /// Under `panic = "abort"` the process is gone either way and this costs
+    /// nothing; it is written for the profile that unwinds.
     pub fn with_space<R>(&mut self, id: usize, f: impl FnOnce(&mut Space<'_>) -> R) -> Result<R> {
         let state = self
             .spaces
@@ -184,8 +190,58 @@ impl MultiSpace {
             .and_then(Option::take)
             .ok_or(Error::Malformed("no such space id"))?;
         let mut space = Space::from_state(&mut self.container.file, state);
-        let out = f(&mut space);
+        // `AssertUnwindSafe` because the only state that crosses the boundary
+        // is the space we are about to put back regardless of the outcome.
+        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut space)));
         self.spaces[id] = Some(space.into_state());
-        Ok(out)
+        match out {
+            Ok(value) => Ok(value),
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+}
+
+#[cfg(test)]
+mod panic_recovery_tests {
+    use crate::container::Container;
+    use crate::crypto::kdf::Argon2Params;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("hv-multi-panic-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir.join("c.hv")
+    }
+
+    /// Audit H-04. `with_space` empties the slot before running the callback,
+    /// so an unwind through the callback used to strand the space: every later
+    /// call on that id answered `Malformed`, indistinguishable from an id that
+    /// never existed. Nothing on disk was at risk — this is about the handle
+    /// surviving.
+    #[test]
+    fn a_panicking_callback_leaves_the_space_usable() {
+        let path = scratch("restore");
+        // MIN params: the test is about the panic path, not about spending
+        // seconds in Argon2.
+        let container = Container::create(&path, Argon2Params::MIN).expect("create container");
+        let mut multi = super::MultiSpace::new(container);
+        let keys = multi.derive_space_keys(b"pw-one").expect("derive");
+        let id = multi.create_space(keys).expect("create space");
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = multi.with_space(id, |_space| -> () {
+                panic!("callback blew up");
+            });
+        }));
+        assert!(panicked.is_err(), "precondition: the panic must escape");
+
+        // The space is still hosted and still works. Before the fix this was
+        // Err(Malformed("no such space id")) for the rest of the process.
+        let count = multi
+            .with_space(id, |space| space.commit_history().len())
+            .expect("the space must survive a panicking callback");
+        assert!(count > 0, "a freshly created space has at least one commit");
+
+        let _ = std::fs::remove_dir_all(path.parent().expect("parent"));
     }
 }

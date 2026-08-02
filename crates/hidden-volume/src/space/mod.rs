@@ -145,8 +145,13 @@ pub struct IntegrityReport {
 /// public surface is [`Space`].
 #[derive(Debug)]
 pub(crate) struct SpaceState {
+    /// Zeroized on drop. Read `keys.container_id` for the space's binding id —
+    /// `SpaceState` used to carry a second, plain `[u8; 32]` copy of it, which
+    /// was a secret-derived value in a field nothing erases (audit H-06). It
+    /// also made the memory-audit doc wrong, which described the duplicate as
+    /// public cleartext; in v3 `container_id` is derived from the versioned
+    /// master key and is not public at all.
     pub keys: SpaceKeys,
-    pub container_id: [u8; 32],
     pub superblock: Superblock,
     pub owned_slots: Vec<u64>,
     /// Sorted-ascending, deduplicated `seq` values of every Superblock
@@ -215,10 +220,12 @@ pub(crate) struct SpaceState {
 }
 
 impl SpaceState {
-    pub(crate) fn fresh(keys: SpaceKeys, container_id: [u8; 32]) -> Self {
+    /// `container_id` is no longer a parameter: it was always
+    /// `keys.container_id` at every call site, and taking it separately is what
+    /// let the two copies exist (audit H-06).
+    pub(crate) fn fresh(keys: SpaceKeys) -> Self {
         Self {
             keys,
-            container_id,
             unreadable_newer_superblock: None,
             superblock: Superblock {
                 seq: 0,
@@ -327,11 +334,11 @@ impl<'f> Space<'f> {
         }
 
         // v3: container_id is derived per-space inside SpaceKeys::from_master,
-        // no longer stored in the cleartext header.
-        let container_id = keys.container_id;
+        // no longer stored in the cleartext header — and read from there, not
+        // copied out.
         let mut space = Self {
             file,
-            state: SpaceState::fresh(keys, container_id),
+            state: SpaceState::fresh(keys),
         };
 
         // Initial Superblock with seq=1, no namespaces yet (root_slot
@@ -909,7 +916,7 @@ impl<'f> Space<'f> {
         payload: &[u8],
     ) -> Result<u64> {
         let slot = self.file.slot_count();
-        let key = derive_chunk_key(&self.state.keys.aead_root, &self.state.container_id, slot);
+        let key = derive_chunk_key(&self.state.keys.aead_root, &self.state.keys.container_id, slot);
         let aead = ChunkAead::new(&key);
         let pt = Plaintext {
             kind,
@@ -921,7 +928,7 @@ impl<'f> Space<'f> {
         // of function, the plaintext bytes are scrubbed before the slot
         // can be reused for unrelated data.
         let pt_bytes: Zeroizing<[u8; crate::PLAINTEXT_LEN]> = Zeroizing::new(pt.encode()?);
-        let aad = make_aad(&self.state.container_id, slot);
+        let aad = make_aad(&self.state.keys.container_id, slot);
         let (nonce, ct) = aead.seal(&pt_bytes[..], aad)?;
         let mut chunk = [0u8; CHUNK_SIZE];
         chunk[..NONCE_LEN].copy_from_slice(&nonce);
@@ -950,12 +957,12 @@ impl<'f> Space<'f> {
     /// `vacuum.rs` propagate as-is.
     pub(super) fn read_owned_chunk(&mut self, slot: u64) -> Result<Plaintext> {
         let chunk = self.file.read_slot(slot)?;
-        let key = derive_chunk_key(&self.state.keys.aead_root, &self.state.container_id, slot);
+        let key = derive_chunk_key(&self.state.keys.aead_root, &self.state.keys.container_id, slot);
         let aead = ChunkAead::new(&key);
         let mut nonce = [0u8; NONCE_LEN];
         nonce.copy_from_slice(&chunk[..NONCE_LEN]);
         let ct = &chunk[NONCE_LEN..];
-        let aad = make_aad(&self.state.container_id, slot);
+        let aad = make_aad(&self.state.keys.container_id, slot);
         // `aead.open` returns Zeroizing<Vec<u8>> — the AEAD-decrypted
         // bytes are scrubbed on drop. `Plaintext::decode` borrows
         // immutably; the wrapper drops at end of this function,

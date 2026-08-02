@@ -18,7 +18,7 @@ space / tx.
 - Trace lifetime: где аллоцируется, в каком scope, когда drop'ается,
   scrub'ятся ли байты до того, как heap-регион освобождён.
 - Различать: **secret material** (zeroize обязателен) vs **public
-  material** (без обязательств; например, container_id, salt, BLAKE3 хеши).
+  material** (без обязательств; например, salt, BLAKE3 хеши).
 
 ## Находки (текущее состояние)
 
@@ -29,6 +29,7 @@ space / tx.
 | Argon2-derived master key | `derive_master_key` return | `Zeroizing<[u8; 32]>` |
 | `SpaceKeys.aead_root` | `crypto/derive.rs` | `#[derive(ZeroizeOnDrop)]` на структуре (2026-05-02: поля `master` и `kdf` не использовались — удалены как dead code) |
 | `SpaceState.keys` | `space/mod.rs` | пропагирован `SpaceKeys` |
+| `container_id` (`[u8; 32]`) | внутри `SpaceKeys` | Затирается вместе со всем `SpaceKeys`. **Исправлено 02.08.2026 (аудит H-06):** строка стояла в §B «публичный материал» со словами «хранится в открытом виде в header». Это было верно для v2; v3 #10 выводит `container_id` из versioned master key и убрал его из открытого header — значение стало производным от секрета, а документ продолжал называть его публичным. При этом `SpaceState` держал ВТОРУЮ обычную копию `[u8; 32]`, которую ничто не затирало. Дубликат удалён, читать `state.keys.container_id`. |
 | Per-slot AEAD key | `derive_chunk_key` return | `Zeroizing<[u8; 32]>` (исправлено в этом аудите) |
 | BLAKE3 keyed-hash subkey | `derive_subkey` return | `Zeroizing<[u8; 32]>` (исправлено в этом аудите) |
 | `XChaCha20Poly1305` cipher state | внутри `ChunkAead` | `Zeroize` impl на cipher state RustCrypto — автоматически через `ZeroizeOnDrop` крейта `cipher` (для этой версии крейта явный feature gate не нужен) |
@@ -38,7 +39,6 @@ space / tx.
 
 | Объект | Почему не secret |
 |---|---|
-| `container_id` (`[u8; 32]`) | Хранится в открытом виде в header; служит AAD-префиксом |
 | Container salt (`[u8; 32]`) | Хранится в открытом виде в header |
 | Argon2 params (`u32 × 4`) | Хранятся в открытом виде в header |
 | Per-record `payload_hash` (BLAKE3) | Хеш уже зашифрованного ciphertext; ничего не раскрывает |
@@ -46,7 +46,7 @@ space / tx.
 | `IndexRoot.payload_hash` | То же |
 | `ChildPointer.child_hash` | То же |
 | AEAD nonce (`[u8; 24]`) | Random per-write; OK хранить |
-| AEAD AAD (`[u8; 40]`) | `container_id || slot` — оба публичны |
+| AEAD AAD (`[u8; 40]`) | `container_id \|\| slot`. С v3 НЕ публичен — см. §A. AAD всё равно пишется на диск рядом с каждым чанком, поэтому это не вопрос удержания в памяти; строка оставлена, чтобы таблица была полной. |
 
 ### C. User-secret data — НЕ zeroized (отложено)
 
