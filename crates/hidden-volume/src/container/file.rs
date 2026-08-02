@@ -20,6 +20,36 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use super::header::Header;
+
+/// Removes a just-created file unless the creator reaches its success path.
+///
+/// `ContainerFile::create` opens with `create_new`, so a stub left behind by a
+/// mid-create failure does not just waste a few KiB — it makes the path
+/// permanently unusable to the caller, whose retry gets `AlreadyExists` on a
+/// file they never knowingly made (audit HV-07).
+struct UnlinkOnDrop<'a> {
+    path: Option<&'a Path>,
+}
+
+impl<'a> UnlinkOnDrop<'a> {
+    fn arm(path: &'a Path) -> Self {
+        Self { path: Some(path) }
+    }
+
+    fn disarm(&mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for UnlinkOnDrop<'_> {
+    fn drop(&mut self) {
+        if let Some(path) = self.path {
+            // Best-effort: we are already unwinding a failure the caller will
+            // see, and a removal error is strictly less informative than it.
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
 use crate::crypto::kdf::Argon2Params;
 use crate::padding::PaddingPolicy;
 use crate::{CHUNK_SIZE, Error, FIRST_SLOT_OFFSET, Result};
@@ -181,6 +211,11 @@ pub struct ContainerFile {
 /// may simply not be there after a power loss (audit HV-16).
 #[cfg(unix)]
 fn fsync_parent_dir_strict(path: &std::path::Path) -> Result<()> {
+    if CREATE_FSYNC_FAILS.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(Error::Io(std::io::Error::other(
+            "test hook: forced parent-dir fsync failure",
+        )));
+    }
     let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
     let dir = std::fs::File::open(parent)?;
     dir.sync_all()?;
@@ -193,6 +228,15 @@ fn fsync_parent_dir_strict(path: &std::path::Path) -> Result<()> {
 fn fsync_parent_dir_strict(_path: &std::path::Path) -> Result<()> {
     Ok(())
 }
+
+/// Test-only switch that makes `create`'s final durability step fail.
+///
+/// It is the last `?` before the success path, so it stands in for every
+/// failure in the window where the file already exists — the flock, the
+/// CSPRNG, the header write, either fsync. None of those can be provoked from
+/// outside on a file `create_new` just made.
+static CREATE_FSYNC_FAILS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 impl ContainerFile {
     /// Create a new container at `path` with the given Argon2 params.
@@ -223,6 +267,15 @@ impl ContainerFile {
         }
         let path = path.as_ref();
         let mut file = opts.open(path)?;
+        // From here the file EXISTS, and every step below can fail: the flock,
+        // the CSPRNG behind the header, the header write, either fsync. The
+        // caller's cleanup only starts once `create` has RETURNED, so a failure
+        // in this window left a stub behind with nothing to remove it — and
+        // `create_new` means the retry the caller obviously makes next gets
+        // AlreadyExists on a path they never knowingly wrote (audit HV-07).
+        //
+        // Armed now, disarmed only on the success path.
+        let mut guard = UnlinkOnDrop::arm(path);
         // Exclusive flock for the file's lifetime — auto-released when
         // `file` (and thus this struct) drops. Prevents concurrent
         // holders from corrupting the append-only chunk grid.
@@ -245,6 +298,7 @@ impl ContainerFile {
         // cannot be made durable has produced nothing worth keeping, and the
         // caller's error path removes the partial file.
         fsync_parent_dir_strict(path)?;
+        guard.disarm();
         Ok(Self {
             file,
             header,
@@ -508,4 +562,67 @@ fn check_write_budget(current: u64, extra: u64) -> Result<()> {
         return Err(Error::ContainerTooLarge { extra, cap });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod hv07_tests {
+    use super::*;
+    use crate::crypto::kdf::Argon2Params;
+
+    /// Restores the switch even on panic, so a failure here cannot leak into
+    /// whatever runs next in the same process.
+    struct ForcedCreateFailure;
+
+    impl ForcedCreateFailure {
+        fn arm() -> Self {
+            CREATE_FSYNC_FAILS.store(true, std::sync::atomic::Ordering::Relaxed);
+            Self
+        }
+    }
+
+    impl Drop for ForcedCreateFailure {
+        fn drop(&mut self) {
+            CREATE_FSYNC_FAILS.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// A create that fails after the file exists must leave nothing behind.
+    ///
+    /// `create` opens with `create_new`, and the caller's cleanup only starts
+    /// once `create` has RETURNED. A failure in between therefore left a stub
+    /// that nothing removed — and the retry the caller obviously makes next got
+    /// `AlreadyExists` on a path they never knowingly wrote, with no way to
+    /// proceed short of deleting a file they do not recognise (audit HV-07).
+    #[test]
+    fn a_failed_create_leaves_no_file_to_block_the_retry() {
+        let dir = std::env::temp_dir().join(format!("hv07-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("c.bin");
+        let _cleanup = Cleanup(dir.clone());
+
+        {
+            let _armed = ForcedCreateFailure::arm();
+            assert!(
+                ContainerFile::create(&path, Argon2Params::MIN).is_err(),
+                "precondition: the hook must make create fail"
+            );
+        }
+        assert!(
+            !path.exists(),
+            "a stub left here makes the path permanently unusable: create_new \
+             turns every retry into AlreadyExists"
+        );
+
+        // The retry must now succeed, which is the whole point of removing it.
+        ContainerFile::create(&path, Argon2Params::MIN)
+            .expect("the retry after a failed create must work");
+    }
+
+    struct Cleanup(std::path::PathBuf);
+
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 }

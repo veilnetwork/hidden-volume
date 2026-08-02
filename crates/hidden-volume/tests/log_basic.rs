@@ -553,3 +553,107 @@ fn pagination_works_across_split_batches() {
 
     std::fs::remove_file(&path).ok();
 }
+
+/// The legacy `iter_log` must reject a KV namespace, like every other log read.
+///
+/// `read_log`, `iter_log_after`/`before`/`range` all consult the persisted
+/// `NamespaceKind` first. `iter_log` alone went straight to the raw KV listing,
+/// where any 8-byte value is indistinguishable from a batch-slot pointer — so
+/// it chased whatever those bytes addressed instead of saying the namespace is
+/// not a log (audit HV-08).
+#[test]
+fn iter_log_rejects_a_kv_namespace_like_the_other_log_reads() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_owned();
+    drop(tmp);
+
+    let mut c = Container::create(&path, fast_params()).unwrap();
+    let mut s = c.create_space(b"pw").unwrap();
+
+    // The shape the old heuristic could not tell apart: an 8-byte KEY (so the
+    // "log keys are fixed-8" check passes) whose VALUE has the width of a
+    // batch-slot pointer. The downstream heuristic only catches this because
+    // slot 9 does not happen to hold a DataBatch — point it at one that does
+    // and the old path returns another namespace's entries as if they were
+    // this one's, with no error at all. That is why the persisted kind has to
+    // be consulted FIRST rather than inferred from the bytes.
+    let mut tx = s.begin_tx();
+    tx.put(Namespace::SETTINGS, &1u64.to_be_bytes(), &9u64.to_le_bytes())
+        .unwrap();
+    tx.commit().unwrap();
+
+    assert!(
+        matches!(
+            s.iter_log(Namespace::SETTINGS),
+            Err(Error::WrongNamespaceKind(_))
+        ),
+        "iter_log must answer WrongNamespaceKind, not chase the value"
+    );
+
+    // Control: read_log already did this, and iter_log now matches it.
+    assert!(matches!(
+        s.read_log(Namespace::SETTINGS, 1),
+        Err(Error::WrongNamespaceKind(_))
+    ));
+
+    // Control: a real log namespace still enumerates.
+    let mut tx = s.begin_tx();
+    tx.append_log(Namespace::MESSAGE_LOG, 7, b"seven").unwrap();
+    tx.commit().unwrap();
+    assert_eq!(
+        s.iter_log(Namespace::MESSAGE_LOG).unwrap(),
+        vec![(7u64, b"seven".to_vec())]
+    );
+
+    std::fs::remove_file(&path).ok();
+}
+
+/// An incompressible record that cannot fit a DataBatch must fail at APPEND.
+///
+/// `MAX_LOG_PAYLOAD_LEN` is 8 KiB and a DataBatch chunk holds ~4 KiB, so
+/// incompressible payloads in between passed the length check and then could
+/// not be encoded at all. The failure surfaced at `commit`, where it names no
+/// record, arrives after the caller has assembled a whole transaction, and
+/// takes every other write in that transaction down with it (audit HV-12).
+#[test]
+fn an_unencodable_log_record_is_refused_at_append_not_at_commit() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_owned();
+    drop(tmp);
+
+    let mut c = Container::create(&path, fast_params()).unwrap();
+    let mut s = c.create_space(b"pw").unwrap();
+
+    // The same generator the auto-split test relies on for genuinely
+    // incompressible bytes. Under MAX_LOG_PAYLOAD_LEN, over what one batch
+    // can hold once zstd has failed to shrink it.
+    let incompressible = pseudo_random(0x0BAD_F00D_1234_5678, 1, 8000);
+
+    let mut tx = s.begin_tx();
+    // A neighbouring write that must survive: the whole point is that one
+    // oversized record no longer costs the caller the rest of the transaction.
+    tx.append_log(Namespace::MESSAGE_LOG, 1, b"keep me").unwrap();
+    assert!(
+        matches!(
+            tx.append_log(Namespace::MESSAGE_LOG, 2, &incompressible),
+            Err(Error::PayloadTooLarge)
+        ),
+        "the record that cannot be encoded must be named at the call that \
+         supplied it"
+    );
+    tx.commit().expect("the rest of the transaction still commits");
+
+    assert_eq!(
+        s.iter_log(Namespace::MESSAGE_LOG).unwrap(),
+        vec![(1u64, b"keep me".to_vec())]
+    );
+
+    // Control: a compressible payload of the SAME length is still accepted —
+    // the gate is admissibility, not a lowered length limit.
+    let mut tx = s.begin_tx();
+    tx.append_log(Namespace::MESSAGE_LOG, 3, &vec![0xAAu8; 8000])
+        .expect("a compressible 8000-byte record must still be accepted");
+    tx.commit().unwrap();
+
+    std::fs::remove_file(&path).ok();
+}
