@@ -286,6 +286,16 @@ impl<'s, 'f> Tx<'s, 'f> {
         if payload.len() > MAX_LOG_PAYLOAD_LEN {
             return Err(Error::PayloadTooLarge);
         }
+        // The length check alone is not the real limit. MAX_LOG_PAYLOAD_LEN is
+        // 8 KiB and a DataBatch chunk holds ~4 KiB, so an INCOMPRESSIBLE 8 KiB
+        // record passed here and then could not be encoded at all — the failure
+        // surfaced at `commit`, where it names no record, arrives after the
+        // caller has built the whole transaction, and takes every other write
+        // in that transaction down with it (audit HV-12).
+        //
+        // Only records past the guaranteed-admissible size pay for the trial
+        // encode; ordinary log entries are far below it.
+        crate::space::log::single_record_fits(log_id, payload)?;
         self.check_namespace_capacity(namespace.0)?;
         self.check_namespace_kind(namespace.0, NamespaceKind::Log)?;
         let buf = self.pending_log.entry(namespace.0).or_default();
