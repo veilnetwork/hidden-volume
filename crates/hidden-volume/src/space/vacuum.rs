@@ -57,6 +57,14 @@ impl<'f> Space<'f> {
         if self.file.lock_mode == crate::container::file::LockMode::Shared {
             return Err(Error::ReadOnly);
         }
+        // A publish that got a replica onto the disk and then failed leaves
+        // this handle a full era behind what a reopen would select. Walking
+        // THIS tree and erasing the rest would erase that era's chunks, and
+        // the reopen then lands on a Superblock pointing at nothing
+        // (audit HV-01). Reopen first; the open scan settles which era landed.
+        if self.state.attempted_seq > self.state.superblock.seq {
+            return Err(Error::PublishUncertain("vacuuming"));
+        }
         if self.state.superblock.root_slot == NO_RECORD {
             return Ok(0);
         }
@@ -177,6 +185,14 @@ impl<'f> Space<'f> {
     pub fn vacuum_data_batches(&mut self) -> Result<usize> {
         if self.file.lock_mode == crate::container::file::LockMode::Shared {
             return Err(Error::ReadOnly);
+        }
+        // A publish that got a replica onto the disk and then failed leaves
+        // this handle a full era behind what a reopen would select. Walking
+        // THIS tree and erasing the rest would erase that era's chunks, and
+        // the reopen then lands on a Superblock pointing at nothing
+        // (audit HV-01). Reopen first; the open scan settles which era landed.
+        if self.state.attempted_seq > self.state.superblock.seq {
+            return Err(Error::PublishUncertain("vacuuming"));
         }
         if self.state.superblock.root_slot == NO_RECORD {
             return Ok(0);
@@ -352,5 +368,78 @@ mod newer_state_guard_tests {
         tx.commit().unwrap();
         assert!(s.state.unreadable_newer_superblock.is_none());
         assert!(s.vacuum_orphans().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod hv01_tests {
+    use crate::container::Container;
+    use crate::crypto::kdf::Argon2Params;
+    use crate::space::index::Namespace;
+
+    fn scratch() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("hv01-{}-{:?}.bin", std::process::id(), std::thread::current().id()))
+    }
+
+    /// A vacuum on a handle whose last publish may have landed must refuse.
+    ///
+    /// `commit_tx` writes N Superblock replicas and adopts the new one only
+    /// after the final fsync. ENOSPC on the second replica leaves replica 1 of
+    /// seq N+1 ON DISK while this handle still names N. Vacuuming then walks
+    /// N's tree and erases everything else — including N+1's chunks — and the
+    /// next open picks N+1 by seq and finds it pointing at nothing. The
+    /// documented recovery advice was to vacuum, which is how this became a
+    /// way to destroy an already-published commit (audit HV-01).
+    ///
+    /// The partial publish needs an I/O fault to induce, so this drives the
+    /// state it leaves behind — `attempted_seq` ahead of `superblock.seq`,
+    /// exactly what `commit_tx` sets before its first replica append.
+    #[test]
+    fn a_vacuum_on_an_uncertain_publish_is_refused_until_reopen() {
+        let path = scratch();
+        let _cleanup = Cleanup(path.clone());
+
+        let mut c = Container::create(&path, Argon2Params::MIN).unwrap();
+        let mut s = c.create_space(b"pw").unwrap();
+        let mut tx = s.begin_tx();
+        tx.put(Namespace::SETTINGS, b"k", b"v").unwrap();
+        tx.commit().unwrap();
+        tx = s.begin_tx();
+        tx.delete(Namespace::SETTINGS, b"k").unwrap();
+        tx.commit().unwrap();
+
+        // Control: with the publish settled, both vacuums run.
+        assert!(s.vacuum_orphans().is_ok());
+        assert!(s.vacuum_data_batches().is_ok());
+
+        // A publish of the next seq reached the disk and then failed.
+        s.state.attempted_seq = s.commit_seq() + 1;
+
+        assert!(
+            matches!(s.vacuum_orphans(), Err(crate::Error::PublishUncertain(_))),
+            "vacuum_orphans must refuse rather than erase an era it cannot see"
+        );
+        assert!(
+            matches!(
+                s.vacuum_data_batches(),
+                Err(crate::Error::PublishUncertain(_))
+            ),
+            "vacuum_data_batches must refuse for the same reason"
+        );
+
+        // Committing is deliberately still allowed: it skips the burnt seq
+        // rather than writing a second payload under it, so blocking it would
+        // wedge the space for no gain.
+        let mut tx = s.begin_tx();
+        tx.put(Namespace::SETTINGS, b"k2", b"v2").unwrap();
+        assert!(tx.commit().is_ok(), "commit must remain available");
+    }
+
+    struct Cleanup(std::path::PathBuf);
+
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
     }
 }
