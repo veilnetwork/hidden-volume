@@ -124,6 +124,35 @@ const MAX_RAW_BATCH_LEN: usize = 1024 * 1024;
 /// weak hardware (~50 MB/s on Cortex-A53), strong ratio for short text.
 const ZSTD_LEVEL: i32 = 3;
 
+/// Payload size below which a record is guaranteed to fit one `DataBatch`, no
+/// matter how incompressible it is.
+///
+/// zstd's worst case on random data is expansion, not compression — roughly
+/// `len + len/128 + a small frame header`. Half of [`PAYLOAD_CAP`] leaves room
+/// for that plus the per-record framing (8-byte log_id + 4-byte length) and the
+/// batch's own 4-byte count, with a wide margin.
+///
+/// Anything larger has to be TRIED: [`MAX_LOG_PAYLOAD_LEN`] is 8 KiB while
+/// `PAYLOAD_CAP` is ~4 KiB, so an incompressible 8 KiB record passes the length
+/// check and then cannot be encoded at all (audit HV-12).
+pub const GUARANTEED_ADMISSIBLE_PAYLOAD_LEN: usize = PAYLOAD_CAP / 2;
+
+/// Would this record encode into a single `DataBatch` on its own?
+///
+/// Used by `Tx::append_log` to reject at the CALL that supplied the payload,
+/// rather than at `commit` — where the error names no record, arrives after
+/// the caller has built a whole transaction, and takes the other writes in
+/// that transaction down with it.
+///
+/// Runs the real encoder rather than an estimate, so it cannot drift from what
+/// commit will actually do.
+pub fn single_record_fits(log_id: u64, payload: &[u8]) -> Result<()> {
+    if payload.len() <= GUARANTEED_ADMISSIBLE_PAYLOAD_LEN {
+        return Ok(());
+    }
+    encode_batch(std::slice::from_ref(&(log_id, payload.to_vec()))).map(|_| ())
+}
+
 /// Encode and compress a batch. Returns the bytes that should be the
 /// plaintext payload of the `DataBatch` chunk.
 ///

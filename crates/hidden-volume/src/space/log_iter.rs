@@ -121,6 +121,14 @@ impl<'f> Space<'f> {
     /// [`Self::iter_log_before`] instead** — those page bounded counts,
     /// so the *result* is bounded too.
     pub fn iter_log(&mut self, namespace: Namespace) -> Result<Vec<(u64, Vec<u8>)>> {
+        // Enforce the persisted kind, like `read_log` and the paged APIs do.
+        // Without it this alone reached the raw KV listing, and any 8-byte KV
+        // value was taken for a batch-slot pointer — so asking a KV namespace
+        // for its "log entries" chased whatever those bytes happened to
+        // address instead of answering `WrongNamespaceKind` (audit HV-08).
+        if self.find_log_root_slot(namespace)?.is_none() {
+            return Ok(Vec::new());
+        }
         let entries = self.list(namespace)?;
         self.decode_log_entries(entries)
     }
