@@ -88,6 +88,26 @@ pub enum Error {
     #[error("rename is visible but its durability is unconfirmed: {0}")]
     RenameVisibleDurabilityUncertain(&'static str),
 
+    /// A previous publish got at least one Superblock replica onto the disk
+    /// and then failed, so this handle's view of the tree may be one era
+    /// behind what a reopen would select.
+    ///
+    /// Refused for the DESTRUCTIVE operations only. A vacuum walks the tree
+    /// this handle believes in and erases everything else — including the
+    /// chunks of the era it does not know was published. A later reopen picks
+    /// the newer Superblock by seq, and it now points at erased chunks: the
+    /// vacuum destroyed a commit that was already visible on disk
+    /// (audit HV-01).
+    ///
+    /// The remedy is to reopen the container. The open scan resolves which era
+    /// actually landed, and the reopened handle can vacuum safely.
+    ///
+    /// Committing is NOT blocked: `commit_tx` already derives the next seq from
+    /// `attempted_seq` rather than the published one, so it skips the burnt
+    /// number instead of writing a second payload under it.
+    #[error("a previous publish may have reached the disk; reopen before {0}")]
+    PublishUncertain(&'static str),
+
     /// File too small / truncated / not aligned to chunk boundary.
     #[error("malformed container: {0}")]
     Malformed(&'static str),
