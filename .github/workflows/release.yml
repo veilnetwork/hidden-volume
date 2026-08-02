@@ -60,11 +60,11 @@ jobs:
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: release-${{ matrix.target }}
       # Cross-linker for aarch64-linux on x86_64 hosts.
@@ -105,7 +105,7 @@ jobs:
           fi
           ls -la dist/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: stage-${{ matrix.target }}
           path: dist/
@@ -119,9 +119,9 @@ jobs:
       contents: write   # create GitHub Release
       id-token: write   # cosign keyless OIDC token
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: stage-*
           path: dist/
@@ -137,7 +137,7 @@ jobs:
           cat SHA256SUMS
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
       - name: cosign sign-blob (keyless OIDC)
         # Signs the SHA256SUMS file with a short-lived certificate
@@ -155,7 +155,7 @@ jobs:
       - name: Create GitHub Release
         # Always create on tag push; skip on workflow_dispatch+dry_run.
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             dist/*
@@ -190,7 +190,7 @@ jobs:
         # surface the signed bundle as a workflow artifact so the
         # maintainer can inspect / smoke-verify locally.
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run == true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: dry-run-signed
           path: |
@@ -203,9 +203,9 @@ jobs:
     needs: [sign-and-release]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Detect publishable crates
         # `publish = false` in a crate's Cargo.toml is an explicit

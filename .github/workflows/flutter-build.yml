@@ -27,6 +27,12 @@ on:
     tags: ['v*.*.*']
   workflow_dispatch: {}
 
+# Least privilege (audit HV-01). Nothing here publishes, and these jobs run
+# cargo — i.e. every dependency's `build.rs` — so a write-capable token in
+# their environment is a token a compromised dependency can use.
+permissions:
+  contents: read
+
 jobs:
   android:
     name: android-${{ matrix.abi }}
@@ -40,7 +46,7 @@ jobs:
           - x86_64
           - x86
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: install rust + targets
         run: |
@@ -52,7 +58,7 @@ jobs:
 
       - name: setup android NDK r26
         id: ndk
-        uses: nttld/setup-ndk@v1
+        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1
         with:
           ndk-version: r26d
           link-to-sdk: true
@@ -67,7 +73,7 @@ jobs:
         run: ./scripts/build-android.sh
 
       - name: upload .so artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: android-${{ matrix.abi }}-cdylib
           path: experimental/flutter_plugin/hidden_volume/android/src/main/jniLibs/${{ matrix.abi }}/libhidden_volume_ffi.so
@@ -79,7 +85,7 @@ jobs:
     needs: android
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: install rust
         run: rustup toolchain install stable --profile minimal
       - name: build host cdylib (for uniffi-bindgen --library)
@@ -91,7 +97,7 @@ jobs:
             --library target/release/libhidden_volume_ffi.so \
             --language kotlin --out-dir bindings/kotlin
       - name: upload kotlin binding
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: android-kotlin-binding
           path: bindings/kotlin/uniffi/
@@ -102,7 +108,7 @@ jobs:
     name: ios-xcframework
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: install rust + ios targets
         run: |
@@ -125,7 +131,7 @@ jobs:
         run: ./scripts/build-ios.sh
 
       - name: upload xcframework
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ios-xcframework
           path: experimental/flutter_plugin/hidden_volume/ios/HiddenVolumeFFI.xcframework
@@ -133,7 +139,7 @@ jobs:
           retention-days: 14
 
       - name: upload swift binding
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ios-swift-binding
           path: bindings/swift/
