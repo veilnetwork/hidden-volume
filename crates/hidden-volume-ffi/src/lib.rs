@@ -466,7 +466,7 @@ fn hex(b: &[u8]) -> String {
 /// One pending change to commit via [`SpaceHandle::commit`]. Mirrors
 /// the sync core's `Tx::put` / `Tx::delete` / `Tx::append_log` /
 /// `Tx::delete_log` ops.
-#[derive(uniffi::Enum, Debug, Clone)]
+#[derive(uniffi::Enum, Clone)]
 pub enum WriteOp {
     /// KV insert / replace.
     Put {
@@ -504,15 +504,66 @@ pub enum WriteOp {
     },
 }
 
+impl core::fmt::Debug for WriteOp {
+    /// REDACTED (audit HV-09). The derive printed KEYS, VALUES and log
+    /// PAYLOADS — everything the host is storing — across an FFI boundary
+    /// whose consumers routinely log the ops they submit. A `{:?}` on a batch
+    /// of writes wrote the user's messages into a Kotlin or Swift logcat.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Put {
+                namespace,
+                key,
+                value,
+            } => f
+                .debug_struct("Put")
+                .field("namespace", namespace)
+                .field("key_len", &key.len())
+                .field("value_len", &value.len())
+                .finish(),
+            Self::Delete { namespace, key } => f
+                .debug_struct("Delete")
+                .field("namespace", namespace)
+                .field("key_len", &key.len())
+                .finish(),
+            Self::AppendLog {
+                namespace,
+                log_id,
+                payload,
+            } => f
+                .debug_struct("AppendLog")
+                .field("namespace", namespace)
+                .field("log_id", log_id)
+                .field("payload_len", &payload.len())
+                .finish(),
+            Self::DeleteLog { namespace, log_id } => f
+                .debug_struct("DeleteLog")
+                .field("namespace", namespace)
+                .field("log_id", log_id)
+                .finish(),
+        }
+    }
+}
+
 // ---------- Log entry record ----------
 
 /// One log entry returned by [`SpaceHandle::iter_log_range`].
-#[derive(uniffi::Record, Debug, Clone)]
+#[derive(uniffi::Record, Clone)]
 pub struct LogEntry {
     /// Logical id of the entry (the same `log_id` passed to `AppendLog`).
     pub log_id: u64,
     /// Decoded payload bytes.
     pub payload: Vec<u8>,
+}
+
+impl core::fmt::Debug for LogEntry {
+    /// REDACTED (audit HV-09) — `payload` is a decoded message.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("LogEntry")
+            .field("log_id", &self.log_id)
+            .field("payload_len", &self.payload.len())
+            .finish()
+    }
 }
 
 // ---------- Stats record ----------

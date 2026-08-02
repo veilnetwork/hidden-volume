@@ -916,7 +916,11 @@ impl<'f> Space<'f> {
         payload: &[u8],
     ) -> Result<u64> {
         let slot = self.file.slot_count();
-        let key = derive_chunk_key(&self.state.keys.aead_root, &self.state.keys.container_id, slot);
+        let key = derive_chunk_key(
+            &self.state.keys.aead_root,
+            &self.state.keys.container_id,
+            slot,
+        );
         let aead = ChunkAead::new(&key);
         let pt = Plaintext {
             kind,
@@ -957,7 +961,11 @@ impl<'f> Space<'f> {
     /// `vacuum.rs` propagate as-is.
     pub(super) fn read_owned_chunk(&mut self, slot: u64) -> Result<Plaintext> {
         let chunk = self.file.read_slot(slot)?;
-        let key = derive_chunk_key(&self.state.keys.aead_root, &self.state.keys.container_id, slot);
+        let key = derive_chunk_key(
+            &self.state.keys.aead_root,
+            &self.state.keys.container_id,
+            slot,
+        );
         let aead = ChunkAead::new(&key);
         let mut nonce = [0u8; NONCE_LEN];
         nonce.copy_from_slice(&chunk[..NONCE_LEN]);
