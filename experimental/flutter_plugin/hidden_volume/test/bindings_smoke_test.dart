@@ -24,6 +24,55 @@ void main() {
     expect(contractVersion(), 30);
   });
 
+  test('an out-of-range namespace is refused, not silently narrowed', () {
+    // `dart:ffi` narrows without complaint: the uniffi signature is `u8`, so
+    // namespace 257 arrives in Rust as 1. The write path narrows too, because
+    // `addByte` masks. Either way the caller is told the operation succeeded
+    // while it touched a namespace they never named (audit HV-04).
+    //
+    // Proven against a REAL container, not a mock — the whole finding is that
+    // the truncation happens at the FFI boundary itself.
+    final tmp = Directory.systemTemp.createTempSync('hv_dart_ns_');
+    final path = '${tmp.path}/store.bin';
+    addTearDown(() => tmp.deleteSync(recursive: true));
+
+    final space = SpaceHandleBindings.create(
+      path: path,
+      password: Uint8List.fromList('pwd'.codeUnits),
+      argon: ArgonPreset.light,
+    );
+    addTearDown(space.close);
+
+    final key = Uint8List.fromList('k'.codeUnits);
+    final value = Uint8List.fromList('v'.codeUnits);
+
+    // Read side.
+    expect(
+      () => space.get(257, key),
+      throwsA(isA<ArgumentError>()),
+      reason: '257 would have read namespace 1',
+    );
+    expect(() => space.count(-1), throwsA(isA<ArgumentError>()));
+
+    // Write side — the damaging one: a commit that lands in the wrong
+    // namespace is a silent cross-namespace write.
+    expect(
+      () => space.commit([
+        HvWriteOpPut(namespace: 257, key: key, value: value),
+      ]),
+      throwsA(isA<ArgumentError>()),
+    );
+
+    // Nothing leaked into namespace 1 on the way.
+    expect(space.get(1, key), isNull,
+        reason: 'the rejected write must not have landed anywhere');
+
+    // Control: a legal namespace still works, so the guard is rejecting the
+    // out-of-range value and not the operation.
+    space.commit([HvWriteOpPut(namespace: 1, key: key, value: value)]);
+    expect(space.get(1, key), value);
+  });
+
   test('empty commit is no-op', () {
     final tmp = Directory.systemTemp.createTempSync('hv_dart_');
     final path = '${tmp.path}/store.bin';
