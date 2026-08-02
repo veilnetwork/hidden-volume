@@ -107,6 +107,15 @@ impl MultiSpace {
     /// Read-only hosts are left alone: `vacuum_orphans` is strict and answers
     /// `Err(ReadOnly)` under a shared lock, and refusing to open a container
     /// someone mounted read-only would be a worse bug than the one this fixes.
+    ///
+    /// ⚠️ NOT on the constant-time path (audit HV-02). The CT open equalizes
+    /// the discovery SCAN so unlock latency cannot say whether a space matched
+    /// — and then this ran, doing work whose duration depends on how much
+    /// history the space has. A wrong password ended after the equalized scan;
+    /// a right one did not, so the very measurement the CT scan removes was
+    /// handed back by the maintenance that followed. Whoever opens
+    /// constant-time calls [`MultiSpace::vacuum_hosted`] afterwards, once the
+    /// timing is no longer attached to the unlock decision.
     fn finalize_open(&mut self, state: SpaceState) -> Result<SpaceState> {
         if self.container.is_readonly() {
             return Ok(state);
@@ -131,9 +140,32 @@ impl MultiSpace {
             return Err(Error::SpaceAlreadyExists);
         }
         let state = scan_and_recover_constant_time(&mut self.container.file, keys)?;
-        let state = self.finalize_open(state)?;
+        // NO maintenance here — see `finalize_open`. The scrub is still owed;
+        // `vacuum_hosted` performs it away from the unlock's timing.
         self.spaces.push(Some(state));
         Ok(self.spaces.len() - 1)
+    }
+
+    /// Run the post-open scrub for a hosted space, separately from opening it.
+    ///
+    /// [`Self::open_space_constant_time`] deliberately skips it: the scrub's
+    /// duration depends on the space's history, so doing it inline made a
+    /// successful unlock measurably longer than a failed one and undid the
+    /// constant-time scan (audit HV-02). A host that opens constant-time is
+    /// expected to call this once the unlock is complete and its timing no
+    /// longer answers "did that password open something".
+    ///
+    /// Idempotent and cheap when there is nothing to reclaim. `Err(ReadOnly)`
+    /// on a shared-lock host is expected and not fatal — the caller may ignore
+    /// it, exactly as [`Self::finalize_open`] does.
+    pub fn vacuum_hosted(&mut self, id: usize) -> Result<()> {
+        if self.container.is_readonly() {
+            return Ok(());
+        }
+        // `with_space` returns the closure's value; the scrub's reclaimed-slot
+        // count is not interesting here, only whether it ran.
+        self.with_space(id, |space| space.vacuum_orphans())??;
+        Ok(())
     }
 
     /// Create a new space in the container by its [`SpaceKeys`] and host it;
