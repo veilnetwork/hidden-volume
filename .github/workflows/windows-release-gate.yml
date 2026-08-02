@@ -15,9 +15,9 @@ jobs:
     name: Windows workspace tests
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: windows-release-gate
       - run: cargo build --workspace --all-targets --locked
@@ -29,11 +29,11 @@ jobs:
     name: Windows release build
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           targets: x86_64-pc-windows-msvc
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: release-x86_64-pc-windows-msvc
       - run: cargo build -p hidden-volume --release --features cli --target x86_64-pc-windows-msvc --locked
@@ -46,7 +46,7 @@ jobs:
           cp target/x86_64-pc-windows-msvc/release/hidden_volume_ffi.dll dist/hidden_volume_ffi-x86_64-pc-windows-msvc.dll
           cd dist
           sha256sum -- * > SHA256SUMS
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-release-x86_64-pc-windows-msvc
           path: dist/
