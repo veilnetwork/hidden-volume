@@ -637,7 +637,16 @@ fn frame_kv_keys(entries: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
 
 /// Parse the 64-byte FFI encoding of [`SpaceKeys`] (`container_id` ‖
 /// `aead_root`). Rejects any other length as [`HvError::Malformed`].
-fn decode_space_keys(bytes: &[u8]) -> Result<SpaceKeys, HvError> {
+/// Decode a 64-byte `SpaceKeys` from the buffer a foreign caller handed us.
+///
+/// Takes the `Vec` BY VALUE and wraps it in `Zeroizing` (audit H-03). Every
+/// neighbouring FFI entry point already treats incoming secret bytes that way;
+/// this one took a borrow of a plain `Vec` that uniffi had allocated, so the
+/// 64 bytes of key material stayed in the allocator after the call and could
+/// surface in a core dump or a later allocation. Owning it here means there is
+/// exactly one place responsible for erasing it, and no call site can forget.
+fn decode_space_keys(bytes: Vec<u8>) -> Result<SpaceKeys, HvError> {
+    let bytes = zeroize::Zeroizing::new(bytes);
     if bytes.len() != SPACE_KEYS_LEN {
         return Err(HvError::Malformed(
             "SpaceKeys must be exactly 64 bytes".into(),
@@ -753,10 +762,12 @@ impl SpaceHandle {
         // The Vec becomes ours the moment uniffi hands it over, so it is ours
         // to wipe. Without this the space's AEAD root - the value that opens
         // the space without its password - stays in a freed heap block for the
-        // rest of the process's life. The foreign-side copy is the caller's to
-        // zero; see the note on `space_keys`.
-        let keys = zeroize::Zeroizing::new(keys);
-        let keys = decode_space_keys(&keys)?;
+        // rest of the process's life. `decode_space_keys` takes it by value and
+        // does the wiping for every caller (audit H-03), so the wrap that used
+        // to be spelled out here is no longer needed — and the one path that
+        // was MISSING it can no longer exist. The foreign-side copy is the
+        // caller's to zero; see the note on `space_keys`.
+        let keys = decode_space_keys(keys)?;
         let p = PathBuf::from(path);
         let container = Box::new(Container::open(&p)?);
         // Constant-time scan: the FFI is the deniability-app surface, so equalize
@@ -1165,9 +1176,8 @@ impl AsyncSpaceHandle {
     /// already derived).
     #[uniffi::constructor]
     pub async fn open_with_keys(path: String, keys: Vec<u8>) -> HvResult<Arc<Self>> {
-        // Ours to wipe once uniffi hands it over — see the sync open_with_keys.
-        let keys = zeroize::Zeroizing::new(keys);
-        let keys = decode_space_keys(&keys)?;
+        // Wiped by `decode_space_keys` — see the sync open_with_keys.
+        let keys = decode_space_keys(keys)?;
         let p = PathBuf::from(path);
         let inner = run_blocking(move || -> HvResult<OwnedSpace> {
             let container = Box::new(Container::open(&p)?);
@@ -1471,7 +1481,7 @@ impl MultiSpaceHandle {
     /// [`SpaceHandle::space_keys`]); returns its `space_id`. `AuthFailed` if no
     /// space matches; `Malformed` if `keys` is not 64 bytes.
     pub fn open_space(&self, keys: Vec<u8>) -> HvResult<u32> {
-        let keys = decode_space_keys(&keys)?;
+        let keys = decode_space_keys(keys)?;
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
         // Constant-time scan (deniability) — equalizes the discovery scan so
         // hosting a space doesn't leak which one (or none) matched.

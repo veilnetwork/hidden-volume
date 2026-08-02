@@ -293,7 +293,7 @@ fn scan_and_recover_inner(
         accumulate_owned_slot(&mut acc, slot, pt);
     }
 
-    finalize_scan(keys, container_id, acc)
+    finalize_scan(keys, acc)
 }
 
 /// Per-slot scan accumulator — the `owned_slots` / `commit_history` /
@@ -315,6 +315,45 @@ fn scan_and_recover_inner(
 /// means N consecutive superblocks were forged or corrupt, and 64 is far past
 /// any state a writer produces.
 const MAX_SB_CANDIDATES: usize = 64;
+
+/// Insert one AEAD-passing Superblock payload into a candidate map, keeping the
+/// map bounded.
+///
+/// ## Why this is a function
+///
+/// The insert used to be written out at each accumulation site — sequential,
+/// parallel worker, parallel reduce, mmap — and only the sequential copy
+/// carried the [`MAX_SB_CANDIDATES`] cap. The others could accumulate one
+/// distinct-seq entry per scanned chunk, so a container holding the key (or a
+/// buggy writer) exhausted memory on exactly the builds that enable
+/// `parallel-scan` or `mmap` — a limit that depended on which feature flags
+/// were on (audit H-02). Four copies of a rule is three chances to fix one of
+/// them; there is one now.
+///
+/// **Last writer wins.** Replicas of one publish are bit-equal, so this only
+/// decides a collision between two DIFFERENT payloads under one seq — which
+/// `attempted_seq` now prevents us from creating, but a container written by an
+/// older build may already hold one. Slots are append-only and the reduce is
+/// ordered, so the later entry is the later commit; first-wins silently
+/// reverted to the older one, losing a commit that had already returned Ok. It
+/// also matches `find_latest_superblock_reverse`, which scans backward and so
+/// already kept the highest slot.
+///
+/// **Lowest seqs are dropped.** `finalize_scan` walks candidates in descending
+/// seq and stops at the first that decodes, so anything below the top few is
+/// only ever reached if that many consecutive superblocks are
+/// malformed-but-AEAD-valid. The fall-through survives; the unbounded map does
+/// not.
+fn push_sb_candidate(
+    candidates: &mut std::collections::BTreeMap<u64, Vec<u8>>,
+    seq: u64,
+    payload: Vec<u8>,
+) {
+    candidates.insert(seq, payload);
+    while candidates.len() > MAX_SB_CANDIDATES {
+        candidates.pop_first();
+    }
+}
 
 /// Fold one owned-but-unparsable Superblock `seq` into the running maximum.
 ///
@@ -375,36 +414,7 @@ fn accumulate_owned_slot(acc: &mut ScanAcc, slot: u64, pt: Plaintext) {
             note_unparsable_sb(&mut acc.unparsable_sb_seq, pt.seq);
         }
         if Superblock::is_valid_encoded_len(pt.payload.len()) {
-            use std::collections::btree_map::Entry;
-            match acc.sb_candidates.entry(pt.seq) {
-                Entry::Vacant(e) => {
-                    e.insert(pt.payload);
-                },
-                Entry::Occupied(mut e) => {
-                    // LAST writer wins. Replicas of one publish are bit-equal, so this only
-                    // decides a collision between two DIFFERENT payloads under one seq —
-                    // which `attempted_seq` now prevents us from creating, but a container
-                    // written by an older build may already hold one. Slots are append-only
-                    // and the reduce is ordered, so the later entry is the later commit;
-                    // first-wins silently reverted to the older one, losing a commit that
-                    // had already returned Ok. It also matches
-                    // `find_latest_superblock_reverse`, which scans backward and so already
-                    // kept the highest slot.
-                    e.insert(pt.payload);
-                },
-            }
-            // Keep only the highest `MAX_SB_CANDIDATES` seqs. Audit pass 20
-            // bounded each entry to a canonical superblock length; the COUNT
-            // stayed open, so a key-holder could still forge one distinct-seq
-            // Superblock per scanned chunk and have us hold all of them at
-            // once. `finalize_scan` walks candidates in descending seq and
-            // stops at the first that decodes, so everything below the top few
-            // is only ever reached if that many consecutive superblocks are
-            // malformed-but-AEAD-valid — the fall-through survives, the
-            // unbounded map does not.
-            while acc.sb_candidates.len() > MAX_SB_CANDIDATES {
-                acc.sb_candidates.pop_first();
-            }
+            push_sb_candidate(&mut acc.sb_candidates, pt.seq, pt.payload);
         }
     }
 }
@@ -412,7 +422,7 @@ fn accumulate_owned_slot(acc: &mut ScanAcc, slot: u64, pt: Plaintext) {
 /// Pick the winning superblock (descending-seq with the audit-D2
 /// fall-through and the audit-pass-14 chunk-vs-decoded seq cross-check)
 /// and assemble the `SpaceState`. Shared by every scan path.
-fn finalize_scan(keys: SpaceKeys, container_id: [u8; 32], acc: ScanAcc) -> Result<SpaceState> {
+fn finalize_scan(keys: SpaceKeys, acc: ScanAcc) -> Result<SpaceState> {
     let ScanAcc {
         owned_slots,
         mut commit_history,
@@ -457,7 +467,6 @@ fn finalize_scan(keys: SpaceKeys, container_id: [u8; 32], acc: ScanAcc) -> Resul
 
     Ok(SpaceState {
         keys,
-        container_id,
         superblock,
         owned_slots,
         // Every Superblock chunk the scan decrypted contributed its seq here,
@@ -652,7 +661,7 @@ fn try_fast_scan_inner(
     if acc.sb_candidates.is_empty() {
         return Ok(None);
     }
-    finalize_scan(keys.clone(), *container_id, acc).map(Some)
+    finalize_scan(keys.clone(), acc).map(Some)
 }
 
 /// Parallel variant of [`scan_and_recover`] using rayon's work-stealing
@@ -805,25 +814,8 @@ fn scan_and_recover_parallel_inner(
                         if !Superblock::is_valid_encoded_len(pt.payload.len()) {
                             note_unparsable_sb(&mut acc.unparsable_sb_seq, pt.seq);
                         }
-                        use std::collections::btree_map::Entry;
                         if Superblock::is_valid_encoded_len(pt.payload.len()) {
-                            match acc.sb_candidates.entry(pt.seq) {
-                                Entry::Vacant(e) => {
-                                    e.insert(pt.payload);
-                                },
-                                Entry::Occupied(mut e) => {
-                                    // LAST writer wins. Replicas of one publish are bit-equal, so this only
-                                    // decides a collision between two DIFFERENT payloads under one seq —
-                                    // which `attempted_seq` now prevents us from creating, but a container
-                                    // written by an older build may already hold one. Slots are append-only
-                                    // and the reduce is ordered, so the later entry is the later commit;
-                                    // first-wins silently reverted to the older one, losing a commit that
-                                    // had already returned Ok. It also matches
-                                    // `find_latest_superblock_reverse`, which scans backward and so already
-                                    // kept the highest slot.
-                                    e.insert(pt.payload);
-                                },
-                            }
+                            push_sb_candidate(&mut acc.sb_candidates, pt.seq, pt.payload);
                         }
                     }
                 }
@@ -841,25 +833,14 @@ fn scan_and_recover_parallel_inner(
                 // Merge candidates from both halves. Same-seq cross-thread
                 // replicas must be bit-equal (writer wrote them as one
                 // batch with identical payload) — audit pass 7 (D4).
-                use std::collections::btree_map::Entry;
+                //
+                // Capped here too, and that is the point of routing through
+                // `push_sb_candidate`: two accumulators each holding at most
+                // MAX_SB_CANDIDATES merge into up to twice that, and a reduce
+                // tree of W workers compounds it. Bounding only the workers
+                // would have left the ceiling proportional to thread count.
                 for (seq, payload) in b.sb_candidates {
-                    match a.sb_candidates.entry(seq) {
-                        Entry::Vacant(e) => {
-                            e.insert(payload);
-                        },
-                        Entry::Occupied(mut e) => {
-                            // LAST writer wins. Replicas of one publish are bit-equal, so this only
-                            // decides a collision between two DIFFERENT payloads under one seq —
-                            // which `attempted_seq` now prevents us from creating, but a container
-                            // written by an older build may already hold one. Slots are append-only
-                            // and the reduce is ordered, so the later entry is the later commit;
-                            // first-wins silently reverted to the older one, losing a commit that
-                            // had already returned Ok. It also matches
-                            // `find_latest_superblock_reverse`, which scans backward and so already
-                            // kept the highest slot.
-                            e.insert(payload);
-                        },
-                    }
+                    push_sb_candidate(&mut a.sb_candidates, seq, payload);
                 }
                 Ok(a)
             })
@@ -904,7 +885,6 @@ fn scan_and_recover_parallel_inner(
 
     Ok(crate::space::SpaceState {
         keys,
-        container_id,
         superblock,
         owned_slots,
         // Every Superblock chunk the scan decrypted contributed its seq here,
@@ -1039,28 +1019,11 @@ fn scan_and_recover_mmap_inner(
             // Previously the mmap path omitted this gate; closed here
             // alongside the 56-byte long-form addition. Non-matching
             // payloads still counted toward `commit_history` above.
-            use std::collections::btree_map::Entry;
             if !Superblock::is_valid_encoded_len(pt.payload.len()) {
                 note_unparsable_sb(&mut unparsable_sb_seq, pt.seq);
             }
             if Superblock::is_valid_encoded_len(pt.payload.len()) {
-                match sb_candidates.entry(pt.seq) {
-                    Entry::Vacant(e) => {
-                        e.insert(pt.payload);
-                    },
-                    Entry::Occupied(mut e) => {
-                        // LAST writer wins. Replicas of one publish are bit-equal, so this only
-                        // decides a collision between two DIFFERENT payloads under one seq —
-                        // which `attempted_seq` now prevents us from creating, but a container
-                        // written by an older build may already hold one. Slots are append-only
-                        // and the reduce is ordered, so the later entry is the later commit;
-                        // first-wins silently reverted to the older one, losing a commit that
-                        // had already returned Ok. It also matches
-                        // `find_latest_superblock_reverse`, which scans backward and so already
-                        // kept the highest slot.
-                        e.insert(pt.payload);
-                    },
-                }
+                push_sb_candidate(&mut sb_candidates, pt.seq, pt.payload);
             }
         }
     }
@@ -1091,7 +1054,6 @@ fn scan_and_recover_mmap_inner(
 
     Ok(crate::space::SpaceState {
         keys,
-        container_id,
         superblock,
         owned_slots,
         // Every Superblock chunk the scan decrypted contributed its seq here,
@@ -1175,5 +1137,58 @@ mod unreadable_superblock_rule_tests {
         assert_eq!(newer_unreadable_sb(Some(8), 8), None);
         assert_eq!(newer_unreadable_sb(Some(7), 8), None);
         assert_eq!(newer_unreadable_sb(None, 8), None);
+    }
+}
+
+#[cfg(test)]
+mod candidate_bound_tests {
+    use super::{MAX_SB_CANDIDATES, push_sb_candidate};
+    use std::collections::BTreeMap;
+
+    /// Audit H-02. The cap existed, but only in the sequential accumulator —
+    /// the `parallel-scan` and `mmap` paths wrote the same insert out again
+    /// without it, so how much memory a hostile container could make us hold
+    /// depended on which feature flags the build enabled.
+    #[test]
+    fn the_candidate_map_stays_bounded_however_many_arrive() {
+        let mut map: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
+        for seq in 0..(MAX_SB_CANDIDATES as u64 * 40) {
+            push_sb_candidate(&mut map, seq, vec![0u8; 48]);
+            assert!(
+                map.len() <= MAX_SB_CANDIDATES,
+                "map grew to {} at seq {seq}",
+                map.len()
+            );
+        }
+        assert_eq!(map.len(), MAX_SB_CANDIDATES);
+    }
+
+    /// Which ones survive matters: `finalize_scan` walks DESCENDING and stops
+    /// at the first that decodes, so dropping the top of the range instead of
+    /// the bottom would discard the newest state and silently return an older
+    /// era — the exact failure H-01 was about.
+    #[test]
+    fn the_highest_seqs_are_the_ones_kept() {
+        let mut map: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
+        for seq in 0..(MAX_SB_CANDIDATES as u64 * 3) {
+            push_sb_candidate(&mut map, seq, vec![0u8; 48]);
+        }
+        let lowest_kept = *map.keys().next().expect("non-empty");
+        let highest_kept = *map.keys().next_back().expect("non-empty");
+        assert_eq!(highest_kept, MAX_SB_CANDIDATES as u64 * 3 - 1);
+        assert_eq!(lowest_kept, highest_kept - MAX_SB_CANDIDATES as u64 + 1);
+    }
+
+    /// Last writer wins on a same-seq collision. A container written by an
+    /// older build can hold two different payloads under one seq; first-wins
+    /// reverted to the older one and lost a commit that had already returned
+    /// Ok.
+    #[test]
+    fn a_repeated_seq_keeps_the_later_payload() {
+        let mut map: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
+        push_sb_candidate(&mut map, 7, vec![1u8; 48]);
+        push_sb_candidate(&mut map, 7, vec![2u8; 48]);
+        assert_eq!(map.len(), 1);
+        assert_eq!(map[&7], vec![2u8; 48]);
     }
 }
