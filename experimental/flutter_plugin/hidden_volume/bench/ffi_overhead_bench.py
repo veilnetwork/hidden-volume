@@ -20,10 +20,18 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[4]
 BINDINGS_PY = REPO_ROOT / "bindings" / "python"
 
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+import dylib_path  # noqa: E402
+
 # Ensure the cdylib is co-located next to hidden_volume_ffi.py so the
 # stock loader (`uniffi_lib_init`) finds it on Windows.
+#
+# Pinned to `release` on purpose — timing an unoptimized build would be a
+# measurement error, not a stale artifact, so this one does NOT search. It
+# still spells the profile through `dylib_path` so the directory layout lives
+# in the same module as the tests' and the checksum script's.
 DLL_NAME = "hidden_volume_ffi.dll"
-SRC_DLL = REPO_ROOT / "target" / "release" / DLL_NAME
+SRC_DLL = dylib_path.profile_dir(REPO_ROOT, "release") / DLL_NAME
 DST_DLL = BINDINGS_PY / DLL_NAME
 if not DST_DLL.exists() or DST_DLL.stat().st_mtime < SRC_DLL.stat().st_mtime:
     shutil.copy2(SRC_DLL, DST_DLL)

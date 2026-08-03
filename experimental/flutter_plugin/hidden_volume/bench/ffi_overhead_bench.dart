@@ -22,11 +22,19 @@ import 'dart:typed_data';
 
 import 'package:hidden_volume/src/bindings.dart';
 
+// The cdylib resolver is shared with the tests rather than copied. This file
+// used to carry its own, which searched only `hidden_volume_ffi.dll` — so the
+// bench could not run on macOS or Linux at all — and ordered the build
+// profiles differently from `scripts/regen-dart-checksums.py`. Three private
+// copies of "where is the library" is how the tooling ends up measuring,
+// verifying, and executing three different files.
+import '../test/test_dylib.dart';
+
 const int _opsPerSample = 200;
 const int _samples = 5;
 
 void main() {
-  final dllPath = _resolveDylibPath();
+  final dllPath = resolveDylibPath();
   overrideDylib(DynamicLibrary.open(dllPath));
   print('cdylib: $dllPath');
   print('uniffi contract version: ${contractVersion()}');
@@ -151,17 +159,3 @@ void _report(String label, List<int> sampleMicros, int opsPerSample) {
       '($_samples samples × $opsPerSample ops)');
 }
 
-String _resolveDylibPath() {
-  final root = Directory.current.path;
-  // From repo root OR from the plugin dir — try both depths.
-  final candidates = <String>[
-    '$root/target/release/hidden_volume_ffi.dll',
-    '$root/target/debug/hidden_volume_ffi.dll',
-    '$root/../../../target/release/hidden_volume_ffi.dll',
-    '$root/../../../target/debug/hidden_volume_ffi.dll',
-  ];
-  for (final p in candidates) {
-    if (File(p).existsSync()) return p;
-  }
-  throw StateError('cdylib not found, searched: ${candidates.join(", ")}');
-}
