@@ -71,13 +71,13 @@ pub enum Error {
     /// parent-directory `fsync` that makes the directory entry survive a crash
     /// did not.
     ///
-    /// **The operation applied.** After [`Container::change_passwords`] this
-    /// means the new passwords ARE in effect and the old ones no longer open
-    /// the container — do not retry with the old password, and do not treat
-    /// this as "the rotation failed". What is unconfirmed is only whether the
-    /// directory entry survives a power loss; on ext4/xfs a crash in that
-    /// window can restore the OLD inode, and with it the old password or
-    /// spaces the rewrite removed.
+    /// **The operation applied.** After
+    /// [`crate::Container::change_passwords`] this means the new passwords ARE
+    /// in effect and the old ones no longer open the container — do not retry
+    /// with the old password, and do not treat this as "the rotation failed".
+    /// What is unconfirmed is only whether the directory entry survives a power
+    /// loss; on ext4/xfs a crash in that window can restore the OLD inode, and
+    /// with it the old password or spaces the rewrite removed.
     ///
     /// Rotation is exactly where that matters: someone who rotates because a
     /// password leaked is entitled to know the old one is dead, and silently

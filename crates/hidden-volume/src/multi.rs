@@ -155,9 +155,16 @@ impl MultiSpace {
     /// expected to call this once the unlock is complete and its timing no
     /// longer answers "did that password open something".
     ///
-    /// Idempotent and cheap when there is nothing to reclaim. `Err(ReadOnly)`
-    /// on a shared-lock host is expected and not fatal — the caller may ignore
-    /// it, exactly as [`Self::finalize_open`] does.
+    /// Idempotent and cheap when there is nothing to reclaim.
+    ///
+    /// On a read-only (shared-lock) host it returns `Ok(())` having done
+    /// nothing. [`Space::vacuum_orphans`] is strict there and would answer
+    /// [`Error::ReadOnly`], but failing this call would break every host that
+    /// calls it unconditionally after an open, so the mode is checked first —
+    /// the same way the sequential open path suppresses its inline scrub. `Ok`
+    /// from this method therefore means "nothing is owed, or nothing could be
+    /// done", not "the scrub ran": forward secrecy is, intentionally, a
+    /// writer-only property.
     pub fn vacuum_hosted(&mut self, id: usize) -> Result<()> {
         if self.container.is_readonly() {
             return Ok(());
