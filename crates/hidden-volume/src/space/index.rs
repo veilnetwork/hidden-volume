@@ -82,6 +82,7 @@
 use byteorder::{ByteOrder, LittleEndian};
 
 use crate::chunk::format::PAYLOAD_CAP;
+use crate::redact::{Redacted, redacted_debug};
 use crate::{Error, Result};
 
 /// Namespace identifier inside a space.
@@ -267,16 +268,27 @@ const NODE_TYPE_INTERNAL: u8 = 1;
 const HEADER_LEN: usize = 1 + 1 + 2; // node_type + namespace + count
 
 /// One pointer from an internal node to a child (leaf or another internal).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `first_key` is a copy of a user key, so it is [`Redacted`] — see the
+/// [`crate::redact`] module docs for the two rules that keep it out of
+/// `{:?}` and out of the heap past this node's lifetime (audit HV-01,
+/// HV-07).
+#[derive(Clone, PartialEq, Eq)]
 pub struct ChildPointer {
     /// First key in the child subtree (used for binary search).
-    pub first_key: Vec<u8>,
+    pub first_key: Redacted<Vec<u8>>,
     /// Slot index of the child IndexNode chunk.
     pub child_slot: u64,
     /// BLAKE3 hash of the child IndexNode's plaintext payload —
     /// the Merkle link parent → child.
     pub child_hash: [u8; 32],
 }
+
+redacted_debug!(ChildPointer {
+    first_key,
+    child_slot,
+    child_hash
+});
 
 /// A leaf node — terminal `(key, value)` storage.
 ///
@@ -285,25 +297,35 @@ pub struct ChildPointer {
 /// (audit B5, 2026-05-02: a previous `impl Default for Namespace`
 /// returned `RESERVED` which `Tx::put` / `Tx::delete` /
 /// `Tx::append_log` reject — pure footgun).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `entries` is the decrypted `(key, value)` payload of a leaf — the single
+/// densest concentration of user plaintext in the format — so it is
+/// [`Redacted`]. See [`crate::redact`] (audit HV-01, HV-07).
+#[derive(Clone, PartialEq, Eq)]
 pub struct LeafNode {
     /// Namespace this leaf belongs to.
     pub namespace: Namespace,
     /// Entries in this leaf, sorted ascending by key.
-    pub entries: Vec<(Vec<u8>, Vec<u8>)>,
+    pub entries: Redacted<Vec<(Vec<u8>, Vec<u8>)>>,
 }
+
+redacted_debug!(LeafNode { namespace, entries });
 
 /// An internal node — index over children.
 ///
 /// Construct via [`InternalNode::new`]; same rationale as `LeafNode`
 /// for not deriving `Default`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct InternalNode {
     /// Namespace this internal node belongs to.
     pub namespace: Namespace,
     /// Child pointers, ordered by `first_key`.
     pub children: Vec<ChildPointer>,
 }
+
+redacted_debug!(InternalNode {
+    namespace,
+    children
+});
 
 /// IndexNode in the chunk format. Either a [`LeafNode`] or [`InternalNode`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -344,7 +366,7 @@ impl LeafNode {
     pub fn new(namespace: Namespace) -> Self {
         Self {
             namespace,
-            entries: Vec::new(),
+            entries: Redacted::default(),
         }
     }
 
@@ -353,7 +375,7 @@ impl LeafNode {
     #[must_use]
     pub fn encoded_len(&self) -> usize {
         let mut n = HEADER_LEN;
-        for (k, v) in &self.entries {
+        for (k, v) in self.entries.iter() {
             n += 2 + k.len() + 4 + v.len();
         }
         n
@@ -386,7 +408,7 @@ impl LeafNode {
         buf.push(NODE_TYPE_LEAF);
         buf.push(self.namespace.0);
         buf.extend_from_slice(&(self.entries.len() as u16).to_le_bytes());
-        for (k, v) in &self.entries {
+        for (k, v) in self.entries.iter() {
             if k.is_empty() || k.len() > MAX_KEY_LEN {
                 return Err(Error::Malformed("invalid key length"));
             }
@@ -475,7 +497,10 @@ impl LeafNode {
                 return Err(Error::Malformed("leaf entries not sorted"));
             }
         }
-        Ok(Self { namespace, entries })
+        Ok(Self {
+            namespace,
+            entries: Redacted::new(entries),
+        })
     }
 
     /// Look up `key` in this leaf, returning a slice into the stored
@@ -540,7 +565,7 @@ impl InternalNode {
         debug_assert!(
             self.children
                 .windows(2)
-                .all(|w| w[0].first_key < w[1].first_key),
+                .all(|w| *w[0].first_key < *w[1].first_key),
             "InternalNode::encode requires children sorted ascending by first_key"
         );
         let mut buf = Vec::with_capacity(total);
@@ -607,7 +632,7 @@ impl InternalNode {
             child_hash.copy_from_slice(&bytes[off..off + 32]);
             off += 32;
             children.push(ChildPointer {
-                first_key,
+                first_key: Redacted::new(first_key),
                 child_slot,
                 child_hash,
             });
@@ -629,7 +654,7 @@ impl InternalNode {
                     "internal decode: windows(2) returned non-pair slice",
                 ));
             };
-            if a.first_key >= b.first_key {
+            if *a.first_key >= *b.first_key {
                 return Err(Error::Malformed("internal children not sorted"));
             }
         }

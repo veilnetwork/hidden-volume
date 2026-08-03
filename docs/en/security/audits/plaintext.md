@@ -63,12 +63,56 @@ host-app's UI buffers, IME caches, etc., where user data also lives).
 | Site | Buffer | Reason for deferral |
 |---|---|---|
 | `Plaintext.payload: Vec<u8>` | decoded chunk payload | Fields used pervasively across `space/`, `tx/`, `chunk/`; would force `Zeroizing<Vec<u8>>` through `Plaintext::decode` and break test assertions on equality with raw `Vec<u8>`. The full pre-decode buffer (the `aead.open` return) IS wrapped, so the broader plaintext is already scrubbed; only this `to_vec()`-copied subrange escapes. |
-| `Tx::pending_kv` value bytes | KV values held until commit | Wrapping `Vec<u8>` in user-facing `Tx::put(key, value)` API would propagate to every caller. |
-| `Tx::pending_log` payloads | log payloads held until commit | Same. |
 | `Space::get(...) -> Vec<u8>` return | KV value handed to caller | Library can't dictate the host-app's storage lifetime. |
 | `Space::list / iter_log / read_log` returns | KV / log records handed to caller | Same. |
-| `IndexNode::Leaf.entries: Vec<(Vec<u8>, Vec<u8>)>` | decoded leaf entries | Internal to the library but `Vec` of `Vec`s; would need a `SecretVec` newtype to wrap consistently — invasive across `space/index.rs`, `tx/`, `space/mod.rs`. v0.5.x candidate. |
 | `log::decode_batch` returned `Vec<(u64, Vec<u8>)>` per-record `payload` | per-record plaintext copied out of the wrapped `raw` buffer | Same as `Plaintext.payload` — copied subrange escapes. |
+
+## Internal copies — closed by `Redacted<T>` (audit HV-01 / HV-07)
+
+The three deferrals above (`Tx::pending_kv`, `Tx::pending_log`,
+`IndexNode::Leaf.entries`) are closed. The `SecretVec` newtype this
+document called a v0.5.x candidate now exists as
+[`redact::Redacted<T>`](../../../../crates/hidden-volume/src/redact.rs): it
+`Deref`s to `T`, so read and mutate call sites are unchanged, and it does
+two things on top.
+
+| Field | Now | Scrubbed when |
+|---|---|---|
+| `Tx::pending_kv` | `Redacted<PendingKv>` | `commit_tx` returns — success **and** error paths, since the wrapper is moved into it |
+| `Tx::pending_log` | `Redacted<PendingLog>` | same, plus per-namespace re-wrapping inside the Phase-0 drain |
+| `LeafNode::entries` | `Redacted<Vec<(Vec<u8>, Vec<u8>)>>` | the decoded node drops |
+| `ChildPointer::first_key` | `Redacted<Vec<u8>>` | same |
+| `SpaceState::roots_payload_cache` | `Option<(u64, Redacted<Vec<u8>>)>` | the commit era ends (was `Zeroizing`, which scrubs but does not redact) |
+
+**What this promises, exactly.** The crate's *internal* copies of a
+decrypted key, value or payload do not outlive the operation that built
+them. It is **not** a claim that a plaintext is gone from the process: a
+`Vec` that grew during construction left an earlier allocation behind, the
+value the API *returns* is owned by the caller, and across UniFFI it is
+copied into a foreign heap this crate never sees. Those are still the
+host-app's, and the `mlock` + hardened-allocator recommendation below is
+still the answer for them.
+
+## Formatting is a second leak class (audit HV-01)
+
+`Zeroizing` scrubs on drop and says nothing about `{:?}` — the upstream
+crate *derives* `Debug` on it, so a `Zeroizing<Vec<u8>>` prints its bytes
+verbatim. Redaction is therefore a separate mechanism, not a side effect of
+zeroizing, and it is enforced by two rules:
+
+1. A plaintext-bearing field is typed `Redacted<T>`, whose `Debug` prints
+   `{ items, bytes }` and never content. Safe under `#[derive(Debug)]`,
+   safe printed on its own, safe if a later author pulls it into a
+   `debug_struct`.
+2. Its carrier's `Debug` is written by the `redacted_debug!` allow-list
+   macro and ends in `finish_non_exhaustive()`, so a field added later is
+   not printed at all until someone names it.
+
+The first rule alone is what the previous pass tried and missed with: it
+redacted `KvOp`, `WriteOp`, `LogEntry` and `Plaintext`, and left `Tx`,
+`LeafNode`, `ChildPointer`, `SpaceState` and `Space` deriving `Debug` over
+them. The second rule is what makes a *newly added* field safe without
+anyone remembering to act. `tests/debug_redaction.rs` is the sentinel.
 
 **Recommendation for host-apps that need stronger guarantees.** Run
 the entire process under `mlock` + private memory mapping + a
@@ -119,6 +163,7 @@ audit history.
 
 | Date | Change | Reviewer |
 |---|---|---|
+| audit HV-01 / HV-07 | Closed the `Tx::pending_kv` / `Tx::pending_log` / `LeafNode::entries` deferrals with `redact::Redacted<T>`, extended it to `ChildPointer::first_key` and `SpaceState::roots_payload_cache`, and separated redaction from zeroizing (`Zeroizing` derives `Debug`). Added `tests/debug_redaction.rs`. | Self-audit |
 | Initial v0.5 | First pass. Wrapped 7 transient plaintext sites (1 in `aead`, 1 in `space::append_chunk`, 2 in `space::log`, 3 in `space::write_tree_for_namespace`). Documented 7 user-owned sites as deferred with cross-ref to [`memory.md`](memory.md) §C. Added `tests/plaintext_hygiene.rs` for type-level regression checks. | Self-audit |
 
 ## Cross-references
@@ -129,3 +174,4 @@ audit history.
 - `docs/en/security/audits/fsync.md` — fsync ordering pass (companion audit)
 - `tests/memory_hygiene.rs` — type-level regression for derived keys
 - `tests/plaintext_hygiene.rs` — type-level regression for plaintext wraps
+- `tests/debug_redaction.rs` — sentinel for the `Debug`-redaction contract

@@ -123,6 +123,7 @@
 //! - [`space`]     — per-space keys, superblock, B+ tree index, DataBatch log, vacuum / scrub, integrity walk (DESIGN §4–§7). The v0.1 `journal` chunk was superseded by vacuum + scrub-old-on-success (TASKS.md v0.2 SKIPPED).
 //! - [`tx`]        — transactional KV writes within a space.
 //! - [`padding`]   — garbage/dummy-write policies (DESIGN §8).
+//! - [`redact`]    — `Redacted<T>`, the wrapper every plaintext-bearing struct field wears (audit HV-01 / HV-07).
 //!
 //! Discovery scan and recovery (DESIGN §5, §7) live in the
 //! crate-private `open` module; not part of the public API.
@@ -162,6 +163,7 @@ pub mod error;
 pub mod multi;
 pub(crate) mod open;
 pub mod padding;
+pub mod redact;
 pub mod space;
 pub mod tx;
 

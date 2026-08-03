@@ -29,6 +29,9 @@ pub mod commit;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use zeroize::Zeroize;
+
+use crate::redact::{Redacted, Secret, SecretShape, redacted_debug};
 use crate::space::Space;
 use crate::space::index::Namespace;
 use crate::space::log::{MAX_LOG_PAYLOAD_LEN, MAX_RECORDS_PER_BATCH};
@@ -41,6 +44,67 @@ pub use commit::{CommitPayload, IndexRoot, MAX_NAMESPACES_PER_TX, NamespaceKind}
 pub(crate) enum KvOp {
     Put { key: Vec<u8>, value: Vec<u8> },
     Delete { key: Vec<u8> },
+}
+
+/// A transaction's pending KV ops: `namespace_byte → ordered ops`.
+pub(crate) type PendingKv = BTreeMap<u8, Vec<KvOp>>;
+
+/// A transaction's pending log appends: `namespace_byte → ordered
+/// (log_id, payload) records`.
+pub(crate) type PendingLog = BTreeMap<u8, Vec<(u64, Vec<u8>)>>;
+
+/// The pending KV ops of a whole transaction, `namespace → ops`.
+///
+/// This is the shape `Tx::pending_kv` stores, so wrapping that field in
+/// [`Redacted`] needs it (audit HV-01, HV-07).
+impl Secret for PendingKv {
+    fn secret_shape(&self) -> SecretShape {
+        SecretShape {
+            items: self.values().map(Vec::len).sum(),
+            bytes: self
+                .values()
+                .flat_map(|ops| ops.iter())
+                .map(|op| match op {
+                    KvOp::Put { key, value } => key.len() + value.len(),
+                    KvOp::Delete { key } => key.len(),
+                })
+                .sum(),
+        }
+    }
+
+    fn scrub_secret(&mut self) {
+        for ops in self.values_mut() {
+            for op in ops.iter_mut() {
+                match op {
+                    KvOp::Put { key, value } => {
+                        key.zeroize();
+                        value.zeroize();
+                    },
+                    KvOp::Delete { key } => key.zeroize(),
+                }
+            }
+            ops.clear();
+        }
+        self.clear();
+    }
+}
+
+/// One namespace's pending log appends, drained out of `Tx::pending_log`
+/// by `commit_tx` and re-wrapped there so the payloads still get scrubbed.
+impl Secret for Vec<(u64, Vec<u8>)> {
+    fn secret_shape(&self) -> SecretShape {
+        SecretShape {
+            items: self.len(),
+            bytes: self.iter().map(|(_, payload)| payload.len()).sum(),
+        }
+    }
+
+    fn scrub_secret(&mut self) {
+        for (_, payload) in self.iter_mut() {
+            payload.zeroize();
+        }
+        self.clear();
+    }
 }
 
 impl core::fmt::Debug for KvOp {
@@ -70,26 +134,38 @@ impl core::fmt::Debug for KvOp {
 /// Drop-without-commit discards the pending ops with no on-disk
 /// effect. Single Tx per Space at a time (enforced by Rust's borrow
 /// checker via the `&mut Space<'f>` field).
-#[derive(Debug)]
 pub struct Tx<'s, 'f> {
     space: &'s mut Space<'f>,
     /// `namespace_byte → ordered KV ops`. Insertion order preserved;
     /// last write wins for repeated keys at apply time.
-    pub(crate) pending_kv: BTreeMap<u8, Vec<KvOp>>,
+    pub(crate) pending_kv: Redacted<PendingKv>,
     /// `namespace_byte → ordered (log_id, payload) appends`. Each
     /// non-empty entry produces one `DataBatch` chunk on commit.
-    pub(crate) pending_log: BTreeMap<u8, Vec<(u64, Vec<u8>)>>,
+    pub(crate) pending_log: Redacted<PendingLog>,
     /// Namespaces whose `pending_kv` entries came from [`Self::delete_log`].
     /// Keeps public KV mutations from being mixed with Log-index deletes.
     pending_log_deletes: BTreeSet<u8>,
 }
 
+// A transaction is the largest single pile of user plaintext this crate
+// ever holds — every key, value and log payload the caller queued. `Tx` is
+// also a public type an integrator can hold, so it is the most likely thing
+// to end up in a `{:?}`. Both buffers are [`Redacted`]; `space` is omitted
+// because a `Space` prints nothing useful here, and the whole impl is
+// allow-list shaped so a field added later prints nothing at all until
+// someone names it (audit HV-01).
+redacted_debug!(Tx<'s, 'f> {
+    pending_kv,
+    pending_log,
+    pending_log_deletes
+});
+
 impl<'s, 'f> Tx<'s, 'f> {
     pub(crate) fn new(space: &'s mut Space<'f>) -> Self {
         Self {
             space,
-            pending_kv: BTreeMap::new(),
-            pending_log: BTreeMap::new(),
+            pending_kv: Redacted::default(),
+            pending_log: Redacted::default(),
             pending_log_deletes: BTreeSet::new(),
         }
     }
