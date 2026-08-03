@@ -1499,6 +1499,13 @@ where
             // 20).
             HvError::Cancelled
         },
+        hidden_volume_rt::BlockingFailure::NotStarted => {
+            // Stronger than the above: the closure short-circuited
+            // before touching the container, so the foreign caller
+            // can retry without first reconciling on-disk state
+            // (audit HV-11).
+            HvError::Cancelled
+        },
     })
     .await
 }

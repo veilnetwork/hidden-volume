@@ -14,6 +14,34 @@ format.
 
 ### Security — audit follow-through
 
+- **An abandoned async call no longer disappears without a verdict (HV-11).**
+  Dropping the future of `AsyncContainer::run` / `AsyncSpace::run` detached the
+  `spawn_blocking` task: the closure ran to completion, its commit landed, and
+  the caller — who saw only `Elapsed` — had no way to find out. Rust cannot
+  interrupt a running blocking closure, so the contract is now split along the
+  line where cancellation stops being possible, instead of pretending it never
+  ends. Before dispatch, abandonment is real: the new `OpLedger` admits one
+  operation at a time per handle, so a caller that walks away while queued is
+  never dispatched, and a closure that does reach a pool thread re-checks its
+  cancel token as its first act — either way it reports `NeverStarted`, which
+  is a proof of no effect. After dispatch, the drop fires the caller's
+  `CancelToken` (the sync core's open-scan / repack / integrity checkpoints
+  honour it) but the operation is reported as `Running` until it settles, then
+  as `Succeeded` / `Failed` / `Lost`. New `abandoned_operations()`,
+  `clear_settled_operations()` and `forgotten_abandonments()` on both async
+  handles expose the ledger, which is capped at 128 records with the eviction
+  count surfaced rather than swallowed. The blocking pool stops filling with
+  work nobody awaits: queued callers wait as async tasks, not as parked pool
+  threads.
+
+  **Breaking:** `hidden-volume-async` — `AsyncContainer` and `AsyncSpace` carry
+  a new private field, so struct-literal construction outside the crate is gone
+  (there was none); calls that used to be dispatched-and-forgotten after a drop
+  may now not run at all, which is the point. `hidden-volume-rt` —
+  `BlockingFailure` gains a `NotStarted` variant, so exhaustive matches on it
+  must be extended; it maps to `Error::Cancelled` / `HvError::Cancelled`, never
+  to `Internal`. No on-disk format change; no FFI ABI change.
+
 - **The `iter_log_*` decoded-batch cache is bounded in bytes and entries.**
   `MAX_DECODED_BATCH_LEN` caps **one** batch at ≈ 8.4 MiB; the cache kept one
   decoded batch per distinct `batch_slot` on the page, with no aggregate bound.
