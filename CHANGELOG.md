@@ -339,6 +339,24 @@ format.
   side is the caller's to clear, and `space_keys` now says so instead of leaving
   it implied.
 
+### Fixed — report5 follow-through
+
+- **A container can be addressed by a bare file name again.** `Path::parent()`
+  answers `Some("")` — not `None` — for `"store.hv"`, so the
+  `parent().unwrap_or(Path::new("."))` in both parent-directory fsyncs never
+  fired and the fsync opened `""`, i.e. ENOENT. `"./store.hv"` worked;
+  `"store.hv"` did not. The damage was not a skipped fsync:
+  `Container::create` returned `Err(Io(NotFound))` **and** its `UnlinkOnDrop`
+  guard then removed the container it had already written, so the caller was
+  left with neither a handle nor a file; `change_passwords` and
+  `compact_known` returned `RenameVisibleDurabilityUncertain`, which on a
+  rotation reads as a durability caveat but meant the password had not been
+  changed at all — the caller who had just rotated a leaked password was told
+  something far milder than the truth. Regression from the HV-16 hardening
+  that introduced the strict create-side fsync. The empty-parent case now
+  lives in one `parent_dir_for` helper that all three call sites share, rather
+  than in a condition each of them has to remember.
+
 ## [1.2.3] — 2026-07-29
 
 Security and correctness release from a read-only audit pass. The on-disk
