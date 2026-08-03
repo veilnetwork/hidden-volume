@@ -11,6 +11,7 @@ pub(crate) mod checkpoint;
 mod commit;
 mod integrity;
 mod log_iter;
+mod tree;
 mod vacuum;
 mod walk;
 
@@ -30,6 +31,22 @@ use crate::{CHUNK_SIZE, Error, NONCE_LEN, Result};
 use self::index::{IndexNode, Namespace};
 use self::superblock::{NO_RECORD, Superblock};
 use self::walk::TreeWalk;
+
+#[cfg(test)]
+thread_local! {
+    /// Chunks this thread has AEAD-opened through [`Space`], ever.
+    ///
+    /// The cost of a commit is the point of audit HV-16, and wall time
+    /// is the wrong way to assert it — it is fsync-bound, machine-
+    /// dependent and flaky under a loaded test runner. Chunk reads are
+    /// the thing that used to scale with the namespace, and counting
+    /// them is exact.
+    ///
+    /// Thread-local rather than a global counter: integration and unit
+    /// tests run concurrently in one process, and a shared `AtomicU64`
+    /// would have each of them measuring the others' work.
+    pub(crate) static CHUNK_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 /// Aggregate statistics for a [`Space`] — the structured form host-apps
 /// typically render in a "Storage" / "About this profile" UI page.
@@ -134,7 +151,8 @@ pub struct IntegrityReport {
     /// to add. Not capped by the format — a namespace grows a level
     /// whenever the level below outgrows one chunk — but bounded in
     /// practice by how many chunks a container may hold at all
-    /// ([`crate::MAX_OPEN_SCAN_CHUNKS`]): 8 levels at 64 GiB. See
+    /// ([`crate::MAX_OPEN_SCAN_CHUNKS`]): 13 levels at 64 GiB, since
+    /// audit HV-16 recomputed the fanout that bound derives from. See
     /// DESIGN §11.4.
     pub max_depth: u8,
     /// Total `DataBatch` chunks visited while walking log namespaces.
@@ -724,32 +742,8 @@ impl<'f> Space<'f> {
         namespace: Namespace,
         out: &mut Vec<(Vec<u8>, Vec<u8>)>,
     ) -> Result<()> {
-        self.collect_leaves_and_links(slot, namespace, out, &mut None)
-    }
-
-    /// [`Self::collect_leaves`], additionally recording every Merkle
-    /// link the walk passes through into `links` as
-    /// `child_hash -> child_slot`.
-    ///
-    /// This is how `commit_tx` learns which index chunks it may point
-    /// at instead of writing again (audit HV-14). The hashes are the
-    /// ones the parents already store, so the map costs no extra reads
-    /// and no hashing — the walk was going to read every one of these
-    /// nodes anyway to flatten the namespace — and it covers every
-    /// level of the tree, not just the row under the root.
-    ///
-    /// Only chunks this walk actually reached are recorded, so an entry
-    /// in the map is by construction a chunk the space owns, reachable
-    /// in this namespace, at this commit.
-    pub(super) fn collect_leaves_and_links(
-        &mut self,
-        slot: u64,
-        namespace: Namespace,
-        out: &mut Vec<(Vec<u8>, Vec<u8>)>,
-        links: &mut Option<&mut std::collections::HashMap<[u8; 32], u64>>,
-    ) -> Result<()> {
         let mut walk = self.new_tree_walk();
-        self.collect_leaves_at(slot, namespace, 0, &mut walk, out, links)
+        self.collect_leaves_at(slot, namespace, 0, &mut walk, out)
     }
 
     fn collect_leaves_at(
@@ -759,7 +753,6 @@ impl<'f> Space<'f> {
         depth: u8,
         walk: &mut TreeWalk,
         out: &mut Vec<(Vec<u8>, Vec<u8>)>,
-        links: &mut Option<&mut std::collections::HashMap<[u8; 32], u64>>,
     ) -> Result<()> {
         walk.admit(slot, depth)?;
         let node = self.read_index_node_at_expected(slot, namespace)?;
@@ -769,13 +762,8 @@ impl<'f> Space<'f> {
                 Ok(())
             },
             IndexNode::Internal(i) => {
-                if let Some(links) = links.as_deref_mut() {
-                    for c in &i.children {
-                        links.insert(c.child_hash, c.child_slot);
-                    }
-                }
                 for c in i.children {
-                    self.collect_leaves_at(c.child_slot, namespace, depth + 1, walk, out, links)?;
+                    self.collect_leaves_at(c.child_slot, namespace, depth + 1, walk, out)?;
                 }
                 Ok(())
             },
@@ -991,6 +979,8 @@ impl<'f> Space<'f> {
     /// to own = corruption"); `commit.rs` / `log_iter.rs` /
     /// `vacuum.rs` propagate as-is.
     pub(super) fn read_owned_chunk(&mut self, slot: u64) -> Result<Plaintext> {
+        #[cfg(test)]
+        CHUNK_READS.with(|n| n.set(n.get() + 1));
         let chunk = self.file.read_slot(slot)?;
         let key = derive_chunk_key(
             &self.state.keys.aead_root,

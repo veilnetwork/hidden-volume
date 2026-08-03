@@ -52,8 +52,9 @@ fn chunks(path: &std::path::Path) -> u64 {
 }
 
 /// Seed `n` entries with `value_len`-byte values, then report how many
-/// chunks a single-key overwrite appends.
-fn chunks_per_one_key_edit(n: usize, value_len: usize) -> u64 {
+/// chunks a single-key overwrite appends, and how many levels the tree
+/// has.
+fn chunks_per_one_key_edit(n: usize, value_len: usize) -> (u64, u64) {
     let path = scratch();
     let cost = {
         let mut c = Container::create_with_options(&path, opts()).unwrap();
@@ -85,26 +86,47 @@ fn chunks_per_one_key_edit(n: usize, value_len: usize) -> u64 {
         "the edited entry must survive the reopen"
     );
     assert_eq!(s.count(Namespace::SETTINGS).unwrap(), n);
-    s.verify_integrity().unwrap();
+    let levels = u64::from(s.verify_integrity().unwrap().max_depth);
     drop(s);
     drop(c);
     let _ = std::fs::remove_file(&path);
-    cost
+    (cost, levels)
 }
 
-/// The cost of editing one key must not depend on how many other keys
-/// share the namespace. This is the whole finding.
+/// The cost of editing one key must be the path to it and nothing else.
+/// This is the whole finding.
+///
+/// Since HV-16 the number is exact rather than merely flat. Node
+/// boundaries are decided from each entry's key and encoded size, and
+/// an overwrite with a same-length value changes neither — so every
+/// boundary in the namespace stays where it was, exactly one leaf
+/// differs, and exactly one node per level above it does. `2 + levels`,
+/// with the 2 being the Commit chunk and its Superblock replica.
 #[test]
-fn editing_one_key_costs_the_same_in_a_small_and_a_large_namespace() {
-    let small = chunks_per_one_key_edit(250, 64);
-    let large = chunks_per_one_key_edit(4000, 64);
+fn editing_one_key_costs_the_path_to_it_and_nothing_else() {
+    let (small, small_levels) = chunks_per_one_key_edit(250, 64);
+    let (large, large_levels) = chunks_per_one_key_edit(4000, 64);
+
     assert_eq!(
-        small, large,
-        "a 16x larger namespace must not make a one-key edit cost more \
-         (small={small} chunks, large={large} chunks)"
+        small,
+        2 + small_levels,
+        "a one-key edit must write the Commit chunk, a Superblock \
+         replica and one index node per level — nothing else \
+         (levels={small_levels})"
     );
-    // Sanity floor: an edit does write *something* — the changed leaf,
-    // its root, the Commit chunk and a Superblock replica.
+    assert_eq!(
+        large,
+        2 + large_levels,
+        "...and that must still hold 16x further up (levels={large_levels})"
+    );
+    // The point of the finding: 16x the namespace does not buy 16x the
+    // cost. What it may buy is one more level, and only that.
+    assert!(
+        large - small <= 1,
+        "a 16x larger namespace may cost at most one more level \
+         (small={small} chunks at {small_levels} levels, \
+         large={large} at {large_levels})"
+    );
     assert!(
         (2..=6).contains(&large),
         "a one-key edit should cost a handful of chunks, got {large}"

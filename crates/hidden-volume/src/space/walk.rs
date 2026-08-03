@@ -55,14 +55,28 @@
 //! namespace cannot be deeper than the chunks it is made of. Each
 //! level of a well-formed tree is at least
 //! [`super::index::MIN_FULL_INTERNAL_FANOUT`] times wider than the one
-//! above it (the writer packs greedily and only seals a node when the
-//! next child does not fit), so a tree of depth `d` costs at least
+//! above it, so a tree of depth `d` costs at least
 //! `1 + Σₖ₌₁..d (fanout^(k-1) + 1)` chunks. Inverting that against the
 //! chunks a space owns gives the deepest tree that space *could* hold —
 //! honest data is never refused, and an attacker gains nothing, because
 //! reaching depth `d` costs them the same chunks it would cost anyone.
 //! At the largest container the format allows (`MAX_OPEN_SCAN_CHUNKS`,
-//! 16 M chunks / 64 GiB) that bound is 7.
+//! 16 M chunks / 64 GiB) that bound is 12.
+//!
+//! **The fanout is a floor the writer enforces, not a statistic
+//! (audit HV-16).** Node boundaries are content-defined: an internal
+//! node ends where one of its children's boundary hashes says so, which
+//! is what makes a tree's shape independent of the order it was built
+//! in. That gives ~40–70 children per node on average and *no* lower
+//! bound on its own — a key-holder choosing keys whose hashes all fire
+//! would get one-child nodes and arbitrary depth from a handful of
+//! chunks. So the writer refuses to honour a boundary before
+//! [`super::index::MIN_INTERNAL_CHILDREN`] children
+//! ([`super::Space::update_tree`]'s sealer, checked again on every
+//! seal), and *that* floor — not the average — is what the arithmetic
+//! above uses. Trading the old greedy packing's fanout of 12 for a
+//! guaranteed 4 moves the bound from 7 descents to 12; both are far
+//! below what the recursion or the budget care about.
 //!
 //! ## Scope
 //!
@@ -82,18 +96,18 @@ use crate::{Error, Result};
 ///
 /// Counts the minimum chunks each additional level costs and stops at
 /// the last level that still fits. With
-/// [`super::index::MIN_FULL_INTERNAL_FANOUT`] = 12 and the format's
-/// 16 M-chunk ceiling the sequence is 3, 16, 161, 1 890, 22 627,
-/// 271 460, 3 257 445 chunks for depths 1..7, so 7 is the deepest tree
-/// the format can express at all.
+/// [`super::index::MIN_FULL_INTERNAL_FANOUT`] = 4 and the format's
+/// 16 M-chunk ceiling the sequence is 3, 8, 25, 90, 347, 1 372, 5 469,
+/// 21 854, 87 391, 349 536, 1 398 113, 5 592 418 chunks for depths
+/// 1..12, so 12 is the deepest tree the format can express at all.
 ///
 /// **Why the minimum is what it is.** Level 1 holds ≥ 2 nodes — with
 /// one node the writer would have stopped there and made *it* the
 /// root. Level `k+1` holds ≥ `fanout × (mₖ - 1) + 1` nodes, since every
-/// node of level `k` but the last is full. By induction level `k` holds
-/// at least `fanout^(k-1) + 1` nodes, and the tree at least
-/// `1 + Σₖ₌₁..d (fanout^(k-1) + 1)` of them — every one a distinct
-/// chunk the space owns.
+/// node of level `k` but the last holds at least `fanout` children. By
+/// induction level `k` holds at least `fanout^(k-1) + 1` nodes, and the
+/// tree at least `1 + Σₖ₌₁..d (fanout^(k-1) + 1)` of them — every one a
+/// distinct chunk the space owns.
 ///
 /// Saturating throughout: `budget` is a `usize` read off a container,
 /// and the running products exceed `u64` well before the loop would
@@ -256,15 +270,20 @@ mod tests {
     #[test]
     fn the_depth_bound_matches_the_minimum_tree_that_fits() {
         // depth -> minimum chunks, per `1 + Σ (fanout^(k-1) + 1)` with
-        // MIN_FULL_INTERNAL_FANOUT = 12.
-        let steps: [(u8, usize); 7] = [
+        // MIN_FULL_INTERNAL_FANOUT = 4.
+        let steps: [(u8, usize); 12] = [
             (1, 3),
-            (2, 16),
-            (3, 161),
-            (4, 1_890),
-            (5, 22_627),
-            (6, 271_460),
-            (7, 3_257_445),
+            (2, 8),
+            (3, 25),
+            (4, 90),
+            (5, 347),
+            (6, 1_372),
+            (7, 5_469),
+            (8, 21_854),
+            (9, 87_391),
+            (10, 349_536),
+            (11, 1_398_113),
+            (12, 5_592_418),
         ];
         assert_eq!(max_depth_for_budget(0), 0);
         assert_eq!(max_depth_for_budget(1), 0);
@@ -283,10 +302,11 @@ mod tests {
         // The largest container the format permits.
         assert_eq!(
             max_depth_for_budget(crate::MAX_OPEN_SCAN_CHUNKS as usize),
-            7,
-            "64 GiB of container is a depth-7 tree at the very most"
+            12,
+            "64 GiB of container is a depth-12 tree at the very most"
         );
-        // And no input can make it unbounded.
-        assert!(max_depth_for_budget(usize::MAX) < 30);
+        // And no input can make it unbounded: even a budget no container
+        // could reach stays inside what the recursion can pay for.
+        assert!(max_depth_for_budget(usize::MAX) < 40);
     }
 }

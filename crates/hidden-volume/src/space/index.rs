@@ -23,13 +23,12 @@
 //! ```
 //!
 //! Small namespaces (≤ ~100 entries depending on value sizes) use a
-//! single Leaf node — no overhead. When a Leaf overflows on encode,
-//! the entries are packed into a row of Leaves and an Internal node is
-//! emitted above them. If that row does not fit in one Internal node
-//! either, it is packed into a row of Internal nodes and another level
-//! goes on top — repeated until one node covers the whole level. There
-//! is no depth limit in the format: a namespace grows until the
-//! container itself hits [`crate::MAX_OPEN_SCAN_CHUNKS`]
+//! single Leaf node — no overhead. Larger ones are cut into a row of
+//! Leaves with an Internal node above them; if that row does not fit in
+//! one Internal node either, it is cut into a row of Internal nodes and
+//! another level goes on top — repeated until one node covers the whole
+//! level. There is no depth limit in the format: a namespace grows
+//! until the container itself hits [`crate::MAX_OPEN_SCAN_CHUNKS`]
 //! (`Error::ContainerTooLarge`).
 //!
 //! Internal nodes hold one entry per child: `(first_key, child_slot,
@@ -39,6 +38,23 @@
 //! reason honest depth stays small even for very large namespaces (see
 //! `MIN_FULL_INTERNAL_FANOUT` and the traversal guard in
 //! `space::walk`, both internal).
+//!
+//! ## Where the cuts fall (audit HV-16)
+//!
+//! A level is not packed greedily. Each item carries a boundary hash
+//! and ends its node when that hash says so (`boundary_hash` /
+//! `is_boundary`, both internal), so **the shape of a tree is a
+//! function of its key-value set and of nothing else** — not of the
+//! order the entries arrived in, not of how many transactions built
+//! them. That is what lets a commit rewrite
+//! only the neighbourhood of an edit (`space::tree`) instead of
+//! everything to its right, and it is also a deniability property: a
+//! history-dependent shape would let an observer holding two snapshots
+//! tell a namespace that was written at once from one that was edited
+//! into the same state.
+//!
+//! The price is fill: mean node utilisation is `K/(K+1)` ≈ 86 %
+//! against ~98 % for greedy packing.
 //!
 //! ## On-disk encoding
 //!
@@ -107,30 +123,143 @@ pub const MAX_VALUE_LEN: usize = 2048;
 /// a maximum-length key + `child_slot` (8) + `child_hash` (32).
 pub(crate) const MAX_CHILD_ENTRY_BYTES: usize = 2 + MAX_KEY_LEN + 8 + 32;
 
-/// Children a **full** internal node is guaranteed to hold.
+/// Children an internal node must hold before a content-defined
+/// boundary is honoured (the last node of a level is exempt — it is
+/// sealed by running out of children, not by the rule).
 ///
-/// The writer packs a level greedily and seals a node only when the
-/// next child no longer fits, so every node of a level except the last
-/// is full. A full node holding `c` children satisfies
-/// `HEADER_LEN + c × MAX_CHILD_ENTRY_BYTES ≥ encoded_len >
-/// PAYLOAD_CAP - MAX_CHILD_ENTRY_BYTES` (otherwise one more child
-/// would have fit), so
-/// `c > (PAYLOAD_CAP - HEADER_LEN) / MAX_CHILD_ENTRY_BYTES - 1`.
-/// Integer division rounds that down, which is the conservative
-/// direction for a *lower* bound.
+/// Without a floor the boundary rule is a *statistical* fanout, and a
+/// key-holder picking keys whose boundary hashes all fire would get a
+/// tree of one-child nodes: unbounded depth from a handful of chunks,
+/// and a level-growing loop in the writer that never narrows. The floor
+/// turns "wide on average" into "wide, guaranteed", which is what the
+/// readers' depth bound is derived from.
+///
+/// Four rather than a larger number because the floor is also the point
+/// where locality stops: a node that *must* hold four children cannot
+/// put a boundary anywhere in the first three, so an edit inside it
+/// shifts them. Four costs nothing in practice (an internal node holds
+/// 13 children at the maximum key length and ~79 at 9-byte keys) and
+/// bounds depth at 12 for the largest container the format allows.
+pub(crate) const MIN_INTERNAL_CHILDREN: usize = 4;
+
+/// Children a non-final internal node is **guaranteed** to hold.
+///
+/// Two rules can seal an internal node. A content-defined boundary is
+/// only honoured at [`MIN_INTERNAL_CHILDREN`] children or more. An
+/// overflow seal happens when the next child would not fit, so the node
+/// already holds more than `PAYLOAD_CAP - HEADER_LEN -
+/// MAX_CHILD_ENTRY_BYTES` bytes of children — at most
+/// `MAX_CHILD_ENTRY_BYTES` each, so at least
+/// `(PAYLOAD_CAP - HEADER_LEN) / MAX_CHILD_ENTRY_BYTES - 1` of them.
+/// The guarantee is the weaker of the two.
 ///
 /// This is what makes tree depth self-limiting: a level is at least
 /// this many times wider than the level above it, so depth grows
 /// logarithmically in the chunk count and a container can only be as
 /// deep as its size permits. [`crate::space::walk::max_depth_for_budget`]
 /// turns that into the readers' depth bound.
-pub(crate) const MIN_FULL_INTERNAL_FANOUT: usize =
-    (PAYLOAD_CAP - HEADER_LEN) / MAX_CHILD_ENTRY_BYTES - 1;
+pub(crate) const MIN_FULL_INTERNAL_FANOUT: usize = {
+    let overflow_floor = (PAYLOAD_CAP - HEADER_LEN) / MAX_CHILD_ENTRY_BYTES - 1;
+    if overflow_floor < MIN_INTERNAL_CHILDREN {
+        overflow_floor
+    } else {
+        MIN_INTERNAL_CHILDREN
+    }
+};
 
 // A fanout of 1 would mean a level need not be wider than the one
 // above it, i.e. depth would not be bounded by the chunk count at all
 // — and the writer's level-growing loop would not terminate.
 const _: () = assert!(MIN_FULL_INTERNAL_FANOUT >= 2);
+
+/// Domain separator for [`boundary_hash`]. Changing it reshapes every
+/// tree in the format.
+const BOUNDARY_DOMAIN: &[u8] = b"hidden-volume/index-boundary/v1";
+
+/// Reciprocal of the boundary hazard — the `K` in
+/// "seal with probability `cost / (K × bytes still free)`".
+///
+/// The hazard reaches 1 exactly when nothing more fits, so a node is
+/// always sealed before it overflows, and the sealed-fill distribution
+/// is `P(fill > f) = ((PAYLOAD_CAP - f) / PAYLOAD_CAP)^(1/K)`. Mean
+/// utilisation is therefore `K / (K + 1)` — 6/7 ≈ 86 % at `K = 6`,
+/// against ~98 % for the greedy packing this replaces. That ~12 points
+/// is what buys boundaries that move only near an edit instead of
+/// everywhere to its right; see [`is_boundary`].
+const BOUNDARY_HAZARD_K: u128 = 6;
+
+/// 64 bits of BLAKE3 over `(domain, level, key)` — the coin a node
+/// boundary is decided on.
+///
+/// `level` (0 = leaves) is mixed in so a key that ends a leaf does not
+/// thereby also tend to end the internal node above it; each level gets
+/// an independent placement of boundaries over the same key space.
+///
+/// Levels are counted **from the leaves up**, so growing a namespace
+/// (which adds levels at the top) never renumbers an existing level and
+/// therefore never reshapes the part of the tree that did not change.
+pub(crate) fn boundary_hash(level: u8, key: &[u8]) -> u64 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(BOUNDARY_DOMAIN);
+    hasher.update(&[level]);
+    hasher.update(key);
+    let digest = hasher.finalize();
+    let mut head = [0u8; 8];
+    head.copy_from_slice(&digest.as_bytes()[..8]);
+    u64::from_le_bytes(head)
+}
+
+/// Does the item that brought a node to `fill` bytes end it?
+///
+/// `hash` is that item's [`boundary_hash`] and `cost` its encoded size.
+/// The node is sealed with probability `cost / (K × (PAYLOAD_CAP -
+/// fill))` — per *byte* of the item, so the answer does not depend on
+/// whether a level holds many small items or few large ones, and the
+/// mean node size comes out the same either way.
+///
+/// ## Why boundaries are decided by content and not by counting
+///
+/// Packing a level greedily left to right is deterministic too, so it
+/// also gives one shape per key set. What it does not give is
+/// *locality*: inserting one entry pushes the first leaf past capacity,
+/// which pushes one entry into the next leaf, and so on to the end of
+/// the namespace. Every node right of the edit changes, which is O(N)
+/// nodes to hash, encode and write per commit — measured at ~10 700
+/// changed leaves for one insert into a 10⁶-entry namespace.
+///
+/// Deciding the boundary from the item's own hash makes the split
+/// points a property of the keys. An insertion perturbs only the run it
+/// lands in; the next boundary is the same key it was before, and from
+/// there the packing re-synchronises exactly. Measured, the same insert
+/// changes 2.2 leaves at N = 10³ and 2.3 at N = 10⁶.
+///
+/// The alternative — a B+ tree that splits a full node in half in place
+/// — is history-dependent by construction: a namespace filled in one
+/// pass and the same namespace edited into existence produce different
+/// trees, hence different Merkle roots. In a container built for
+/// deniability that is an observable difference between "written at
+/// once" and "edited over time", and it would also break the
+/// content-keyed node reuse this crate relies on (audit HV-14).
+pub(crate) fn is_boundary(hash: u64, cost: usize, fill: usize) -> bool {
+    debug_assert!(fill <= PAYLOAD_CAP, "fill must never exceed the payload");
+    let remaining = PAYLOAD_CAP.saturating_sub(fill) as u128;
+    // hash / 2^64 < cost / (K * remaining)
+    (hash as u128) * remaining * BOUNDARY_HAZARD_K < (cost as u128) << 64
+}
+
+/// Bytes one `(key, value)` pair adds to a [`LeafNode`] encoding.
+pub(crate) fn leaf_entry_cost(key: &[u8], value: &[u8]) -> usize {
+    2 + key.len() + 4 + value.len()
+}
+
+/// Bytes one [`ChildPointer`] adds to an [`InternalNode`] encoding.
+pub(crate) fn child_entry_cost(first_key: &[u8]) -> usize {
+    2 + first_key.len() + 8 + 32
+}
+
+/// Encoded size of a node holding nothing — the starting `fill` of any
+/// run. Taken from the encoders so it cannot drift from them.
+pub(crate) const NODE_HEADER_LEN: usize = HEADER_LEN;
 
 const NODE_TYPE_LEAF: u8 = 0;
 const NODE_TYPE_INTERNAL: u8 = 1;

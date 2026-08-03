@@ -271,13 +271,14 @@ impl<'s, 'f> Tx<'s, 'f> {
     /// [`crate::MAX_OPEN_SCAN_CHUNKS`]). The two-level shape used to
     /// stop at roughly ~15 K unique `log_id`s with `Error::IndexFull`.
     ///
-    /// What does still scale with namespace size is the *cost of a
-    /// commit*: `commit_tx` re-materialises the namespace's index on
-    /// every write, so a namespace holding 10⁵–10⁶ entries spends its
-    /// own size in RAM per commit (measured in
-    /// `docs/en/contributing/benchmarks.md`). Partitioning by namespace
-    /// (e.g. per-conversation) keeps each commit cheap; it is now a
-    /// performance choice rather than a hard requirement.
+    /// The cost of a commit does not scale with it either, since audit
+    /// HV-16: `commit_tx` descends to the affected leaf and rewrites
+    /// the path above it, so appending to a log holding 200 000 ids
+    /// costs the same ~11 ms and ~12 MiB as appending to one holding
+    /// 2 000. What a commit *does* cost is the span of keys it touches
+    /// — irrelevant for a monotonic `log_id` writer, whose appends are
+    /// always at the high end. Numbers in
+    /// `docs/en/contributing/benchmarks.md`.
     ///
     /// **Single-kind-per-namespace contract (R-NSKIND, format v2).**
     /// See [`Tx::put`] for the three-layer enforcement (Tx-time +
