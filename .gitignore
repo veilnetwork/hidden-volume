@@ -20,6 +20,13 @@ debug
 .DS_Store
 Thumbs.db
 
+# Python bytecode caches. `scripts/regen-dart-checksums.py` imports
+# `scripts/dylib_path.py`, so every run of the pre-tag gate leaves a
+# `scripts/__pycache__/` behind; same for the bench under
+# `experimental/flutter_plugin/hidden_volume/bench/`.
+__pycache__/
+*.py[cod]
+
 # Local secrets / env. We never read these but contributors may
 # stash them while debugging — keep them out of accidental commits.
 .env
