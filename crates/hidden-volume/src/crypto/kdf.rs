@@ -276,8 +276,20 @@ impl Default for Argon2Params {
 /// container salt, and the Argon2 parameter set.
 ///
 /// `salt` MUST be the container_salt at file offset 0..32 (DESIGN §2).
-/// `params` MUST have already passed [`Argon2Params::validate`] (caller's
-/// responsibility — `Container::open`/`create` enforces this).
+///
+/// **`params` is validated here (audit HV-05).** It used to be the
+/// caller's job — the doc said "MUST have already passed
+/// [`Argon2Params::validate`]" and relied on `Container::open` / `create`
+/// to do it. Every container path did; nothing made a direct caller. This
+/// is a public function whose whole job is to burn CPU and RAM in
+/// proportion to its arguments, so "the caller promised" is the wrong
+/// contract for the cost gate: `m_cost_kib = u32::MAX` from a low-level
+/// caller is a self-inflicted DoS with no error in sight. The cost is one
+/// bounds check against an Argon2 run.
+///
+/// A hostile container cannot reach this — the header's params are
+/// validated on open, before any derivation — so the closed hole is
+/// misuse by this crate's own callers, not a file-driven attack.
 ///
 /// **v3 #9 cryptographic version-binding (2026-05-28).** The
 /// `params.version` u32 is folded into the master via a post-Argon2id
@@ -295,6 +307,22 @@ impl Default for Argon2Params {
 /// cryptographically bound. Closes the F-PAD-adjacent
 /// cross-version key-reuse surface flagged in the `make_aad` rustdoc.
 pub fn derive_master_key(
+    password: &[u8],
+    salt: &[u8],
+    params: Argon2Params,
+) -> Result<Zeroizing<[u8; 32]>> {
+    params.validate()?;
+    derive_master_key_unvalidated(password, salt, params)
+}
+
+/// Cost-parameter-unchecked core of [`derive_master_key`].
+///
+/// Private, and the only production caller is [`derive_master_key`], which
+/// validates first. It exists so this module's own tests can exercise the
+/// v3 version-binding across format generations — `format_version = 2` or
+/// `4` — that [`Argon2Params::validate`] correctly refuses to derive under.
+/// Nothing outside this file can call it.
+fn derive_master_key_unvalidated(
     password: &[u8],
     salt: &[u8],
     params: Argon2Params,
@@ -421,5 +449,98 @@ mod tests {
             p.validate()
                 .unwrap_or_else(|e| panic!("validate() rejected legitimate idx {idx}: {e:?}"));
         }
+    }
+
+    /// v3 #9 regression: tampering `format_version` (bits 0..16 of
+    /// `params.version`) produces a different master key. This is the v2
+    /// lock-down question #9 closes — cross-version key reuse is closed
+    /// cryptographically, not only by `validate()` policy.
+    ///
+    /// Lives here rather than in `tests/v3_key_schedule.rs` because HV-05
+    /// made [`derive_master_key`] validate its own params, and a
+    /// synthesised v2 / v4 params word is exactly what `validate()`
+    /// refuses. The crate-private `derive_master_key_unvalidated` is the
+    /// only way left to ask the question, and the gate that now stands in
+    /// front of it is asserted by `master_key_derivation_validates_params`
+    /// below.
+    #[test]
+    fn version_word_changes_the_master_key() {
+        let password = b"another-test-password";
+        let salt = [0x7Fu8; 32];
+
+        let p_v3 = Argon2Params::MIN.with_padding_policy_index(0);
+        // A hypothetical v4 params word: same Argon2 cost, different
+        // format_version in the low 16 bits. And a fake v2 for the
+        // backward direction.
+        let mut p_v4 = p_v3;
+        p_v4.version = (p_v3.version & !0xFFFF) | 4;
+        let mut p_v2 = p_v3;
+        p_v2.version = (p_v3.version & !0xFFFF) | 2;
+
+        let m_v3 = derive_master_key_unvalidated(password, &salt, p_v3).unwrap();
+        let m_v4 = derive_master_key_unvalidated(password, &salt, p_v4).unwrap();
+        let m_v2 = derive_master_key_unvalidated(password, &salt, p_v2).unwrap();
+
+        assert_ne!(m_v3.as_slice(), m_v4.as_slice());
+        assert_ne!(m_v3.as_slice(), m_v2.as_slice());
+        assert_ne!(m_v4.as_slice(), m_v2.as_slice());
+    }
+
+    /// HV-05: the public entry point refuses what `validate()` refuses,
+    /// instead of trusting the caller to have asked first.
+    ///
+    /// Every fixture is chosen so that **this crate's policy is the only
+    /// thing that rejects it** — the assertion below proves the `argon2`
+    /// crate accepts each cost word on its own. Reaching for `u32::MAX`
+    /// instead would have tested the dependency's bounds and passed with
+    /// `validate()` deleted, which is the shape of hole this test exists
+    /// to close. `MAX_M_COST_KIB + 1` really is a gibibyte of Argon2
+    /// working set a direct low-level caller could force, and `t_cost`
+    /// has no upper bound in the crate at all.
+    #[test]
+    fn master_key_derivation_validates_params() {
+        let salt = [0x11u8; 32];
+
+        let mut over_memory = Argon2Params::MIN;
+        over_memory.m_cost_kib = Argon2Params::MAX_M_COST_KIB + 1;
+
+        let mut over_time = Argon2Params::MIN;
+        over_time.t_cost = Argon2Params::MAX_T_COST + 1;
+
+        let mut over_lanes = Argon2Params::MIN;
+        over_lanes.p_cost = Argon2Params::MAX_P_COST + 1;
+
+        let mut under_memory = Argon2Params::MIN;
+        under_memory.m_cost_kib = Argon2Params::MIN.m_cost_kib / 2;
+
+        let mut under_time = Argon2Params::MIN;
+        under_time.t_cost = Argon2Params::MIN.t_cost - 1;
+
+        let mut wrong_generation = Argon2Params::MIN;
+        wrong_generation.version = (Argon2Params::MIN.version & !0xFFFF) | 4;
+
+        for (name, params) in [
+            ("m_cost above our ceiling", over_memory),
+            ("t_cost above our ceiling", over_time),
+            ("p_cost above our ceiling", over_lanes),
+            ("m_cost below our floor", under_memory),
+            ("t_cost below our floor", under_time),
+            ("foreign format generation", wrong_generation),
+        ] {
+            assert!(
+                argon2::Params::new(params.m_cost_kib, params.t_cost, params.p_cost, Some(32))
+                    .is_ok(),
+                "{name}: the argon2 crate rejects this by itself — the fixture \
+                 would pass with our own gate removed and proves nothing"
+            );
+            assert!(params.validate().is_err(), "{name}: fixture is not invalid");
+            match derive_master_key(b"pw", &salt, params) {
+                Err(Error::Kdf(_)) => {},
+                other => panic!("{name}: derive_master_key accepted it: {other:?}"),
+            }
+        }
+
+        // And a legal parameter set still derives.
+        derive_master_key(b"pw", &salt, Argon2Params::MIN).unwrap();
     }
 }

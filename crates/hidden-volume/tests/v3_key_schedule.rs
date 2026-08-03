@@ -113,42 +113,23 @@ fn v3_space_keys_from_master_is_deterministic() {
     assert_eq!(k1.aead_root, k2.aead_root);
 }
 
-/// v3 #9 regression: tampering `format_version` (bits 0..16 of
-/// `params.version`) ALSO produces a different master key. This is
-/// the v2 lock-down question that #9 closes — cross-version key
-/// reuse is now closed cryptographically, not only by `validate()`
-/// policy.
-///
-/// We bypass `validate()` here by constructing the params manually
-/// (validate() would reject `format_version != PARAMS_VERSION`).
+/// v3 #9's cross-generation half — that a synthesised `format_version = 2`
+/// or `4` derives a *different* master key — moved into
+/// `crypto::kdf`'s own tests as `version_word_changes_the_master_key`.
+/// HV-05 made `derive_master_key` validate its own params, and such a
+/// params word is precisely what `validate()` refuses, so the question can
+/// only be asked through the crate-private unvalidated core. What is
+/// checked from out here is the gate itself.
 #[test]
-fn v3_format_version_changes_master_key() {
-    let password = b"another-test-password";
+fn foreign_format_generation_is_refused_outright() {
     let salt = [0x7Fu8; 32];
+    let mut p_v4 = Argon2Params::MIN;
+    p_v4.version = (p_v4.version & !0xFFFF) | 4;
 
-    let mut p_v3 = Argon2Params::MIN;
-    // Synthesize a hypothetical v4 params word: same Argon2 cost,
-    // different format_version in the low 16 bits.
-    let mut p_v4 = p_v3;
-    p_v4.version = (p_v3.version & !0xFFFF) | 4;
-    // And a fake v2 to test backward direction.
-    let mut p_v2 = p_v3;
-    p_v2.version = (p_v3.version & !0xFFFF) | 2;
-
-    // Make all three params identical EXCEPT the version word.
-    // (MIN.with_padding_policy_index(0) keeps padding_policy_index = 0.)
-    p_v3 = p_v3.with_padding_policy_index(0);
-
-    let m_v3 = derive_master_key(password, &salt, p_v3).unwrap();
-    let m_v4 = derive_master_key(password, &salt, p_v4).unwrap();
-    let m_v2 = derive_master_key(password, &salt, p_v2).unwrap();
-
-    // Each version derives a different master key. A hypothetical
-    // v4 reader that loosened validate() would still get a
-    // different key than the v3 writer that sealed the file.
-    assert_ne!(m_v3.as_slice(), m_v4.as_slice());
-    assert_ne!(m_v3.as_slice(), m_v2.as_slice());
-    assert_ne!(m_v4.as_slice(), m_v2.as_slice());
+    assert!(
+        derive_master_key(b"another-test-password", &salt, p_v4).is_err(),
+        "a foreign format generation must not reach Argon2 at all"
+    );
 }
 
 /// **Known-answer test for the frozen v3 key schedule (audit pass
