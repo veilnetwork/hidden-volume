@@ -381,6 +381,31 @@ format.
 
 ### Added — report5 follow-through
 
+- **`AsyncSpaceHandle` reports its abandoned calls (HV-02).** A foreign
+  caller that wraps `commit` in a timeout and walks away could not learn
+  whether the transaction landed, and retrying a non-idempotent
+  `append_log` on a guess corrupts the log. The mechanism for answering
+  that shipped with HV-11 and was wired into `hidden-volume-async`; this
+  crate kept calling the plain `hidden_volume_rt::run_blocking`, which
+  builds a fresh **unbounded** ledger per call and destroys it on return,
+  so every verdict was filed into an object that immediately ceased to
+  exist. All eighteen async methods now run through the handle's own
+  `Arc<OpLedger>`, via `run_cancellable` so the cancel token is the
+  caller's rather than one the closure cannot see.
+
+  New on `AsyncSpaceHandle`, all synchronous so they can be called from a
+  `finally` / `catch` / `defer` path: `abandoned_operations()`,
+  `clear_settled_operations()`, `forgotten_abandonments()`. New
+  `AbandonedOperation` record and `OperationOutcome` enum across UniFFI.
+  Branch on `may_have_mutated` — `false` only for `NeverStarted`, which is
+  backed by a proof and is the one state where a blind retry is safe.
+
+  The ledger's single admission permit is the availability half: a fan-out
+  of abandoned calls now queues as cheap async tasks instead of occupying
+  `spawn_blocking` threads that all end up waiting on one mutex.
+  Constructors stay on the plain path — an abandoned constructor has no
+  handle to report to.
+
 - **Keys can be enumerated without materialising the namespace (HV-04).**
   The FFI `kv_keys` went through `Space::list`, which builds a
   `Vec<(Vec<u8>, Vec<u8>)>` of every entry, and then dropped the values
