@@ -270,11 +270,53 @@ impl Container {
         Ok(Self { file })
     }
 
-    /// Whether this container handle was opened with shared (read-only)
-    /// or exclusive (read-write) flock.
+    /// Open an existing container under an **exclusive** flock that
+    /// nonetheless refuses every write — the maintenance-free read.
+    ///
+    /// [`Container::open`] takes the same exclusive lock but is a
+    /// read-WRITE handle, and the `open_space*` family on a read-write
+    /// handle performs maintenance of its own accord: `vacuum_orphans`
+    /// scrubs orphan IndexNode chunks and the self-heal checkpoint
+    /// publishes a bumped-seq superblock. Both rewrite the file. That is
+    /// correct for an app opening its own store; it is wrong for a reader
+    /// whose contract says the file is untouched.
+    ///
+    /// This handle behaves exactly like [`Container::open_readonly`] —
+    /// [`Self::is_readonly`] is true, every write path answers
+    /// [`Error::ReadOnly`], the auto-vacuum skips itself — while holding
+    /// `LOCK_EX` rather than `LOCK_SH`, so no other process can write the
+    /// file while the handle lives.
+    ///
+    /// Use it when both properties are needed at once:
+    /// - **in-place rewrite** (`compact_known` / `change_passwords`) —
+    ///   the lock must be unbroken from first read through rename, and an
+    ///   abandoned rewrite must leave the source byte-identical
+    ///   (audit HV-06);
+    /// - **forensic / backup copies** that must hash-match the original
+    ///   and must not race a concurrent writer.
+    ///
+    /// Fails with [`Error::Busy`] if any other holder has the file open
+    /// under either lock.
+    ///
+    /// [`Error::Busy`]: crate::Error::Busy
+    /// [`Error::ReadOnly`]: crate::Error::ReadOnly
+    pub fn open_exclusive_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let mut file = ContainerFile::open_exclusive_readonly(path)?;
+        let idx = file.header.params.padding_policy_index();
+        file.padding_policy = PaddingPolicy::from_persisted_index(idx);
+        Ok(Self { file })
+    }
+
+    /// Whether this handle refuses writes.
+    ///
+    /// True for [`Container::open_readonly`] (shared flock) and for
+    /// [`Container::open_exclusive_readonly`] (exclusive flock, writes
+    /// refused). The name answers "may this handle modify the file", not
+    /// "which flock does it hold" — every caller in the crate wants the
+    /// former, and the auto-vacuum gates below are exactly those callers.
     #[must_use]
     pub fn is_readonly(&self) -> bool {
-        matches!(self.file.lock_mode, file::LockMode::Shared)
+        !self.file.lock_mode.allows_writes()
     }
 
     /// Replace the post-commit padding policy. Affects future commits
@@ -1075,6 +1117,12 @@ impl Container {
     /// renames over `path`. Original file's blocks are released to
     /// the FS — for forensic-grade scrub of the underlying storage,
     /// host-app must run a separate tool.
+    ///
+    /// **On any failure, `path` is left BYTE-IDENTICAL.** The source is
+    /// read under an exclusive lock that refuses writes, so neither the
+    /// auto-vacuum nor the self-heal checkpoint runs against it — an
+    /// abandoned compaction leaves nothing behind to show it was
+    /// attempted (audit HV-06).
     pub fn compact_known(
         path: &std::path::Path,
         passwords: &[&[u8]],
@@ -1106,7 +1154,8 @@ impl Container {
     /// Rotate one or more space passwords in-place. The atomic-rename
     /// pattern is the same as [`Self::compact_known`]: write to a
     /// temp file, then `rename(2)` over `path`. On any failure the
-    /// temp is removed and the original `path` is untouched.
+    /// temp is removed and the original `path` is left byte-identical —
+    /// see [`Self::compact_known`] for what that took (audit HV-06).
     ///
     /// `mapping[i] = (open_with, write_as)`:
     /// - `open_with == write_as` — preserve verbatim (no rotation).
@@ -1212,13 +1261,30 @@ fn atomic_rewrite_under_source_lock<F>(
 where
     F: FnOnce(&mut Container, &std::path::Path, Option<&crate::cancel::CancelToken>) -> Result<()>,
 {
-    // Hold source flock for the entire critical section. Container::open
-    // acquires LOCK_EX (try_lock_exclusive); concurrent processes that
-    // try to open `path` while we work get Error::Busy and bail
-    // cleanly. After our rename, the old inode (still held by `src`)
-    // is unlinked but live; new openers see the NEW inode and can
-    // acquire its lock independently.
-    let mut src = Container::open(path)?;
+    // Hold source flock for the entire critical section.
+    // `open_exclusive_readonly` acquires LOCK_EX (try_lock_exclusive);
+    // concurrent processes that try to open `path` while we work get
+    // Error::Busy and bail cleanly. After our rename, the old inode
+    // (still held by `src`) is unlinked but live; new openers see the
+    // NEW inode and can acquire its lock independently.
+    //
+    // MAINTENANCE-FREE, not merely locked (audit HV-06). This used to be
+    // `Container::open` — a read-WRITE handle — and the `open_space` the
+    // write closure performs on it runs `vacuum_orphans` plus the
+    // self-heal checkpoint on its own initiative. Both rewrite the source.
+    // So the contract three lines below this function's title — "on any
+    // failure the temp is removed and the original `path` is untouched" —
+    // was false for every caller: a rotation that failed at the very last
+    // step, or one the user cancelled, had already scrubbed chunks out of
+    // the file it promised not to touch. For a deniable container that is
+    // not a cosmetic difference; the bytes an observer captured before the
+    // abandoned rotation no longer match the bytes after it, which is
+    // evidence that something ran.
+    //
+    // The exclusive lock is unchanged — it is the write PERMISSION that is
+    // dropped, and only until the rename, which is a directory operation
+    // and needs nothing from this descriptor.
+    let mut src = Container::open_exclusive_readonly(path)?;
 
     let tmp = unique_temp_path_in_parent(path, prefix)?;
 
@@ -1491,6 +1557,112 @@ fn change_passwords_impl(
     atomic_rewrite_under_source_lock(path, "hv-rotate", cancel, |src, tmp, cancel| {
         Container::repack_into_dest(src, tmp, mapping, options, cancel)
     })
+}
+
+#[cfg(test)]
+mod hv06_tests {
+    use super::*;
+    use crate::padding::PaddingPolicy;
+    use crate::space::index::Namespace;
+
+    fn options() -> ContainerOptions {
+        ContainerOptions {
+            argon2: Argon2Params::MIN,
+            initial_garbage_chunks: 0,
+            padding_policy: PaddingPolicy::None,
+            superblock_replicas: 1,
+        }
+    }
+
+    struct Scratch(std::path::PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch(name: &str) -> (Scratch, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("hv06-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("c.hv");
+        (Scratch(dir), path)
+    }
+
+    /// A CANCELLED rewrite must leave the source byte-identical.
+    ///
+    /// Cancellation is driven at the primitive rather than through
+    /// `compact_known_cancellable`, because a token fired before that call
+    /// trips the repack's first `check(cancel)` BEFORE the source space is
+    /// ever opened — the exact step the maintenance hangs off. Reaching a
+    /// cancel that lands after a source open through the public API needs a
+    /// second thread firing the token mid-flight, which decides at random
+    /// whether the test proves anything.
+    ///
+    /// The closure below does what the real one does up to that point — it
+    /// opens a source space with a real password — and then returns
+    /// `Cancelled`, which is how a mid-flight cancel exits.
+    #[test]
+    fn a_cancelled_rewrite_leaves_the_source_byte_identical() {
+        let (_guard, path) = scratch("cancel");
+
+        // Leave an orphan IndexNode behind: put + commit, delete + commit,
+        // then drop without reopening, so nothing has vacuumed it yet.
+        {
+            let mut c = Container::create_with_options(&path, options()).unwrap();
+            let mut s = c.create_space(b"pw").unwrap();
+            let mut tx = s.begin_tx();
+            tx.put(Namespace::CONTACTS, b"alice", b"a").unwrap();
+            tx.commit().unwrap();
+            let mut tx = s.begin_tx();
+            tx.delete(Namespace::CONTACTS, b"alice").unwrap();
+            tx.commit().unwrap();
+        }
+
+        let before = std::fs::read(&path).unwrap();
+
+        let err = atomic_rewrite_under_source_lock(&path, "hv-compact", None, |src, _tmp, _c| {
+            // The step that used to mutate the source: a read-write handle
+            // vacuums here, and publishes a self-heal checkpoint after that.
+            let mut space = src.open_space(b"pw")?;
+            assert!(space.get(Namespace::CONTACTS, b"alice")?.is_none());
+            Err(Error::Cancelled)
+        })
+        .expect_err("the closure cancelled, so the rewrite must fail");
+        assert!(matches!(err, Error::Cancelled), "got {err:?}");
+
+        let after = std::fs::read(&path).unwrap();
+        assert!(
+            before == after,
+            "the source was modified by a rewrite the caller cancelled"
+        );
+    }
+
+    /// The source handle the primitive hands to its closure must refuse
+    /// writes outright, not merely skip the automatic ones. A closure that
+    /// tries to commit into the source is a bug, and it must surface as one.
+    #[test]
+    fn the_primitive_hands_its_closure_a_source_that_refuses_writes() {
+        let (_guard, path) = scratch("refuses");
+        {
+            let mut c = Container::create_with_options(&path, options()).unwrap();
+            let _ = c.create_space(b"pw").unwrap();
+        }
+
+        let err = atomic_rewrite_under_source_lock(&path, "hv-compact", None, |src, _tmp, _c| {
+            assert!(src.is_readonly(), "the source handle must be read-only");
+            let mut space = src.open_space(b"pw")?;
+            let mut tx = space.begin_tx();
+            tx.put(Namespace::CONTACTS, b"bob", b"b")?;
+            match tx.commit() {
+                Err(Error::ReadOnly) => Err(Error::Cancelled),
+                other => panic!("a write into the rewrite source must be refused, got {other:?}"),
+            }
+        })
+        .expect_err("the closure returned an error");
+        assert!(matches!(err, Error::Cancelled), "got {err:?}");
+    }
 }
 
 #[cfg(all(test, unix))]
