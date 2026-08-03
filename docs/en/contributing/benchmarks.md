@@ -442,38 +442,14 @@ tree, not just the row under the root; it does, because it is now
 collected during the flatten walk the commit already performs (so it
 also costs one chunk read less than the HV-14 version did).
 
-### What is still open: per-commit cost is O(namespace), not O(change)
+### What HV-15 left open: per-commit cost was O(namespace)
 
-`commit_tx` materialises the whole namespace, applies the ops and
-rebuilds. HV-14 measured that and kept it, on the grounds that the
+`commit_tx` materialised the whole namespace, applied the ops and
+rebuilt. HV-14 measured that and kept it, on the grounds that the
 format's own ceiling capped the working set at ~320 KiB. **That
-argument is gone with the ceiling** — the disk cost of an edit is flat
-(the table above), but its CPU and RAM cost now scale with the
-namespace:
-
-| workload | wall | peak RSS |
-|---|---:|---:|
-| 1 000 000 × 64 B, one Tx | 1.6 s | 414 MiB |
-| 1 000 000 × 64 B, 500 Txs of 2 000 | 97 s | 2.9 GiB |
-| 100 000 × 2 KiB, 50 Txs of 2 000 | 37 s | 593 MiB |
-
-The gap between the first two rows is the whole story: each commit
-re-flattens everything, so seeding in K batches costs O(N × K). A
-one-key edit shows the same shape — 12.6 ms at N = 1 000, 48 ms at
-N = 100 000 (64 B values), 247 ms at N = 20 000 (2 KiB values).
-
-Two consequences for host-apps, until incremental descent lands:
-
-- Prefer fewer, larger `Tx`es when seeding or importing.
-- A namespace in the 10⁵–10⁶ range costs its own size in RAM on every
-  commit. Partitioning by namespace (per-conversation, per-account)
-  keeps each commit cheap; the format now permits either choice, which
-  it previously did not.
-
-`Container::repack` inherits this: it collects each KV namespace with
-one `list()` call (log namespaces were already paginated by audit pass
-16). What used to be "bounded structurally by the two-level cap" is now
-bounded by the namespace.
+argument went with the ceiling** — the disk cost of an edit stayed flat
+(the table above), but its CPU and RAM scaled with the namespace. Audit
+HV-16 below closes it.
 
 ### Reproducing these numbers
 
@@ -484,3 +460,131 @@ one-key edit costs `2 + levels` chunks at any depth. The absolute
 numbers above came from an ad-hoc harness over the public API — binary
 search on N for the ceilings, `metadata(path).len()` for the chunk
 counts, `/usr/bin/time -l` for peak RSS.
+
+## A commit costs the change, not the namespace (audit HV-16)
+
+Same rig throughout: macOS/APFS SSD (aarch64), release build,
+`PaddingPolicy::None`, `Argon2Params::MIN`, one Superblock replica,
+9-byte keys. "Before" is commit `41fe226` (HV-15), "after" is HV-16.
+
+### Seeding
+
+Writing the same data in more transactions used to cost more, because
+each commit re-flattened everything it already held.
+
+| workload | wall before | wall after | RSS before | RSS after |
+|---|---:|---:|---:|---:|
+| 10⁶ × 64 B, **1 Tx** | 0.64 s | 0.91 s | 395 MiB | 316 MiB |
+| 10⁶ × 64 B, **500 Txs** | **96.2 s** | **7.0 s** | **2.60 GiB** | **12.7 MiB** |
+| 10⁵ × 64 B, 1 Tx | 0.14 s | 0.14 s | 50 MiB | 42 MiB |
+| 10⁵ × 64 B, 50 Txs | 1.49 s | 0.69 s | 79 MiB | 12 MiB |
+| 10⁵ × 2 KiB, 1 Tx | 2.26 s | 2.31 s | 648 MiB | 423 MiB |
+| 10⁵ × 2 KiB, 50 Txs | **31.9 s** | **2.8 s** | 557 MiB | 21 MiB |
+
+13.8× the wall time and 210× the memory on the headline row. The
+one-Tx row is the one that got *slower* — 0.64 s → 0.91 s — and that is
+the price of the change: every key is now BLAKE3-hashed to decide
+whether it ends a node, and there are ~16 % more nodes to encrypt.
+
+### One key edited
+
+| N | value | wall before | wall after | chunks before | chunks after |
+|---:|---:|---:|---:|---:|---:|
+| 1 000 | 64 B | 10.7 ms | 10.5 ms | 4 | 4 |
+| 10 000 | 64 B | 13.3 ms | 11.0 ms | 5 | 5 |
+| 100 000 | 64 B | 46.8 ms | 10.1 ms | 5 | 5 |
+| 1 000 000 | 64 B | **361.6 ms** | **11.2 ms** | 6 | 6 |
+| 1 000 | 2 KiB | 22.5 ms | 11.5 ms | 5 | 5 |
+| 20 000 | 2 KiB | **242.2 ms** | **11.6 ms** | 6 | 6 |
+
+Wall time is now flat at the 3-fsync floor (~11 ms) instead of rising
+with N. **The chunk counts are unchanged** — that matters beyond
+performance: the number of chunks a commit appends is what a
+multi-snapshot observer can count, and HV-14 deliberately made it track
+how localised a change was rather than how big the namespace is. It
+still does, at exactly the same values.
+
+Appending one message to a log namespace holding N behaves the same:
+12.7 / 14.0 / 45.5 ms before at N = 2 000 / 20 000 / 200 000, against
+12.0 / 11.4 / 10.5 ms after, with peak RSS at the largest dropping from
+566 MiB to 12.4 MiB.
+
+### Why greedy packing could not have been made incremental
+
+The obvious cheap fix — keep the greedy left-to-right packing and
+descend to the affected leaf — does not work, and the amount by which
+it does not work is measurable. Chunk reads for one `put` into the
+middle of a namespace of N (`space::tree`'s own test counts them):
+
+| N | greedy packing | content-defined boundaries |
+|---:|---:|---:|
+| 2 000 | 23 | 4 |
+| 20 000 | 202 | 4 |
+| 100 000 | 996 | 4 |
+
+Greedy boundaries are a function of *fill*, so an edit that changes any
+entry's size shifts every boundary to its right and the rewrite never
+re-synchronises with the old tree; it runs to the end of the namespace.
+(It is worse than it looks: a greedy packer cannot even seal a node
+without seeing the next item, so it never resynchronises at all.)
+Boundaries chosen from each key's own hash re-synchronise within a node
+or two, which is what makes the descent worth doing.
+
+### What it costs: fill
+
+Nodes are no longer packed to the brim. The sealed-fill distribution is
+`P(fill > f) = ((PAYLOAD_CAP - f)/PAYLOAD_CAP)^(1/K)`, so mean
+utilisation is `K/(K+1)` — 6/7 ≈ 86 % at the chosen `K = 6`, against
+~98 % greedy. Measured on the whole container:
+
+| workload | chunks before | chunks after | growth |
+|---|---:|---:|---:|
+| 10⁵ × 64 B | 1 991 | 2 292 | +15.1 % |
+| 10⁶ × 64 B | 19 866 (77.6 MiB) | 23 144 (90.4 MiB) | +16.5 % |
+| 2·10⁴ × 2 KiB | 20 307 | 20 351 | +0.2 % |
+| 10⁵ × 2 KiB | 101 288 | 101 487 | +0.2 % |
+
+Large values are unaffected because only one 2 KiB entry fits in a
+chunk either way. The ~16 % on small values is the standing price of a
+shape that does not record its own history; `K` is the single knob if a
+future workload wants to trade it back.
+
+### The readers' depth bound, recomputed
+
+The bound is derived from the narrowest a level of a well-formed tree
+can be, so changing how nodes are sealed changes it. Greedy packing
+guaranteed 12 children per non-final internal node (one more would not
+have fit). Content-defined boundaries guarantee nothing on their own —
+that is the point — so the writer refuses to honour a boundary before
+`MIN_INTERNAL_CHILDREN` = 4 children, and 4 is what the arithmetic now
+uses:
+
+| depth | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| minimum chunks | 3 | 8 | 25 | 90 | 347 | 1 372 | 5 469 | 21 854 | 87 391 | 349 536 | 1 398 113 | 5 592 418 |
+
+At the largest container the format permits the bound is 12 descents,
+against 7 before. Honest data is still never refused — a tree of depth
+*d* owns at least that many chunks by construction — and a hostile
+chain still costs its own chunks. Actual fanout is far above the floor
+(~40–70 children per internal node at 9-byte keys), so honest trees are
+the same height they were: 3 levels at 10⁵ entries, 4 at 10⁶.
+
+### What is still open
+
+A commit costs the *span* of keys it touches, not the number of keys.
+Operations scattered from one end of a namespace to the other still
+walk everything between them — the same O(namespace) the previous
+implementation always paid, so nothing regresses, but nothing improves
+either. Batching by key locality (which a monotonic `log_id` writer
+gets for free) is what keeps a commit cheap.
+
+### Reproducing these numbers
+
+`crates/hidden-volume/src/space/tree.rs` holds the two property tests —
+one shape per key set whatever order it was written in, and chunk reads
+per edit that do not grow with N. `crates/hidden-volume/tests/
+hv16_incremental_commit.rs` holds the host-app-visible half. The
+absolute numbers came from an ad-hoc harness over the public API:
+`metadata(path).len()` for chunk counts, `std::time::Instant` for wall,
+`/usr/bin/time -l` for peak RSS.
