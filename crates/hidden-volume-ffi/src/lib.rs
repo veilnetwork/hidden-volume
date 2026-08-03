@@ -680,14 +680,18 @@ fn check_namespace(byte: u8) -> Result<(), HvError> {
 }
 
 /// Frame KV keys into one byte buffer for the handwritten Dart bindings:
-/// `[count u32 LE] ( [len u32 LE][key bytes] )*`. Values are dropped — key
-/// enumeration exists for host-app garbage collection, which point-reads any
-/// value it actually needs.
-fn frame_kv_keys(entries: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
-    let total: usize = entries.iter().map(|(k, _)| 4 + k.len()).sum();
+/// `[count u32 LE] ( [len u32 LE][key bytes] )*`.
+///
+/// Takes keys, not entries. Key enumeration exists for host-app garbage
+/// collection, which point-reads any value it actually needs — so the values
+/// used to be read off disk, carried through the whole walk and then dropped
+/// here (report5 HV-04). `Space::list_keys` never builds them now, and this
+/// signature is what keeps a future caller from reintroducing the pair.
+fn frame_kv_keys(keys: &[Vec<u8>]) -> Vec<u8> {
+    let total: usize = keys.iter().map(|k| 4 + k.len()).sum();
     let mut out = Vec::with_capacity(4 + total);
-    out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
-    for (k, _) in entries {
+    out.extend_from_slice(&(keys.len() as u32).to_le_bytes());
+    for k in keys {
         out.extend_from_slice(&(k.len() as u32).to_le_bytes());
         out.extend_from_slice(k);
     }
@@ -930,14 +934,55 @@ impl SpaceHandle {
     /// `[count u32 LE] ( [len u32 LE][key bytes] )*`. A host app garbage-
     /// collecting stale bookkeeping keys needs enumeration: the KV index is
     /// otherwise write/point-read only, so orphaned keys must be findable to
-    /// be deletable. Same O(N) index walk as
-    /// [`Self::count`];
-    /// values are not decoded into the buffer.
+    /// be deletable.
+    ///
+    /// **Cost, stated honestly.** This doc used to claim the "same O(N)
+    /// index walk as `count`" with "values not decoded" — and it was wrong
+    /// on both halves: the call went through `Space::list`, which
+    /// materialises every `(key, value)` pair in the namespace before this
+    /// function drops the values (report5 HV-04). It now goes through
+    /// [`hidden_volume::space::Space::list_keys`], so the *walk* really does
+    /// peak at one decoded node the way `count` does.
+    ///
+    /// What is still O(N) — and cannot not be, for a call whose answer is
+    /// "every key" — is the returned buffer, plus the copy uniffi makes of
+    /// it. A namespace with a million 32-byte keys is ~36 MB across the FFI
+    /// boundary in one allocation. **Use [`Self::kv_keys_page`] on anything
+    /// whose size you do not control**; it is the same enumeration with a
+    /// bound.
     pub fn kv_keys(&self, namespace: u8) -> HvResult<Vec<u8>> {
         check_namespace(namespace)?;
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
-        let entries = g.with_space_mut(|s| s.list(Namespace(namespace)))?;
-        Ok(frame_kv_keys(&entries))
+        let keys = g.with_space_mut(|s| s.list_keys(Namespace(namespace)))?;
+        Ok(frame_kv_keys(&keys))
+    }
+
+    /// One page of [`Self::kv_keys`]: up to `limit` keys strictly greater
+    /// than `after`, ascending, in the same
+    /// `[count u32 LE] ( [len u32 LE][key bytes] )*` frame.
+    ///
+    /// Pass `after = None` for the first page, then the last key of the
+    /// previous page for each subsequent one; a short page (fewer than
+    /// `limit` keys) is the end. `limit = 0` returns an empty frame.
+    ///
+    /// This is the bounded enumeration primitive — the KV counterpart of
+    /// `iter_log_after`, and the one to reach for when the namespace can
+    /// grow without bound. As with `iter_log_after`, `limit` bounds the
+    /// RESULT and not the chunk reads: each page still walks past the
+    /// leaves before its cursor, so this trades a memory ceiling for
+    /// repeated I/O rather than making the whole enumeration cheaper.
+    pub fn kv_keys_page(
+        &self,
+        namespace: u8,
+        after: Option<Vec<u8>>,
+        limit: u32,
+    ) -> HvResult<Vec<u8>> {
+        check_namespace(namespace)?;
+        let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
+        let keys = g.with_space_mut(|s| {
+            s.list_keys_after(Namespace(namespace), after.as_deref(), limit as usize)
+        })?;
+        Ok(frame_kv_keys(&keys))
     }
 
     /// Read one KV value. Returns `None` if the key is absent.
@@ -1668,11 +1713,32 @@ impl MultiSpaceHandle {
 
     /// Keys of every KV entry in `namespace` of space `id`, framed as in
     /// [`SpaceHandle::kv_keys`]: `[count u32 LE] ( [len u32 LE][key bytes] )*`.
+    /// The returned buffer is O(total key bytes) — see
+    /// [`SpaceHandle::kv_keys`] for what that means and
+    /// [`Self::kv_keys_page`] for the bounded form.
     pub fn kv_keys(&self, id: u32, namespace: u8) -> HvResult<Vec<u8>> {
         check_namespace(namespace)?;
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
-        let entries = g.with_space(id as usize, |s| s.list(Namespace(namespace)))??;
-        Ok(frame_kv_keys(&entries))
+        let keys = g.with_space(id as usize, |s| s.list_keys(Namespace(namespace)))??;
+        Ok(frame_kv_keys(&keys))
+    }
+
+    /// One page of [`Self::kv_keys`] for space `id`: up to `limit` keys
+    /// strictly greater than `after`, ascending. Same cursor contract as
+    /// [`SpaceHandle::kv_keys_page`].
+    pub fn kv_keys_page(
+        &self,
+        id: u32,
+        namespace: u8,
+        after: Option<Vec<u8>>,
+        limit: u32,
+    ) -> HvResult<Vec<u8>> {
+        check_namespace(namespace)?;
+        let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
+        let keys = g.with_space(id as usize, |s| {
+            s.list_keys_after(Namespace(namespace), after.as_deref(), limit as usize)
+        })??;
+        Ok(frame_kv_keys(&keys))
     }
 
     /// Current commit sequence of space `id`.
@@ -1743,6 +1809,75 @@ mod tests {
         // Empty namespace → zero-count frame, not an error.
         let empty = h.kv_keys(2).unwrap();
         assert_eq!(&empty[..], &0u32.to_le_bytes());
+    }
+
+    /// Decode the `[count u32 LE] ( [len u32 LE][key] )*` frame both
+    /// `kv_keys` and `kv_keys_page` return.
+    fn unframe(framed: &[u8]) -> Vec<Vec<u8>> {
+        let count = u32::from_le_bytes(framed[..4].try_into().unwrap()) as usize;
+        let mut off = 4usize;
+        let mut keys = Vec::with_capacity(count);
+        for _ in 0..count {
+            let len = u32::from_le_bytes(framed[off..off + 4].try_into().unwrap()) as usize;
+            off += 4;
+            keys.push(framed[off..off + len].to_vec());
+            off += len;
+        }
+        assert_eq!(off, framed.len(), "no trailing bytes");
+        keys
+    }
+
+    #[test]
+    fn kv_keys_page_walks_the_namespace_in_bounded_pages() {
+        let path = scratch_path();
+        let h = SpaceHandle::create(
+            path.to_string_lossy().into_owned(),
+            b"pw".to_vec(),
+            ArgonPreset::Min,
+            0,
+            1,
+        )
+        .unwrap();
+        let expected: Vec<Vec<u8>> = (0..25u8)
+            .map(|i| vec![b'k', b'0' + i / 10, b'0' + i % 10])
+            .collect();
+        h.commit(
+            expected
+                .iter()
+                .map(|k| WriteOp::Put {
+                    namespace: 1,
+                    key: k.clone(),
+                    value: b"v".to_vec(),
+                })
+                .collect(),
+        )
+        .unwrap();
+
+        // Follow the cursor the way a host app would; the concatenated
+        // pages must reproduce `kv_keys` exactly.
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        let mut cursor: Option<Vec<u8>> = None;
+        loop {
+            let page = unframe(&h.kv_keys_page(1, cursor.clone(), 4).unwrap());
+            if page.is_empty() {
+                break;
+            }
+            assert!(page.len() <= 4, "page exceeded its limit: {}", page.len());
+            cursor = Some(page.last().unwrap().clone());
+            seen.extend(page);
+            assert!(seen.len() <= expected.len(), "cursor is not advancing");
+        }
+        assert_eq!(seen, expected);
+        assert_eq!(seen, unframe(&h.kv_keys(1).unwrap()));
+
+        // `after` is strictly-greater, and `limit = 0` is an empty frame
+        // rather than "everything".
+        let after_first = unframe(&h.kv_keys_page(1, Some(expected[0].clone()), 2).unwrap());
+        assert_eq!(after_first, expected[1..3].to_vec());
+        assert!(unframe(&h.kv_keys_page(1, None, 0).unwrap()).is_empty());
+
+        // Reserved namespace is rejected on the paged path too.
+        assert!(h.kv_keys_page(0, None, 4).is_err());
     }
 
     #[test]
