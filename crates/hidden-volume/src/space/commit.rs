@@ -7,8 +7,9 @@
 use std::collections::BTreeMap;
 
 use crate::chunk::ChunkKind;
-use crate::tx::KvOp;
+use crate::redact::Redacted;
 use crate::tx::commit::{CommitPayload, IndexRoot};
+use crate::tx::{KvOp, PendingKv, PendingLog};
 use crate::{Error, Result};
 
 use super::Space;
@@ -55,10 +56,16 @@ impl<'f> Space<'f> {
     /// correctness invariant; a single skipped padding round only
     /// makes that commit's size observable to a multi-snapshot
     /// adversary.
+    /// Both buffers arrive still wrapped in [`Redacted`] and are consumed
+    /// here rather than in [`crate::tx::Tx::commit`], so the keys, values
+    /// and payloads a caller queued are scrubbed when this function
+    /// returns — on the error paths as much as the success one (audit
+    /// HV-07). They are the crate's own copies; what the caller still owns
+    /// is the caller's to manage.
     pub(crate) fn commit_tx(
         &mut self,
-        mut pending: BTreeMap<u8, Vec<KvOp>>,
-        pending_log: BTreeMap<u8, Vec<(u64, Vec<u8>)>>,
+        mut pending: Redacted<PendingKv>,
+        pending_log: Redacted<PendingLog>,
     ) -> Result<u64> {
         // Audit pass 7 (C1): if both pending maps are empty, the
         // commit is a no-op. Previously commit_tx unconditionally
@@ -109,7 +116,7 @@ impl<'f> Space<'f> {
             .map(|r| (r.namespace.0, r))
             .collect();
 
-        for (ns, ops) in &pending {
+        for (ns, ops) in pending.iter() {
             if pending_log.contains_key(ns) {
                 return Err(Error::WrongNamespaceKind(
                     "namespace touched as both Kv and Log in one Tx",
@@ -194,7 +201,7 @@ impl<'f> Space<'f> {
         // Phase 0: Flush each non-empty log buffer to a DataBatch chunk,
         // then route resulting batch_slot pointers as KV puts. After
         // this, the rest of commit_tx is the same KV-only flow.
-        for (ns_byte, log_records) in pending_log {
+        for (ns_byte, log_records) in pending_log.into_inner() {
             if log_records.is_empty() {
                 continue;
             }
@@ -205,7 +212,10 @@ impl<'f> Space<'f> {
             for (id, payload) in log_records {
                 by_id.insert(id, payload);
             }
-            let log_records: Vec<(u64, Vec<u8>)> = by_id.into_iter().collect();
+            // Re-wrapped once the shape settles. `into_iter` moves the same
+            // payload buffers `Tx::append_log` allocated, so the wrapper's
+            // drop is what scrubs them when this iteration ends (HV-07).
+            let log_records = Redacted::new(by_id.into_iter().collect::<Vec<(u64, Vec<u8>)>>());
 
             // Auto-split into 1+ DataBatch chunks if the compressed
             // payload of the full record set would exceed PAYLOAD_CAP.
@@ -236,7 +246,7 @@ impl<'f> Space<'f> {
             }
         }
 
-        for (ns_byte, ops) in &pending {
+        for (ns_byte, ops) in pending.iter() {
             let ns = Namespace(*ns_byte);
             // Collapse the Tx's ops to one per key, in key order, so the
             // tree update is a merge against the entry stream rather

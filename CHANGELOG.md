@@ -14,6 +14,46 @@ format.
 
 ### Breaking — audit follow-through
 
+- **`Debug` printed decrypted keys, values and log payloads (HV-01,
+  HV-07).** The previous pass redacted the four types that *hold* a
+  secret — `KvOp`, `WriteOp`, `LogEntry`, `Plaintext` — and left the
+  structs that hold *those* deriving `Debug`. `format!("{tx:?}")`, a
+  `tracing::debug!` on an index node, or an `assert_eq!` failure message
+  still printed a contact record or a message body verbatim, in release
+  builds, with no key and no container file needed. `Zeroizing` does not
+  help: the upstream crate derives `Debug` on it, so
+  `SpaceState::roots_payload_cache` printed a decrypted commit payload
+  byte for byte.
+
+  Fixed structurally rather than by extending the list that was already
+  incomplete once. New `redact` module, and two rules:
+
+  - A plaintext-bearing field is typed `Redacted<T>` — `Deref`s to `T`,
+    prints `{ items, bytes }` and never content, scrubs on drop. Safe
+    even under `#[derive(Debug)]`.
+  - Its carrier's `Debug` comes from the `redacted_debug!` allow-list
+    macro and ends in `finish_non_exhaustive()`, so a field added later
+    prints nothing until someone names it. Forgetting is the safe
+    direction.
+
+  The scrub half is HV-07, and the honest scope is that the crate's
+  **internal** copies no longer outlive the operation that built them —
+  not that a plaintext is gone from the process. What the API returns is
+  the caller's, and across UniFFI it is copied into a foreign heap.
+
+  Breaking, in the public Rust API:
+
+  - `LeafNode::entries` is `Redacted<Vec<(Vec<u8>, Vec<u8>)>>` and
+    `ChildPointer::first_key` is `Redacted<Vec<u8>>`. Reads and mutations
+    are unchanged via `Deref`/`DerefMut`; taking the value out by move is
+    now `.into_inner()`.
+  - New public `hidden_volume::redact` module (`Redacted`, `Secret`,
+    `SecretShape`).
+
+  `tests/debug_redaction.rs` is the sentinel: it formats every reachable
+  carrier and searches for the markers in text, byte-array and
+  truncated-tail form.
+
 - **A commit costs the change, not the namespace (HV-16).** `commit_tx`
   read a namespace's whole tree, applied the ops in memory and rebuilt
   it. The *disk* cost of an edit was already the path to it (HV-14),

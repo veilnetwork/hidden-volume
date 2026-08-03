@@ -65,12 +65,55 @@ memory-disclosure adversary имеет доступ к UI-буферам host-ap
 | Сайт | Буфер | Причина откладывания |
 |---|---|---|
 | `Plaintext.payload: Vec<u8>` | декодированный chunk payload | Поля используются повсеместно через `space/`, `tx/`, `chunk/`; форсило бы `Zeroizing<Vec<u8>>` через `Plaintext::decode` и поломало бы тестовые assertion'ы на equality с raw `Vec<u8>`. Полный pre-decode буфер (return `aead.open`) ОБЁРНУТ, поэтому более широкий plaintext уже scrub'ится; только этот `to_vec()`-копированный subrange ускользает. |
-| `Tx::pending_kv` value bytes | KV-значения, удерживаемые до commit | Оборачивание `Vec<u8>` в user-facing API `Tx::put(key, value)` пропагировалось бы каждому caller'у. |
-| `Tx::pending_log` payload'ы | log payload'ы, удерживаемые до commit | То же. |
 | `Space::get(...) -> Vec<u8>` return | KV-значение, переданное caller'у | Библиотека не может диктовать lifetime хранения host-app. |
 | `Space::list / iter_log / read_log` returns | KV / log records, переданные caller'у | То же. |
-| `IndexNode::Leaf.entries: Vec<(Vec<u8>, Vec<u8>)>` | декодированные leaf-записи | Внутреннее для библиотеки, но `Vec` of `Vec`'ов; нужен был бы newtype `SecretVec`, чтобы оборачивать единообразно — инвазивно через `space/index.rs`, `tx/`, `space/mod.rs`. Кандидат v0.5.x. |
 | `log::decode_batch` возвращаемый `Vec<(u64, Vec<u8>)>` per-record `payload` | per-record plaintext, скопированный из обёрнутого `raw` буфера | Так же как `Plaintext.payload` — копированный subrange ускользает. |
+
+## Внутренние копии — закрыто через `Redacted<T>` (аудит HV-01 / HV-07)
+
+Три откладывания выше (`Tx::pending_kv`, `Tx::pending_log`,
+`IndexNode::Leaf.entries`) закрыты. Newtype `SecretVec`, который этот
+документ называл кандидатом на v0.5.x, теперь существует как
+[`redact::Redacted<T>`](../../../../crates/hidden-volume/src/redact.rs): он
+`Deref`'ится в `T`, поэтому места чтения и мутации не изменились, и делает
+сверх этого две вещи.
+
+| Поле | Теперь | Scrub'ится когда |
+|---|---|---|
+| `Tx::pending_kv` | `Redacted<PendingKv>` | `commit_tx` возвращает управление — и на успехе, и на ошибке, так как обёртка перемещена в него |
+| `Tx::pending_log` | `Redacted<PendingLog>` | то же, плюс per-namespace переобёртывание внутри drain'а Phase 0 |
+| `LeafNode::entries` | `Redacted<Vec<(Vec<u8>, Vec<u8>)>>` | декодированный узел дропается |
+| `ChildPointer::first_key` | `Redacted<Vec<u8>>` | то же |
+| `SpaceState::roots_payload_cache` | `Option<(u64, Redacted<Vec<u8>>)>` | заканчивается commit-эра (был `Zeroizing` — он scrub'ит, но не редактирует) |
+
+**Что именно это обещает.** *Внутренние* копии расшифрованного ключа,
+значения или payload'а не переживают операцию, которая их построила. Это
+**не** утверждение, что plaintext исчез из процесса: `Vec`, выросший при
+построении, оставил позади прежнюю аллокацию, значение, которое API
+*возвращает*, принадлежит вызывающему, а через UniFFI оно копируется в
+чужую кучу, которой этот крейт не видит. Всё это по-прежнему на host-app,
+и рекомендация `mlock` + hardened-аллокатор ниже остаётся ответом для них.
+
+## Форматирование — второй класс утечки (аудит HV-01)
+
+`Zeroizing` scrub'ит на drop и ничего не говорит про `{:?}` — upstream-крейт
+*выводит* `Debug` на нём, поэтому `Zeroizing<Vec<u8>>` печатает свои байты
+дословно. Редакция — отдельный механизм, а не побочный эффект зануления, и
+её обеспечивают два правила:
+
+1. Поле, несущее plaintext, имеет тип `Redacted<T>`, чей `Debug` печатает
+   `{ items, bytes }` и никогда содержимое. Безопасно под
+   `#[derive(Debug)]`, безопасно при печати само по себе, безопасно если
+   будущий автор внесёт его в `debug_struct`.
+2. `Debug` его контейнера написан allow-list-макросом `redacted_debug!` и
+   заканчивается `finish_non_exhaustive()`, поэтому добавленное позже поле
+   не печатается вообще, пока кто-то его явно не назовёт.
+
+Первого правила в одиночку и не хватило прошлому проходу: он отредактировал
+`KvOp`, `WriteOp`, `LogEntry` и `Plaintext`, а `Tx`, `LeafNode`,
+`ChildPointer`, `SpaceState` и `Space` оставил выводить `Debug` поверх них.
+Второе правило — то, что делает *новое* поле безопасным без чьей-либо
+памяти. Sentinel — `tests/debug_redaction.rs`.
 
 **Рекомендация для host-apps, которым нужны более сильные гарантии.**
 Запускать весь процесс под `mlock` + private memory mapping +
@@ -120,6 +163,7 @@ threat-моделями. Откладывать до тех пор, пока v0.
 
 | Дата | Изменение | Ревьюер |
 |---|---|---|
+| аудит HV-01 / HV-07 | Закрыты откладывания `Tx::pending_kv` / `Tx::pending_log` / `LeafNode::entries` через `redact::Redacted<T>`, распространено на `ChildPointer::first_key` и `SpaceState::roots_payload_cache`, редакция отделена от зануления (`Zeroizing` выводит `Debug`). Добавлен `tests/debug_redaction.rs`. | Self-audit |
 | Initial v0.5 | Первый проход. Обёрнуто 7 transient plaintext-сайтов (1 в `aead`, 1 в `space::append_chunk`, 2 в `space::log`, 3 в `space::write_tree_for_namespace`). Задокументировано 7 user-owned сайтов как отложенных с cross-ref на [`memory.md`](memory.md) §C. Добавлен `tests/plaintext_hygiene.rs` для type-level регрессионных проверок. | Self-audit |
 
 ## Cross-references
@@ -130,3 +174,4 @@ threat-моделями. Откладывать до тех пор, пока v0.
 - `docs/ru/security/audits/fsync.md` — проход fsync ordering (companion-аудит)
 - `tests/memory_hygiene.rs` — type-level регрессия для derived keys
 - `tests/plaintext_hygiene.rs` — type-level регрессия для plaintext-обёрток
+- `tests/debug_redaction.rs` — sentinel для контракта редакции `Debug`

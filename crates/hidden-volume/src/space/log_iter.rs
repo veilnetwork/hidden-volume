@@ -427,7 +427,7 @@ impl<'f> Space<'f> {
         let node = self.read_index_node_at_expected(slot, namespace)?;
         match node {
             IndexNode::Leaf(l) => {
-                for (k, v) in l.entries {
+                for (k, v) in l.entries.into_inner() {
                     if out.len() >= limit {
                         break;
                     }
@@ -503,7 +503,7 @@ impl<'f> Space<'f> {
         let node = self.read_index_node_at_expected(slot, namespace)?;
         match node {
             IndexNode::Leaf(l) => {
-                for (k, v) in l.entries.into_iter().rev() {
+                for (k, v) in l.entries.into_inner().into_iter().rev() {
                     if out.len() >= limit {
                         break;
                     }
@@ -586,7 +586,7 @@ impl<'f> Space<'f> {
         let node = self.read_index_node_at_expected(slot, namespace)?;
         match node {
             IndexNode::Leaf(l) => {
-                for (k, v) in l.entries {
+                for (k, v) in l.entries.into_inner() {
                     if out.len() >= limit {
                         return Ok(true);
                     }

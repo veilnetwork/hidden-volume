@@ -371,7 +371,7 @@ impl<'f> Space<'f> {
 
         match node {
             IndexNode::Leaf(leaf) => {
-                for (key, value) in &leaf.entries {
+                for (key, value) in leaf.entries.iter() {
                     // `LeafNode::decode` guarantees these are sorted and
                     // distinct within this leaf; the bounds are what tie
                     // the leaf to its place in the tree.
@@ -485,6 +485,7 @@ mod tests {
     use super::*;
     use crate::Container;
     use crate::crypto::kdf::Argon2Params;
+    use crate::redact::Redacted;
     use crate::space::index::{ChildPointer, InternalNode, LeafNode};
     use crate::tx::commit::IndexRoot;
 
@@ -509,10 +510,12 @@ mod tests {
     fn leaf(ns: Namespace, entries: &[(&[u8], &[u8])]) -> IndexNode {
         IndexNode::Leaf(LeafNode {
             namespace: ns,
-            entries: entries
-                .iter()
-                .map(|(k, v)| (k.to_vec(), v.to_vec()))
-                .collect(),
+            entries: Redacted::new(
+                entries
+                    .iter()
+                    .map(|(k, v)| (k.to_vec(), v.to_vec()))
+                    .collect(),
+            ),
         })
     }
 
@@ -572,12 +575,12 @@ mod tests {
             namespace: ns,
             children: vec![
                 ChildPointer {
-                    first_key: b"a".to_vec(),
+                    first_key: Redacted::new(b"a".to_vec()),
                     child_slot: s0,
                     child_hash: h0,
                 },
                 ChildPointer {
-                    first_key: b"m".to_vec(),
+                    first_key: Redacted::new(b"m".to_vec()),
                     child_slot: s1,
                     child_hash: h1,
                 },
@@ -611,14 +614,14 @@ mod tests {
             namespace: ns,
             children: vec![
                 ChildPointer {
-                    first_key: b"a".to_vec(),
+                    first_key: Redacted::new(b"a".to_vec()),
                     child_slot: s0,
                     child_hash: h0,
                 },
                 // Distinct first_key (decode rejects unsorted/equal),
                 // same target chunk.
                 ChildPointer {
-                    first_key: b"b".to_vec(),
+                    first_key: Redacted::new(b"b".to_vec()),
                     child_slot: s0,
                     child_hash: h0,
                 },
@@ -644,7 +647,7 @@ mod tests {
             let node = IndexNode::Internal(InternalNode {
                 namespace: ns,
                 children: vec![ChildPointer {
-                    first_key: b"a".to_vec(),
+                    first_key: Redacted::new(b"a".to_vec()),
                     child_slot: slot,
                     child_hash: hash,
                 }],
@@ -804,12 +807,12 @@ mod tests {
             namespace: ns,
             children: vec![
                 ChildPointer {
-                    first_key: b"a".to_vec(),
+                    first_key: Redacted::new(b"a".to_vec()),
                     child_slot: s0,
                     child_hash: h0,
                 },
                 ChildPointer {
-                    first_key: b"c".to_vec(),
+                    first_key: Redacted::new(b"c".to_vec()),
                     child_slot: s1,
                     child_hash: h1,
                 },
@@ -847,12 +850,12 @@ mod tests {
             namespace: ns,
             children: vec![
                 ChildPointer {
-                    first_key: b"a".to_vec(),
+                    first_key: Redacted::new(b"a".to_vec()),
                     child_slot: s0,
                     child_hash: h0,
                 },
                 ChildPointer {
-                    first_key: b"c".to_vec(),
+                    first_key: Redacted::new(b"c".to_vec()),
                     child_slot: s1,
                     child_hash: h1,
                 },
@@ -883,13 +886,13 @@ mod tests {
             namespace: ns,
             children: vec![
                 ChildPointer {
-                    first_key: b"a".to_vec(),
+                    first_key: Redacted::new(b"a".to_vec()),
                     child_slot: s0,
                     child_hash: h0,
                 },
                 // Claims to start at "m"; actually holds "b".
                 ChildPointer {
-                    first_key: b"m".to_vec(),
+                    first_key: Redacted::new(b"m".to_vec()),
                     child_slot: s1,
                     child_hash: h1,
                 },
@@ -928,12 +931,12 @@ mod tests {
             namespace: ns,
             children: vec![
                 ChildPointer {
-                    first_key: b"a".to_vec(),
+                    first_key: Redacted::new(b"a".to_vec()),
                     child_slot: l0,
                     child_hash: lh0,
                 },
                 ChildPointer {
-                    first_key: b"m".to_vec(),
+                    first_key: Redacted::new(b"m".to_vec()),
                     child_slot: l2,
                     child_hash: lh2,
                 },
@@ -945,12 +948,12 @@ mod tests {
             namespace: ns,
             children: vec![
                 ChildPointer {
-                    first_key: b"a".to_vec(),
+                    first_key: Redacted::new(b"a".to_vec()),
                     child_slot: mid_slot,
                     child_hash: mid_hash,
                 },
                 ChildPointer {
-                    first_key: b"m".to_vec(),
+                    first_key: Redacted::new(b"m".to_vec()),
                     child_slot: l1,
                     child_hash: lh1,
                 },
@@ -989,7 +992,7 @@ mod tests {
         let mid = IndexNode::Internal(InternalNode {
             namespace: ns,
             children: vec![ChildPointer {
-                first_key: b"b".to_vec(),
+                first_key: Redacted::new(b"b".to_vec()),
                 child_slot: l1,
                 child_hash: lh1,
             }],
@@ -1000,12 +1003,12 @@ mod tests {
             namespace: ns,
             children: vec![
                 ChildPointer {
-                    first_key: b"a".to_vec(),
+                    first_key: Redacted::new(b"a".to_vec()),
                     child_slot: l0,
                     child_hash: lh0,
                 },
                 ChildPointer {
-                    first_key: b"m".to_vec(),
+                    first_key: Redacted::new(b"m".to_vec()),
                     child_slot: mid_slot,
                     child_hash: mid_hash,
                 },
@@ -1048,7 +1051,7 @@ mod tests {
             &mut s,
             &IndexNode::Leaf(LeafNode {
                 namespace: ns,
-                entries: vec![entry],
+                entries: Redacted::new(vec![entry]),
             }),
             1,
         );
@@ -1056,12 +1059,12 @@ mod tests {
             namespace: ns,
             children: vec![
                 ChildPointer {
-                    first_key: b"a".to_vec(),
+                    first_key: Redacted::new(b"a".to_vec()),
                     child_slot: l0,
                     child_hash: lh0,
                 },
                 ChildPointer {
-                    first_key: b"b".to_vec(),
+                    first_key: Redacted::new(b"b".to_vec()),
                     child_slot: l0,
                     child_hash: lh0,
                 },
@@ -1111,10 +1114,10 @@ mod tests {
         let self_slot = s.file.slot_count();
         let node = IndexNode::Leaf(LeafNode {
             namespace: ns,
-            entries: vec![(
+            entries: Redacted::new(vec![(
                 super::super::log::log_id_key(7).to_vec(),
                 super::super::log::encode_batch_slot_value(self_slot).to_vec(),
-            )],
+            )]),
         });
         let (slot, hash) = seal_node(&mut s, &node, 1);
         assert_eq!(slot, self_slot, "leaf must land on the slot it names");
