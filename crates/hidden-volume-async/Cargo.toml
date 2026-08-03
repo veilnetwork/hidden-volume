@@ -36,8 +36,10 @@ zeroize = "1.8"
 
 [dev-dependencies]
 tempfile = "3.10"
-# `#[tokio::test]` macros + multi-thread runtime for tests.
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync"] }
+# `#[tokio::test]` macros + multi-thread runtime for tests. `time` is
+# used only by the HV-11 abandonment tests, to poll a filed operation
+# until it settles.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 # `StreamExt::next` / `StreamExt::collect` for consuming streams in tests.
 # Test-only — production callers can use any executor with a `StreamExt`
 # implementation (futures, tokio-stream, etc.).
