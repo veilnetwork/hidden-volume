@@ -195,6 +195,11 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-default-features --no-deps
 cargo test --workspace --all-features --no-fail-fast
 scripts/dump-public-api.sh --check
 scripts/check-docs-version-drift.sh
+# Per-method UniFFI checksum table in the hand-written Dart bindings
+# (audit HV-05). Needs the cdylib built first; a stale table fails
+# closed at app launch, so this drift check belongs with the others.
+cargo build -p hidden-volume-ffi --release
+scripts/regen-dart-checksums.py --check
 # Android cross-compile gate (catches the `target_os = "android"`
 # branch — std `try_lock` Err(Unsupported) on Android meant the v1.x
 # Android-flock hardening (commit 7e4bf4a) routed through libc
