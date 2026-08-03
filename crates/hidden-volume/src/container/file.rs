@@ -244,8 +244,12 @@ fn fsync_parent_dir_strict(path: &std::path::Path) -> Result<()> {
             "test hook: forced parent-dir fsync failure",
         )));
     }
-    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let dir = std::fs::File::open(parent)?;
+    // `super::parent_dir_for`, not `path.parent()`: a bare file name has an
+    // EMPTY parent, not an absent one, and opening "" is ENOENT. Getting this
+    // wrong here did not merely skip the fsync — it failed `create` outright
+    // and the `UnlinkOnDrop` guard above then removed the container that had
+    // already been written (report5 HV-P0).
+    let dir = std::fs::File::open(super::parent_dir_for(path))?;
     dir.sync_all()?;
     Ok(())
 }

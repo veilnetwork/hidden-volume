@@ -1422,6 +1422,35 @@ where
     Ok(())
 }
 
+/// The directory that holds `path` — for opening a handle to fsync, or
+/// for placing a sibling temp file.
+///
+/// **`Path::parent` does not answer `None` for a bare file name.** For
+/// `"store.hv"` it answers `Some("")`, so the obvious
+/// `parent().unwrap_or(Path::new("."))` never fires and the caller ends
+/// up at `File::open("")` — ENOENT. That single mistake, copied to three
+/// call sites, made every relative-basename path fail: `Container::create`
+/// returned `Err(NotFound)` *and* its `UnlinkOnDrop` guard then deleted
+/// the container it had just successfully written, and
+/// `change_passwords` / `compact_known` returned
+/// `RenameVisibleDurabilityUncertain` (report5 HV-P0). `"./store.hv"`
+/// worked and `"store.hv"` did not, which is not a distinction any caller
+/// can be expected to know about.
+///
+/// One helper rather than a condition to re-remember: the empty-parent
+/// case is exactly the kind of thing a fourth call site gets wrong again.
+///
+/// Note the two shapes that are NOT the empty case and must keep their
+/// own answer: `"/store.hv"` → `"/"`, and `"/"` → `None` (no parent at
+/// all), for which `"."` is as good an answer as any — it is not a
+/// container path.
+fn parent_dir_for(path: &std::path::Path) -> &std::path::Path {
+    match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => std::path::Path::new("."),
+    }
+}
+
 /// Build a unique temp filename in `path`'s parent directory using 16
 /// hex chars of entropy. Creates and immediately closes the file with
 /// `create_new = true` so we hold a true reservation; `repack_into_dest`
@@ -1429,7 +1458,7 @@ where
 /// `create_new` flag — so we delete our reservation just before so the
 /// re-create succeeds. Returns the validated path.
 fn unique_temp_path_in_parent(path: &std::path::Path, prefix: &str) -> Result<std::path::PathBuf> {
-    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let parent = parent_dir_for(path);
     let stem = path.file_name().and_then(|s| s.to_str()).unwrap_or("hv");
     // Track the last AlreadyExists kind we observed so the final
     // error surfaces a useful diagnostic. With 8 random bytes
@@ -1499,10 +1528,13 @@ fn fsync_parent_dir(path: &std::path::Path) -> std::io::Result<()> {
                 "test hook: forced parent-dir fsync failure",
             ));
         }
-        let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
         // Retry once on EINTR — a signal arriving mid-fsync is not a durability
         // problem, and surfacing it as one would fail rotations for no reason.
-        let dir = std::fs::File::open(parent)?;
+        // `parent_dir_for` handles the bare-file-name case, whose parent is
+        // `Some("")` rather than `None`; opening "" is ENOENT, which surfaced
+        // to the caller as `RenameVisibleDurabilityUncertain` on every
+        // rotation or compaction addressed by basename (report5 HV-P0).
+        let dir = std::fs::File::open(parent_dir_for(path))?;
         match dir.sync_all() {
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => dir.sync_all(),
             other => other,
