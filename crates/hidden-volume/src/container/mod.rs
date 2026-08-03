@@ -1427,6 +1427,7 @@ fn unique_temp_path_in_parent(path: &std::path::Path, prefix: &str) -> Result<st
 fn fsync_parent_dir(path: &std::path::Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
+        #[cfg(test)]
         if fsync_parent_dir_should_fail() {
             return Err(std::io::Error::other("test hook: forced parent-dir fsync failure"));
         }
@@ -1448,18 +1449,25 @@ fn fsync_parent_dir(path: &std::path::Path) -> std::io::Result<()> {
     }
 }
 
-/// Test-only switch that makes [`fsync_parent_dir`] report failure.
-///
-/// The condition it simulates cannot be provoked from outside: revoking read
-/// permission on the parent directory would break the temp-file write long
-/// before the fsync, so there is no way to reach only this step.
-#[cfg(unix)]
-static FSYNC_PARENT_DIR_FAILS: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+#[cfg(all(test, unix))]
+thread_local! {
+    /// Test-only switch that makes [`fsync_parent_dir`] report failure.
+    ///
+    /// The condition it simulates cannot be provoked from outside: revoking
+    /// read permission on the parent directory would break the temp-file
+    /// write long before the fsync, so there is no way to reach only this
+    /// step.
+    ///
+    /// Thread-local for the same reason as
+    /// `container::file::CREATE_FSYNC_FAILS`: a process-global switch armed
+    /// every parallel test in the binary, not the one call the arming test
+    /// makes.
+    static FSYNC_PARENT_DIR_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 fn fsync_parent_dir_should_fail() -> bool {
-    FSYNC_PARENT_DIR_FAILS.load(std::sync::atomic::Ordering::Relaxed)
+    FSYNC_PARENT_DIR_FAILS.with(std::cell::Cell::get)
 }
 
 fn compact_in_place_impl(
@@ -1496,14 +1504,14 @@ mod hv03_tests {
 
     impl ForcedFsyncFailure {
         fn arm() -> Self {
-            FSYNC_PARENT_DIR_FAILS.store(true, std::sync::atomic::Ordering::Relaxed);
+            FSYNC_PARENT_DIR_FAILS.with(|c| c.set(true));
             Self
         }
     }
 
     impl Drop for ForcedFsyncFailure {
         fn drop(&mut self) {
-            FSYNC_PARENT_DIR_FAILS.store(false, std::sync::atomic::Ordering::Relaxed);
+            FSYNC_PARENT_DIR_FAILS.with(|c| c.set(false));
         }
     }
 
