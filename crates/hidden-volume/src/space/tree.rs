@@ -47,6 +47,7 @@ use zeroize::Zeroizing;
 
 use crate::chunk::ChunkKind;
 use crate::chunk::format::PAYLOAD_CAP;
+use crate::redact::Redacted;
 use crate::tx::commit::{IndexRoot, blake3_of};
 use crate::{Error, Result};
 
@@ -272,10 +273,10 @@ impl<'f> Space<'f> {
         if run.entries.is_empty() {
             return Ok(());
         }
-        let first_key = run.entries[0].0.clone();
+        let first_key = Redacted::new(run.entries[0].0.clone());
         let node = LeafNode {
             namespace: run.ns,
-            entries: std::mem::take(&mut run.entries),
+            entries: Redacted::new(std::mem::take(&mut run.entries)),
         };
         run.fill = NODE_HEADER_LEN;
         // Encoded leaf carries user KV bytes; scrub on drop.
@@ -441,7 +442,7 @@ impl<'f> Space<'f> {
             // The root has no parent to name a first_key; it is never
             // used, because the leaf a descent lands on is always
             // rewritten (the key that steered the descent is in it).
-            first_key: Vec::new(),
+            first_key: Redacted::default(),
             child_slot: root.index_slot,
             child_hash: root.payload_hash,
         };
@@ -552,7 +553,7 @@ impl<'f> Space<'f> {
                     },
                 },
             };
-            for (key, value) in node.entries {
+            for (key, value) in node.entries.into_inner() {
                 // Operations sorted below this entry are insertions.
                 while pending
                     .peek()
@@ -758,7 +759,7 @@ mod tests {
                     out.push((
                         depth,
                         'I',
-                        i.children.iter().map(|c| c.first_key.clone()).collect(),
+                        i.children.iter().map(|c| c.first_key.to_vec()).collect(),
                     ));
                     for c in &i.children {
                         walk(s, c.child_slot, ns, depth + 1, out);

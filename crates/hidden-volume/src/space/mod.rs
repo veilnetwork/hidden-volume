@@ -24,6 +24,7 @@ use crate::container::ContainerFile;
 use crate::crypto::aead::{ChunkAead, make_aad};
 use crate::crypto::derive::{SpaceKeys, derive_chunk_key};
 use crate::open::{scan_and_recover, scan_and_recover_with_cancel};
+use crate::redact::{Redacted, redacted_debug};
 use crate::tx::Tx;
 use crate::tx::commit::{CommitPayload, IndexRoot};
 use crate::{CHUNK_SIZE, Error, NONCE_LEN, Result};
@@ -166,7 +167,6 @@ pub struct IntegrityReport {
 
 /// In-memory state of an opened space. Not part of the public API — the
 /// public surface is [`Space`].
-#[derive(Debug)]
 pub(crate) struct SpaceState {
     /// Zeroized on drop. Read `keys.container_id` for the space's binding id —
     /// `SpaceState` used to carry a second, plain `[u8; 32]` copy of it, which
@@ -200,9 +200,14 @@ pub(crate) struct SpaceState {
     /// `commit_tx` advances `superblock.seq` and clears this, and the `seq`
     /// equality check is a backstop, so a stale era can never be served (`seq`
     /// is strictly monotonic per space — DESIGN §6 Inv-W3). The bytes are
-    /// decrypted plaintext, held in [`Zeroizing`] and scrubbed on drop / replace
+    /// decrypted plaintext, held in [`Redacted`] and scrubbed on drop / replace
     /// so they never outlive their commit era in cleartext.
-    pub roots_payload_cache: Option<(u64, Zeroizing<Vec<u8>>)>,
+    ///
+    /// It used to be a [`Zeroizing`], which scrubs but does **not** redact:
+    /// the upstream crate derives `Debug` on that wrapper, so this field
+    /// printed a decrypted commit payload byte for byte through any `{:?}`
+    /// that reached it (audit HV-01).
+    pub roots_payload_cache: Option<(u64, Redacted<Vec<u8>>)>,
     /// Highest `seq` for which a Superblock replica may already be on disk,
     /// whether or not the publish that wrote it completed.
     ///
@@ -242,6 +247,19 @@ pub(crate) struct SpaceState {
     pub unreadable_newer_superblock: Option<u64>,
 }
 
+// `keys` redacts itself and `roots_payload_cache` is [`Redacted`], so both
+// are safe to name; the allow-list shape means a field added later prints
+// nothing until someone adds it here (audit HV-01).
+redacted_debug!(SpaceState {
+    keys,
+    superblock,
+    commit_history,
+    last_padding_error,
+    roots_payload_cache,
+    attempted_seq,
+    unreadable_newer_superblock
+});
+
 impl SpaceState {
     /// `container_id` is no longer a parameter: it was always
     /// `keys.container_id` at every call site, and taking it separately is what
@@ -272,11 +290,12 @@ impl SpaceState {
 /// ties the space to the file handle that opened it; this statically
 /// prevents using a stale `Space` after the container is closed or
 /// reopened.
-#[derive(Debug)]
 pub struct Space<'f> {
     file: &'f mut ContainerFile,
     state: SpaceState,
 }
+
+redacted_debug!(Space<'f> { state });
 
 impl<'f> Space<'f> {
     /// Open an existing space identified by `keys`. Performs the
@@ -824,7 +843,7 @@ impl<'f> Space<'f> {
         let node = self.read_index_node_at_expected(slot, namespace)?;
         match node {
             IndexNode::Leaf(l) => {
-                out.extend(l.entries);
+                out.extend(l.entries.into_inner());
                 Ok(())
             },
             IndexNode::Internal(i) => {
@@ -870,7 +889,7 @@ impl<'f> Space<'f> {
                 // `for (k, _value) in l.entries` — by value, so each value's
                 // allocation is freed at the end of its iteration instead of
                 // being carried to the end of the walk.
-                for (k, _value) in l.entries {
+                for (k, _value) in l.entries.into_inner() {
                     if out.len() >= limit {
                         break;
                     }
@@ -994,7 +1013,7 @@ impl<'f> Space<'f> {
         let cp = CommitPayload::decode(&pt.payload)?;
         // Cache the verified, AEAD-decrypted payload bytes (Zeroizing) keyed by
         // the current seq for subsequent lookups in the same commit era.
-        self.state.roots_payload_cache = Some((seq, Zeroizing::new(pt.payload)));
+        self.state.roots_payload_cache = Some((seq, Redacted::new(pt.payload)));
         Ok(cp.roots)
     }
 

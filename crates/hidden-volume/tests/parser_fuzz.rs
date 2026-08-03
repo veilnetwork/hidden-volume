@@ -17,6 +17,7 @@
 use hidden_volume::chunk::format::Plaintext;
 use hidden_volume::container::Header;
 use hidden_volume::crypto::kdf::{Argon2Params, PARAMS_VERSION};
+use hidden_volume::redact::Redacted;
 use hidden_volume::space::index::{IndexNode, InternalNode, LeafNode, Namespace};
 use hidden_volume::space::log::{decode_batch, encode_batch};
 use hidden_volume::space::superblock::Superblock;
@@ -140,21 +141,21 @@ proptest! {
             sorted.insert(k, v);
         }
         let entries: Vec<(Vec<u8>, Vec<u8>)> = sorted.into_iter().collect();
-        let leaf = LeafNode { namespace: Namespace(ns), entries: entries.clone() };
+        let leaf = LeafNode { namespace: Namespace(ns), entries: Redacted::new(entries.clone()) };
         let bytes = match leaf.encode() {
             Ok(b) => b,
             Err(_) => return Ok(()), // overflow, skip
         };
         let leaf2 = LeafNode::decode(&bytes).unwrap();
         prop_assert_eq!(leaf2.namespace.0, ns);
-        prop_assert_eq!(&leaf2.entries, &entries);
+        prop_assert_eq!(leaf2.entries.as_inner(), &entries);
 
         // And via the IndexNode enum path:
         let node = IndexNode::Leaf(leaf);
         let bytes2 = node.encode().unwrap();
         let node2 = IndexNode::decode(&bytes2).unwrap();
         match node2 {
-            IndexNode::Leaf(l) => prop_assert_eq!(l.entries, entries),
+            IndexNode::Leaf(l) => prop_assert_eq!(l.entries.into_inner(), entries),
             IndexNode::Internal(_) => prop_assert!(false, "expected Leaf"),
         }
     }
@@ -179,7 +180,7 @@ proptest! {
         let children: Vec<hidden_volume::space::index::ChildPointer> = by_key
             .into_iter()
             .map(|(k, (slot, hash))| hidden_volume::space::index::ChildPointer {
-                first_key: k,
+                first_key: Redacted::new(k),
                 child_slot: slot,
                 child_hash: hash,
             })

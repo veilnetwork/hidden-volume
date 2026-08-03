@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-03T18:44:38Z
+# Captured: 2026-08-03T21:41:03Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -147,26 +147,27 @@ crypto/rng.rs:  8:pub fn fill(buf: &mut [u8]) -> Result<()> {
 crypto/rng.rs:  13:pub fn random_array<const N: usize>() -> Result<[u8; N]> {
 error.rs:  10:pub type Result<T, E = Error> = core::result::Result<T, E>;
 error.rs:  17:pub enum Error {
-lib.rs:  153:pub mod cancel;
-lib.rs:  154:pub mod chunk;
-lib.rs:  155:pub mod container;
-lib.rs:  156:pub mod crypto;
-lib.rs:  157:pub mod error;
-lib.rs:  162:pub mod multi;
-lib.rs:  164:pub mod padding;
-lib.rs:  165:pub mod space;
-lib.rs:  166:pub mod tx;
-lib.rs:  168:pub use container::Container;
-lib.rs:  169:pub use error::{Error, Result};
-lib.rs:  170:pub use multi::MultiSpace;
-lib.rs:  171:pub use open::MAX_OPEN_SCAN_CHUNKS;
-lib.rs:  172:pub use space::Space;
-lib.rs:  176:pub const CHUNK_SIZE: usize = 4096;
-lib.rs:  202:pub const HEADER_PARAMS_OFFSET: usize = 32;
-lib.rs:  205:pub const HEADER_PARAMS_LEN: usize = 16;
-lib.rs:  211:pub const NONCE_LEN: usize = 24;
-lib.rs:  214:pub const TAG_LEN: usize = 16;
-lib.rs:  217:pub const PLAINTEXT_LEN: usize = CHUNK_SIZE - NONCE_LEN - TAG_LEN;
+lib.rs:  154:pub mod cancel;
+lib.rs:  155:pub mod chunk;
+lib.rs:  156:pub mod container;
+lib.rs:  157:pub mod crypto;
+lib.rs:  158:pub mod error;
+lib.rs:  163:pub mod multi;
+lib.rs:  165:pub mod padding;
+lib.rs:  166:pub mod redact;
+lib.rs:  167:pub mod space;
+lib.rs:  168:pub mod tx;
+lib.rs:  170:pub use container::Container;
+lib.rs:  171:pub use error::{Error, Result};
+lib.rs:  172:pub use multi::MultiSpace;
+lib.rs:  173:pub use open::MAX_OPEN_SCAN_CHUNKS;
+lib.rs:  174:pub use space::Space;
+lib.rs:  178:pub const CHUNK_SIZE: usize = 4096;
+lib.rs:  204:pub const HEADER_PARAMS_OFFSET: usize = 32;
+lib.rs:  207:pub const HEADER_PARAMS_LEN: usize = 16;
+lib.rs:  213:pub const NONCE_LEN: usize = 24;
+lib.rs:  216:pub const TAG_LEN: usize = 16;
+lib.rs:  219:pub const PLAINTEXT_LEN: usize = CHUNK_SIZE - NONCE_LEN - TAG_LEN;
 multi.rs:  30:pub struct MultiSpace {
 multi.rs:  50:    pub fn new(container: Container) -> Self {
 multi.rs:  60:    pub fn derive_space_keys(&self, password: &[u8]) -> Result<SpaceKeys> {
@@ -184,31 +185,37 @@ padding/mod.rs:  69:    pub const DEFAULT: Self = Self::BucketGrowth { bucket_ch
 padding/mod.rs:  91:    pub fn from_persisted_index(idx: u8) -> Self {
 padding/mod.rs:  108:    pub fn to_persisted_index(&self) -> Option<u8> {
 padding/mod.rs:  133:    pub fn garbage_after_commit(
-space/index.rs:  89:pub struct Namespace(pub u8);
-space/index.rs:  93:    pub const SETTINGS: Self = Self(1);
-space/index.rs:  95:    pub const CONTACTS: Self = Self(2);
-space/index.rs:  97:    pub const MESSAGE_LOG: Self = Self(3);
-space/index.rs:  99:    pub const MEDIA: Self = Self(4);
-space/index.rs:  101:    pub const RESERVED: Self = Self(0);
-space/index.rs:  105:    pub fn as_u8(self) -> u8 {
-space/index.rs:  118:pub const MAX_KEY_LEN: usize = 256;
-space/index.rs:  120:pub const MAX_VALUE_LEN: usize = 2048;
-space/index.rs:  271:pub struct ChildPointer {
-space/index.rs:  289:pub struct LeafNode {
-space/index.rs:  301:pub struct InternalNode {
-space/index.rs:  310:pub enum IndexNode {
-space/index.rs:  320:    pub fn encode(&self) -> Result<Vec<u8>> {
-space/index.rs:  329:    pub fn decode(bytes: &[u8]) -> Result<Self> {
-space/index.rs:  344:    pub fn new(namespace: Namespace) -> Self {
-space/index.rs:  354:    pub fn encoded_len(&self) -> usize {
-space/index.rs:  367:    pub fn encode(&self) -> Result<Vec<u8>> {
-space/index.rs:  407:    pub fn decode(bytes: &[u8]) -> Result<Self> {
-space/index.rs:  484:    pub fn get(&self, key: &[u8]) -> Option<&[u8]> {
-space/index.rs:  498:    pub fn new(namespace: Namespace) -> Self {
-space/index.rs:  508:    pub fn encoded_len(&self) -> usize {
-space/index.rs:  521:    pub fn encode(&self) -> Result<Vec<u8>> {
-space/index.rs:  565:    pub fn decode(bytes: &[u8]) -> Result<Self> {
-space/index.rs:  645:    pub fn child_index_for(&self, key: &[u8]) -> usize {
+redact.rs:  60:pub struct SecretShape {
+redact.rs:  74:pub trait Secret {
+redact.rs:  89:pub struct Redacted<T: Secret> {
+redact.rs:  95:    pub const fn new(inner: T) -> Self {
+redact.rs:  101:    pub const fn as_inner(&self) -> &T {
+redact.rs:  113:    pub fn into_inner(mut self) -> T {
+space/index.rs:  90:pub struct Namespace(pub u8);
+space/index.rs:  94:    pub const SETTINGS: Self = Self(1);
+space/index.rs:  96:    pub const CONTACTS: Self = Self(2);
+space/index.rs:  98:    pub const MESSAGE_LOG: Self = Self(3);
+space/index.rs:  100:    pub const MEDIA: Self = Self(4);
+space/index.rs:  102:    pub const RESERVED: Self = Self(0);
+space/index.rs:  106:    pub fn as_u8(self) -> u8 {
+space/index.rs:  119:pub const MAX_KEY_LEN: usize = 256;
+space/index.rs:  121:pub const MAX_VALUE_LEN: usize = 2048;
+space/index.rs:  277:pub struct ChildPointer {
+space/index.rs:  304:pub struct LeafNode {
+space/index.rs:  318:pub struct InternalNode {
+space/index.rs:  332:pub enum IndexNode {
+space/index.rs:  342:    pub fn encode(&self) -> Result<Vec<u8>> {
+space/index.rs:  351:    pub fn decode(bytes: &[u8]) -> Result<Self> {
+space/index.rs:  366:    pub fn new(namespace: Namespace) -> Self {
+space/index.rs:  376:    pub fn encoded_len(&self) -> usize {
+space/index.rs:  389:    pub fn encode(&self) -> Result<Vec<u8>> {
+space/index.rs:  429:    pub fn decode(bytes: &[u8]) -> Result<Self> {
+space/index.rs:  509:    pub fn get(&self, key: &[u8]) -> Option<&[u8]> {
+space/index.rs:  523:    pub fn new(namespace: Namespace) -> Self {
+space/index.rs:  533:    pub fn encoded_len(&self) -> usize {
+space/index.rs:  546:    pub fn encode(&self) -> Result<Vec<u8>> {
+space/index.rs:  590:    pub fn decode(bytes: &[u8]) -> Result<Self> {
+space/index.rs:  670:    pub fn child_index_for(&self, key: &[u8]) -> usize {
 space/integrity.rs:  117:    pub fn verify_integrity(&mut self) -> Result<IntegrityReport> {
 space/log.rs:  58:pub const MAX_RECORDS_PER_BATCH: usize = 1024;
 space/log.rs:  62:pub const MAX_LOG_PAYLOAD_LEN: usize = 8 * 1024;
@@ -234,28 +241,28 @@ space/log_iter.rs:  344:    pub fn read_log(&mut self, namespace: Namespace, log
 space/mod.rs:  3:pub mod index;
 space/mod.rs:  4:pub mod log;
 space/mod.rs:  5:pub mod superblock;
-space/mod.rs:  64:pub struct SpaceStats {
-space/mod.rs:  96:    pub fn total_entries(&self) -> usize {
-space/mod.rs:  120:    pub fn utilization_ratio(&self) -> f64 {
-space/mod.rs:  142:pub struct IntegrityReport {
-space/mod.rs:  276:pub struct Space<'f> {
-space/mod.rs:  411:    pub fn commit_seq(&self) -> u64 {
-space/mod.rs:  427:    pub fn space_keys(&self) -> SpaceKeys {
-space/mod.rs:  465:    pub fn commit_history(&self) -> &[u64] {
-space/mod.rs:  485:    pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
-space/mod.rs:  496:    pub fn padding_policy(&self) -> crate::padding::PaddingPolicy {
-space/mod.rs:  508:    pub fn last_padding_error(&self) -> Option<&crate::Error> {
-space/mod.rs:  517:    pub fn audit_owned_chunk_count(&self) -> usize {
-space/mod.rs:  533:    pub fn stats(&mut self) -> Result<SpaceStats> {
-space/mod.rs:  551:    pub fn begin_tx<'s>(&'s mut self) -> Tx<'s, 'f> {
-space/mod.rs:  564:    pub fn get(&mut self, namespace: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>> {
-space/mod.rs:  600:    pub fn list(&mut self, namespace: Namespace) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-space/mod.rs:  626:    pub fn list_keys(&mut self, namespace: Namespace) -> Result<Vec<Vec<u8>>> {
-space/mod.rs:  646:    pub fn list_keys_after(
-space/mod.rs:  672:    pub fn count(&mut self, namespace: Namespace) -> Result<usize> {
-space/mod.rs:  725:    pub fn erase_namespace(&mut self, namespace: Namespace) -> Result<usize> {
-space/mod.rs:  756:    pub fn list_namespaces(&mut self) -> Result<Vec<Namespace>> {
-space/mod.rs:  768:    pub fn list_namespaces_with_kind(
+space/mod.rs:  65:pub struct SpaceStats {
+space/mod.rs:  97:    pub fn total_entries(&self) -> usize {
+space/mod.rs:  121:    pub fn utilization_ratio(&self) -> f64 {
+space/mod.rs:  143:pub struct IntegrityReport {
+space/mod.rs:  293:pub struct Space<'f> {
+space/mod.rs:  430:    pub fn commit_seq(&self) -> u64 {
+space/mod.rs:  446:    pub fn space_keys(&self) -> SpaceKeys {
+space/mod.rs:  484:    pub fn commit_history(&self) -> &[u64] {
+space/mod.rs:  504:    pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
+space/mod.rs:  515:    pub fn padding_policy(&self) -> crate::padding::PaddingPolicy {
+space/mod.rs:  527:    pub fn last_padding_error(&self) -> Option<&crate::Error> {
+space/mod.rs:  536:    pub fn audit_owned_chunk_count(&self) -> usize {
+space/mod.rs:  552:    pub fn stats(&mut self) -> Result<SpaceStats> {
+space/mod.rs:  570:    pub fn begin_tx<'s>(&'s mut self) -> Tx<'s, 'f> {
+space/mod.rs:  583:    pub fn get(&mut self, namespace: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>> {
+space/mod.rs:  619:    pub fn list(&mut self, namespace: Namespace) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+space/mod.rs:  645:    pub fn list_keys(&mut self, namespace: Namespace) -> Result<Vec<Vec<u8>>> {
+space/mod.rs:  665:    pub fn list_keys_after(
+space/mod.rs:  691:    pub fn count(&mut self, namespace: Namespace) -> Result<usize> {
+space/mod.rs:  744:    pub fn erase_namespace(&mut self, namespace: Namespace) -> Result<usize> {
+space/mod.rs:  775:    pub fn list_namespaces(&mut self) -> Result<Vec<Namespace>> {
+space/mod.rs:  787:    pub fn list_namespaces_with_kind(
 space/superblock.rs:  30:pub const NO_RECORD: u64 = u64::MAX;
 space/superblock.rs:  37:pub struct Superblock {
 space/superblock.rs:  72:    pub const ENCODED_LEN: usize = 8 + 8 + 32;
@@ -277,15 +284,15 @@ tx/commit.rs:  142:    pub fn decode(bytes: &[u8]) -> Result<Self> {
 tx/commit.rs:  202:    pub fn compute_tx_root_hash(roots: &[IndexRoot]) -> [u8; 32] {
 tx/commit.rs:  215:pub fn blake3_of(payload: &[u8]) -> [u8; 32] {
 tx/mod.rs:  28:pub mod commit;
-tx/mod.rs:  37:pub use commit::{CommitPayload, IndexRoot, MAX_NAMESPACES_PER_TX, NamespaceKind};
-tx/mod.rs:  74:pub struct Tx<'s, 'f> {
-tx/mod.rs:  159:    pub fn put(&mut self, namespace: Namespace, key: &[u8], value: &[u8]) -> Result<()> {
-tx/mod.rs:  187:    pub fn delete(&mut self, namespace: Namespace, key: &[u8]) -> Result<()> {
-tx/mod.rs:  288:    pub fn append_log(&mut self, namespace: Namespace, log_id: u64, payload: &[u8]) -> Result<()> {
-tx/mod.rs:  328:    pub fn delete_log(&mut self, namespace: Namespace, log_id: u64) -> Result<()> {
-tx/mod.rs:  349:    pub fn touched_namespaces(&self) -> usize {
-tx/mod.rs:  359:    pub fn is_empty(&self) -> bool {
-tx/mod.rs:  364:    pub fn commit(self) -> Result<u64> {
+tx/mod.rs:  40:pub use commit::{CommitPayload, IndexRoot, MAX_NAMESPACES_PER_TX, NamespaceKind};
+tx/mod.rs:  137:pub struct Tx<'s, 'f> {
+tx/mod.rs:  235:    pub fn put(&mut self, namespace: Namespace, key: &[u8], value: &[u8]) -> Result<()> {
+tx/mod.rs:  263:    pub fn delete(&mut self, namespace: Namespace, key: &[u8]) -> Result<()> {
+tx/mod.rs:  364:    pub fn append_log(&mut self, namespace: Namespace, log_id: u64, payload: &[u8]) -> Result<()> {
+tx/mod.rs:  404:    pub fn delete_log(&mut self, namespace: Namespace, log_id: u64) -> Result<()> {
+tx/mod.rs:  425:    pub fn touched_namespaces(&self) -> usize {
+tx/mod.rs:  435:    pub fn is_empty(&self) -> bool {
+tx/mod.rs:  440:    pub fn commit(self) -> Result<u64> {
 
 ==========================================
 crate: hidden-volume-rt
