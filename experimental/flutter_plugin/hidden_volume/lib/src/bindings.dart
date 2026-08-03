@@ -758,7 +758,12 @@ Uint8List? _readOptByteVec(Uint8List bytes) {
 /// (one of "Io", "AuthFailed", "SpaceAlreadyExists", "Busy", "ReadOnly",
 /// "Malformed", "Kdf", "Internal", "PayloadTooLarge", "IndexFull",
 /// "Compression", "Cancelled", "WrongNamespaceKind", "TooManyNamespaces",
-/// "IntegrityFailure", or "InternalPanic" for an unexpected Rust panic).
+/// "IntegrityFailure", "ContainerTooLarge", or "InternalPanic" for an
+/// unexpected Rust panic).
+///
+/// "ContainerTooLarge" now also covers OPENING a container past the
+/// open-scan budget; it used to arrive as "Malformed", which said the
+/// container was corrupt when it was merely large (audit HV-13).
 class HvException implements Exception {
   HvException(this.kind, this.message);
   final String kind;

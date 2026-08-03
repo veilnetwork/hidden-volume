@@ -170,15 +170,19 @@ pub enum HvError {
         /// Slot index of the offending chunk.
         slot: u64,
     },
-    /// A write would push the container past the open-scan budget
-    /// (`MAX_OPEN_SCAN_CHUNKS`). Caller-actionable: shrink
-    /// `initial_garbage_chunks`, pick a lighter [`PaddingPreset`], or
-    /// partition the container. NOT a crate bug — distinct from
-    /// [`HvError::Internal`].
-    #[error("container would exceed open-scan budget (slot_count + {extra} > {cap})")]
+    /// The container is past the open-scan budget
+    /// (`MAX_OPEN_SCAN_CHUNKS`) — raised both by a write that would push
+    /// it over and by an open of a file already over (audit HV-13; the
+    /// read side used to surface as [`HvError::Malformed`], which told a
+    /// foreign-side caller its intact container was corrupt).
+    ///
+    /// Caller-actionable: shrink `initial_garbage_chunks`, pick a lighter
+    /// [`PaddingPreset`], or partition the container. NOT a crate bug —
+    /// distinct from [`HvError::Internal`].
+    #[error("container exceeds open-scan budget ({chunks} chunks > cap {cap})")]
     ContainerTooLarge {
-        /// Slots the failing write would have added.
-        extra: u64,
+        /// The chunk count that tripped the budget.
+        chunks: u64,
         /// Hard cap (`MAX_OPEN_SCAN_CHUNKS`).
         cap: u64,
     },
@@ -208,7 +212,7 @@ impl From<hidden_volume::Error> for HvError {
                 detail: detail.into(),
                 slot,
             },
-            E::ContainerTooLarge { extra, cap } => HvError::ContainerTooLarge { extra, cap },
+            E::ContainerTooLarge { chunks, cap } => HvError::ContainerTooLarge { chunks, cap },
             // `hidden_volume::Error` is `#[non_exhaustive]`, so this
             // catch-all is mandatory. It is a deniability-safe default
             // for any variant added upstream but not yet mapped here —
@@ -2266,15 +2270,15 @@ mod tests {
     fn container_too_large_maps_to_typed_variant() {
         // Audit pass 20: a caller-actionable core variant must NOT
         // collapse into the `Internal("unknown error variant")`
-        // catch-all — FFI hosts need the typed kind + the extra/cap
+        // catch-all — FFI hosts need the typed kind + the chunks/cap
         // diagnostic fields.
         let core = hidden_volume::Error::ContainerTooLarge {
-            extra: 5,
+            chunks: 16_000_005,
             cap: 16_000_000,
         };
         match HvError::from(core) {
-            HvError::ContainerTooLarge { extra, cap } => {
-                assert_eq!(extra, 5);
+            HvError::ContainerTooLarge { chunks, cap } => {
+                assert_eq!(chunks, 16_000_005);
                 assert_eq!(cap, 16_000_000);
             },
             other => panic!("expected typed ContainerTooLarge, got {other:?}"),

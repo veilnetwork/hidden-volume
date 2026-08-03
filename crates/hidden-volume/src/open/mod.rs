@@ -129,9 +129,26 @@ pub const MAX_OPEN_SCAN_CHUNKS: u64 = 16 * 1024 * 1024;
 /// "audit pass 16 TM1 mitigation; see crate::open::MAX_OPEN_SCAN_CHUNKS",
 /// which surfaced internal release-engineering metadata to foreign-side
 /// FFI consumers. The pointer now lives only in this code-comment.
+///
+/// **Audit HV-13**: the answer is [`Error::ContainerTooLarge`], not
+/// `Error::Malformed`. An over-budget container is not malformed — every
+/// byte in it is exactly what the writer wrote — and the two call for
+/// opposite responses from a host app: a corrupt container's data is gone,
+/// an over-budget one's is intact and reachable by splitting the file.
+/// Reporting the corruption error for the size condition told the host the
+/// wrong one of those, and the variant that says the right one already
+/// existed and was already used by the symmetric write-side gate.
+///
+/// The check reads the slot count and nothing else — no key material is
+/// touched before it — so the outcome is identical for every password and
+/// for none, and the fact it reveals (the file's size) is one that anyone
+/// who can `stat` the file already has.
 fn check_scan_budget(total: u64) -> Result<()> {
     if total > MAX_OPEN_SCAN_CHUNKS {
-        return Err(Error::Malformed("container exceeds open-scan budget"));
+        return Err(Error::ContainerTooLarge {
+            chunks: total,
+            cap: MAX_OPEN_SCAN_CHUNKS,
+        });
     }
     Ok(())
 }
@@ -1190,5 +1207,72 @@ mod candidate_bound_tests {
         push_sb_candidate(&mut map, 7, vec![2u8; 48]);
         assert_eq!(map.len(), 1);
         assert_eq!(map[&7], vec![2u8; 48]);
+    }
+}
+
+#[cfg(test)]
+mod hv13_budget_tests {
+    use super::{MAX_OPEN_SCAN_CHUNKS, check_scan_budget};
+    use crate::Error;
+
+    /// The boundary itself. `check_scan_budget` rejects on `>`, so the cap is
+    /// the last openable count — a container exactly at it must open, and one
+    /// slot past it must not. Testing far from the boundary would pass just as
+    /// happily with a `>=`, which would make the largest legal container
+    /// unreadable.
+    #[test]
+    fn the_cap_is_inclusive_and_one_past_it_is_not() {
+        assert!(
+            check_scan_budget(MAX_OPEN_SCAN_CHUNKS).is_ok(),
+            "a container exactly at the cap must still open — the write side \
+             allows it, so refusing it here would strand a file this library made"
+        );
+        assert!(check_scan_budget(MAX_OPEN_SCAN_CHUNKS + 1).is_err());
+    }
+
+    /// Audit HV-13. The rejection must say "too large", not "malformed".
+    ///
+    /// The distinction is the finding: an over-budget container has lost
+    /// nothing — every byte is what the writer wrote, and splitting the file
+    /// brings it back — while `Malformed` is what this library says when data
+    /// is gone. A host app that cannot tell them apart will either destroy a
+    /// recoverable container or reassure a user whose data is not there.
+    #[test]
+    fn an_over_budget_container_is_too_large_rather_than_malformed() {
+        let err = check_scan_budget(MAX_OPEN_SCAN_CHUNKS + 1).unwrap_err();
+        match err {
+            Error::ContainerTooLarge { chunks, cap } => {
+                assert_eq!(cap, MAX_OPEN_SCAN_CHUNKS);
+                assert_eq!(
+                    chunks,
+                    MAX_OPEN_SCAN_CHUNKS + 1,
+                    "the caller needs the observed count to decide how far to split"
+                );
+            },
+            Error::Malformed(m) => panic!(
+                "an intact over-budget container was reported as corrupt ({m:?})"
+            ),
+            other => panic!("expected ContainerTooLarge, got {other:?}"),
+        }
+    }
+
+    /// The read side and the write side must agree at the boundary, or the
+    /// library can write a file it cannot open. Pass 17 B made the CHECKS
+    /// symmetric; this pins that the ANSWERS are too, so a later change to one
+    /// error shape cannot quietly leave the other behind — which is exactly
+    /// how the two drifted the first time.
+    #[test]
+    fn both_sides_of_the_budget_answer_with_the_same_variant() {
+        let read_side = check_scan_budget(MAX_OPEN_SCAN_CHUNKS + 1).unwrap_err();
+        let write_side = crate::container::file::write_budget_error_for_test(
+            MAX_OPEN_SCAN_CHUNKS,
+            1,
+        );
+        assert!(
+            matches!(read_side, Error::ContainerTooLarge { .. })
+                && matches!(write_side, Error::ContainerTooLarge { .. }),
+            "read side said {read_side:?}, write side said {write_side:?}"
+        );
+        assert_eq!(format!("{read_side}"), format!("{write_side}"));
     }
 }
