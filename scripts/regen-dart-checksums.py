@@ -33,6 +33,10 @@ values are the RETURN of those symbols, not their names, so the script dlopens
 the library and calls each one. That also means it works identically on
 macOS (`.dylib`), Linux (`.so`), and Windows (`.dll`) — where `nm` reads
 neither of the other two's formats.
+
+WHICH library gets read is not decided here: `dylib_path` owns that, because
+`flutter test` has to load the same one, and the two answering differently is
+its own defect (see that module's header).
 """
 
 from __future__ import annotations
@@ -42,6 +46,8 @@ import ctypes
 import pathlib
 import re
 import sys
+
+import dylib_path
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 BINDINGS = ROOT / "experimental/flutter_plugin/hidden_volume/lib/src/bindings.dart"
@@ -56,35 +62,6 @@ NO_CHECKSUM_PREFIXES = ("clone_", "free_")
 
 FN_PREFIX = "uniffi_hidden_volume_ffi_fn_"
 CHECKSUM_PREFIX = "uniffi_hidden_volume_ffi_checksum_"
-
-
-def library_candidates() -> list[pathlib.Path]:
-    names = [
-        "libhidden_volume_ffi.dylib",
-        "libhidden_volume_ffi.so",
-        "hidden_volume_ffi.dll",
-    ]
-    out = []
-    for profile in ("release", "debug"):
-        for name in names:
-            out.append(ROOT / "target" / profile / name)
-    return out
-
-
-def resolve_library(explicit: str | None) -> pathlib.Path:
-    if explicit:
-        p = pathlib.Path(explicit)
-        if not p.exists():
-            sys.exit(f"error: no such library: {p}")
-        return p
-    for c in library_candidates():
-        if c.exists():
-            return c
-    sys.exit(
-        "error: cdylib not found. Build it first:\n"
-        "    cargo build -p hidden-volume-ffi --release\n"
-        "Searched:\n  " + "\n  ".join(str(c) for c in library_candidates())
-    )
 
 
 def bound_symbols(source: str) -> list[str]:
@@ -160,11 +137,17 @@ def main() -> int:
     ap.add_argument("--lib", help="path to the built cdylib")
     args = ap.parse_args()
 
+    # Before anything else: the answer below is only worth having if the Dart
+    # tests will load the same library this run reads. An explicit --lib is the
+    # caller overriding both resolvers at once, so the agreement is moot there.
+    if not args.lib:
+        dylib_path.assert_dart_order_matches(ROOT)
+
     source = BINDINGS.read_text()
     fn_symbols = bound_symbols(source)
     wanted = [s for s in (checksum_symbol(f) for f in fn_symbols) if s]
 
-    lib_path = resolve_library(args.lib)
+    lib_path = dylib_path.resolve(ROOT, args.lib)
     checksums = read_checksums(lib_path, wanted)
     updated = splice(source, render_table(checksums))
 
@@ -172,11 +155,15 @@ def main() -> int:
         if updated != source:
             print(
                 "ERROR: the UniFFI checksum table in bindings.dart is stale.\n"
+                f"Checked against: {lib_path}\n"
                 "Regenerate it with: scripts/regen-dart-checksums.py",
                 file=sys.stderr,
             )
             return 1
-        print(f"checksum table is up to date ({len(checksums)} entries)")
+        # Name the artifact. "Up to date" is a claim about one specific file,
+        # and a reader comparing this line with a `flutter test` failure needs
+        # to see which.
+        print(f"checksum table is up to date ({len(checksums)} entries) — {lib_path}")
         return 0
 
     if updated == source:
