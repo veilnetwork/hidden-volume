@@ -1249,9 +1249,9 @@ mod hv13_budget_tests {
                     "the caller needs the observed count to decide how far to split"
                 );
             },
-            Error::Malformed(m) => panic!(
-                "an intact over-budget container was reported as corrupt ({m:?})"
-            ),
+            Error::Malformed(m) => {
+                panic!("an intact over-budget container was reported as corrupt ({m:?})")
+            },
             other => panic!("expected ContainerTooLarge, got {other:?}"),
         }
     }
@@ -1264,10 +1264,8 @@ mod hv13_budget_tests {
     #[test]
     fn both_sides_of_the_budget_answer_with_the_same_variant() {
         let read_side = check_scan_budget(MAX_OPEN_SCAN_CHUNKS + 1).unwrap_err();
-        let write_side = crate::container::file::write_budget_error_for_test(
-            MAX_OPEN_SCAN_CHUNKS,
-            1,
-        );
+        let write_side =
+            crate::container::file::write_budget_error_for_test(MAX_OPEN_SCAN_CHUNKS, 1);
         assert!(
             matches!(read_side, Error::ContainerTooLarge { .. })
                 && matches!(write_side, Error::ContainerTooLarge { .. }),

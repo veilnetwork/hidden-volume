@@ -578,8 +578,12 @@ fn iter_log_rejects_a_kv_namespace_like_the_other_log_reads() {
     // this one's, with no error at all. That is why the persisted kind has to
     // be consulted FIRST rather than inferred from the bytes.
     let mut tx = s.begin_tx();
-    tx.put(Namespace::SETTINGS, &1u64.to_be_bytes(), &9u64.to_le_bytes())
-        .unwrap();
+    tx.put(
+        Namespace::SETTINGS,
+        &1u64.to_be_bytes(),
+        &9u64.to_le_bytes(),
+    )
+    .unwrap();
     tx.commit().unwrap();
 
     assert!(
@@ -632,7 +636,8 @@ fn an_unencodable_log_record_is_refused_at_append_not_at_commit() {
     let mut tx = s.begin_tx();
     // A neighbouring write that must survive: the whole point is that one
     // oversized record no longer costs the caller the rest of the transaction.
-    tx.append_log(Namespace::MESSAGE_LOG, 1, b"keep me").unwrap();
+    tx.append_log(Namespace::MESSAGE_LOG, 1, b"keep me")
+        .unwrap();
     assert!(
         matches!(
             tx.append_log(Namespace::MESSAGE_LOG, 2, &incompressible),
@@ -641,7 +646,8 @@ fn an_unencodable_log_record_is_refused_at_append_not_at_commit() {
         "the record that cannot be encoded must be named at the call that \
          supplied it"
     );
-    tx.commit().expect("the rest of the transaction still commits");
+    tx.commit()
+        .expect("the rest of the transaction still commits");
 
     assert_eq!(
         s.iter_log(Namespace::MESSAGE_LOG).unwrap(),

@@ -375,7 +375,11 @@ mod hv01_tests {
     use crate::space::index::Namespace;
 
     fn scratch() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("hv01-{}-{:?}.bin", std::process::id(), std::thread::current().id()))
+        std::env::temp_dir().join(format!(
+            "hv01-{}-{:?}.bin",
+            std::process::id(),
+            std::thread::current().id()
+        ))
     }
 
     /// A vacuum on a handle whose last publish may have landed must refuse.
