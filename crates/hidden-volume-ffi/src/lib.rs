@@ -139,7 +139,8 @@ pub enum HvError {
     /// Per-chunk capacity exceeded.
     #[error("payload exceeds chunk capacity")]
     PayloadTooLarge,
-    /// Namespace's index has overflowed the 2-level B+ tree.
+    /// A namespace's index could not be built. Not a capacity limit
+    /// since audit HV-15 — see `hidden_volume::Error::IndexFull`.
     #[error("index full")]
     IndexFull,
     /// zstd compression / decompression failure.
@@ -633,7 +634,9 @@ pub struct IntegrityResult {
     pub namespaces_verified: u64,
     /// Total IndexNode + Commit chunks read and hash-matched.
     pub chunks_verified: u64,
-    /// Maximum tree depth observed across namespaces.
+    /// Maximum tree depth observed across namespaces, in levels
+    /// (1 = a namespace that fits in one leaf). Not capped by the
+    /// format since audit HV-15; 8 at the largest container allowed.
     pub max_depth: u32,
     /// `DataBatch` chunks AEAD-decrypted and `decode_batch`-validated
     /// (log namespaces only). Closes the M2 audit gap (2026-05-10).
@@ -925,9 +928,10 @@ impl SpaceHandle {
     /// Keys of every KV entry in `namespace`, framed into one byte buffer:
     /// `[count u32 LE] ( [len u32 LE][key bytes] )*`. A host app garbage-
     /// collecting stale bookkeeping keys needs enumeration: the KV index is
-    /// otherwise write/point-read only, and a namespace's 2-level B+ tree has
-    /// a hard entry budget ([`hidden_volume::Error::IndexFull`]), so orphaned
-    /// keys must be findable to be deletable. Same O(N) index walk as
+    /// otherwise write/point-read only, and every entry a namespace holds is
+    /// paid for on every commit to it (the index is re-materialised each
+    /// time), so orphaned keys must be findable to be deletable. Same O(N)
+    /// index walk as
     /// [`Self::count`];
     /// values are not decoded into the buffer.
     pub fn kv_keys(&self, namespace: u8) -> HvResult<Vec<u8>> {

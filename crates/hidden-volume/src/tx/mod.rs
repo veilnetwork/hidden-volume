@@ -262,17 +262,22 @@ impl<'s, 'f> Tx<'s, 'f> {
     /// buffer exceeds [`MAX_RECORDS_PER_BATCH`] (a per-Tx cap, not a
     /// per-on-disk-batch cap).
     ///
-    /// **Per-namespace `log_id` cap (honest scaling).** Each appended
+    /// **Per-namespace `log_id` scaling (audit HV-15).** Each appended
     /// `log_id` becomes one entry in the namespace's KV index (8-byte
-    /// log_id_key → 8-byte batch_slot pointer). The 2-level B+ tree
-    /// fits up to roughly **~15 K unique `log_id` values per namespace**
-    /// before [`Error::IndexFull`] — depending on key/value padding,
-    /// the empirical cap is in the 10K-20K range. (Multiple `log_id`s
-    /// can share one DataBatch chunk via the per-Tx auto-split, so
-    /// total *messages* across batches scales further; the per-namespace
-    /// cap is on UNIQUE `log_id`s.) For host-apps with millions of
-    /// messages, partition by namespace (e.g., per-conversation
-    /// namespace) or roll over to a fresh namespace on cap.
+    /// log_id_key → 8-byte batch_slot pointer). There is **no longer a
+    /// cap** on how many a namespace holds: the index grows a tree
+    /// level whenever the level below outgrows one chunk, so the limit
+    /// is the container's own ([`Error::ContainerTooLarge`] at
+    /// [`crate::MAX_OPEN_SCAN_CHUNKS`]). The two-level shape used to
+    /// stop at roughly ~15 K unique `log_id`s with `Error::IndexFull`.
+    ///
+    /// What does still scale with namespace size is the *cost of a
+    /// commit*: `commit_tx` re-materialises the namespace's index on
+    /// every write, so a namespace holding 10⁵–10⁶ entries spends its
+    /// own size in RAM per commit (measured in
+    /// `docs/en/contributing/benchmarks.md`). Partitioning by namespace
+    /// (e.g. per-conversation) keeps each commit cheap; it is now a
+    /// performance choice rather than a hard requirement.
     ///
     /// **Single-kind-per-namespace contract (R-NSKIND, format v2).**
     /// See [`Tx::put`] for the three-layer enforcement (Tx-time +

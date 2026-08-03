@@ -12,6 +12,85 @@ format.
 
 ## [Unreleased]
 
+### Breaking — audit follow-through
+
+- **A namespace's capacity is no longer a property of one chunk
+  (HV-15).** The writer emitted exactly two levels — a row of Leaves
+  and one Internal node above them — so a namespace could hold no more
+  entries than fit under a single root. Measured (`PaddingPolicy::None`,
+  9-byte keys), that ceiling was **4 029 entries with 64-byte values,
+  553 with 512-byte values and 79 with 2 048-byte values**; one more
+  and `Tx::commit` returned `Error::IndexFull`, with no way for a
+  host-app to store the data at all. A message log stopped at roughly
+  15 K unique `log_id`s.
+
+  Teaching the writer a third level would only have moved the wall
+  (79 → ~6 200 for 2 KiB values), so it now grows a level whenever the
+  level below outgrows one chunk. There is no depth limit: a namespace
+  is bounded by the container, and a full container says
+  `Error::ContainerTooLarge` as it always did. Verified by writing,
+  reopening, reading back and `verify_integrity`-ing **1 000 000
+  entries at 64 B (77.6 MiB, 4 levels), 250 000 at 512 B, 100 000 at
+  2 KiB (396.6 MiB)** — 248×, 452× and 1 266× the old ceilings, with
+  nothing in the writer stopping there.
+
+  **`MAX_TREE_DEPTH = 3` is gone.** It was the same ceiling seen from
+  the reader's end, and no constant can bound a tree whose shape is not
+  fixed. Every walker (`Space::get`, `list`, `count`, the `log_iter`
+  family, `verify_integrity`, `vacuum_orphans`) now takes its depth
+  bound from the traversal budget `TreeWalk` already held: since each
+  level of a well-formed tree is at least `MIN_FULL_INTERNAL_FANOUT`
+  (12) times wider than the one above it, a tree of depth *d* costs at
+  least 3, 16, 161, 1 890, 22 627, 271 460, 3 257 445 chunks for
+  *d* = 1..7, and a walk may descend only as deep as the chunks the
+  space owns could be arranged into. Honest data is never refused — its
+  chunks are on the disk by definition — while a hostile chain is
+  bounded harder than before: 7 descents at a 64 GiB container, and
+  three descents are already refused in a near-empty one, where the
+  constant would have allowed them. `Space::get` gained the visited-set
+  and budget halves of the guard too; it previously relied on the depth
+  constant alone.
+
+  Breaking, though nothing on disk changes: `Error::IndexFull` no longer
+  means "namespace full" (it is now the structural guard against a tree
+  level that would not narrow, unreachable via `MAX_KEY_LEN`) and its
+  `Display` string changed; `IntegrityReport::max_depth` can exceed 2.
+  Node encodings, Merkle links, the 3-fsync protocol and the format
+  version are untouched — an Internal node's children were always
+  permitted to be Internal nodes; the writer simply never emitted them.
+  HV-14's node reuse is preserved and extended: the reuse map now covers
+  every level of the previous tree (and is collected during the flatten
+  walk the commit already performs, so it costs one chunk read *less*
+  than before), which keeps a one-key edit at 2 + one chunk per level —
+  4 chunks at two levels, 6 at four — instead of one per leaf.
+
+  The writer refuses to publish a tree its own readers would reject, so
+  a future change that weakened the packing would fail the commit rather
+  than leave a namespace unreadable.
+
+  **What this does not fix, and now matters more.** `commit_tx` still
+  materialises the whole namespace per write. HV-14 measured that and
+  kept it because the format's own ceiling capped the working set at
+  ~320 KiB — that argument died with the ceiling. The disk cost of an
+  edit stays flat, but CPU and RAM now scale with the namespace: 10⁶
+  64-byte entries cost 1.6 s and 414 MiB in one `Tx`, or 97 s and
+  2.9 GiB when written as 500 `Tx`es (each re-flattens everything).
+  `Container::repack` inherits it for KV namespaces. Host-apps writing
+  very large namespaces should prefer fewer, larger transactions and may
+  still want to partition — now a performance choice rather than a hard
+  limit. Numbers and method in
+  `docs/en/contributing/benchmarks.md` (and the RU mirror).
+
+  Covered by `crates/hidden-volume/tests/hv15_unbounded_depth.rs` (the
+  exact entry counts that used to fail, a four-level tree built and read
+  back entry by entry, 20 K log ids paginated forward and backward,
+  levels collapsing again on delete, and the one-key edit cost at each
+  depth) plus two forged-container tests in `space::integrity`: a chain
+  deeper than the container could hold is refused by every walker at
+  exactly one descent past the bound, and *the same chain verifies* in a
+  container big enough for it — which is what makes the bound a budget
+  and not a magic number.
+
 ### Security — audit follow-through
 
 - **Changing one key no longer rewrites the whole namespace (HV-14).**
@@ -43,6 +122,14 @@ format.
   self-compaction, which is what keeps delete/insert churn from fragmenting a
   namespace into that ceiling. Numbers, method and the still-open capacity
   ceiling are in `docs/en/contributing/benchmarks.md` (and the RU mirror).
+
+  **Amended by HV-15 (above), which shipped in the same release.** The
+  capacity ceiling this entry leaves open is gone, and with it the
+  "RAM is bounded by the format" half of the argument for keeping the
+  flatten-and-repack — a namespace can now be as large as the container,
+  so the working set is too. The write-amplification finding and its fix
+  are unaffected: node reuse still makes a one-key edit cost the path to
+  it, at any depth.
 
   Forward secrecy is unchanged or better: a reused chunk is the live node, not
   a stale copy, so each commit leaves *fewer* superseded plaintexts for

@@ -216,8 +216,11 @@ Same anchor / verify caveats as §2.
 paginated page at a time with per-page `Tx::commit`, working set
 ≈ 4 MiB per page regardless of total log volume. Multi-GiB log
 namespaces no longer require monitoring host RSS during repack;
-KV namespaces still collect once per namespace but are
-structurally bounded by the 2-level B+ tree cap.
+KV namespaces still collect once per namespace. That used to be
+structurally bounded by the 2-level B+ tree cap; audit HV-15
+removed the cap, so this working set is now the size of the
+namespace — large KV namespaces are worth partitioning (see
+`docs/en/contributing/benchmarks.md`).
 
 **File-size cap.** Repack destination growth is gated by
 `MAX_OPEN_SCAN_CHUNKS = 16M` chunks ≈ 64 GiB (audit pass 17 B);

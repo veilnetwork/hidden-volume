@@ -47,7 +47,9 @@ struct Subtree<'k> {
     /// Exclusive upper bound every key in this subtree must stay under.
     /// `None` at the root = unbounded above.
     upper: Option<&'k [u8]>,
-    /// Depth of this node, root = 1.
+    /// Descents taken to reach this node, root = 0 — the same counter
+    /// every other walker keeps, and what `TreeWalk` bounds. The
+    /// report's `max_depth` counts levels, so it is this plus one.
     depth: u8,
 }
 
@@ -131,7 +133,9 @@ impl<'f> Space<'f> {
 
         // 1. Read CommitPayload from Superblock.root_slot.
         let commit_slot = self.state.superblock.root_slot;
-        ctx.walk.admit_for_verify(commit_slot)?;
+        // The Commit chunk is not part of any tree — depth 0, the
+        // walk's guard is here for the visited set and the budget.
+        ctx.walk.admit_for_verify(commit_slot, 0)?;
         let pt = self.read_chunk_for_verify(commit_slot, "owned-chunk AEAD failure on Commit")?;
         if pt.kind != ChunkKind::Commit {
             return Err(Error::IntegrityFailure {
@@ -189,12 +193,15 @@ impl<'f> Space<'f> {
                     // bounds tighten on every descent.
                     lower: None,
                     upper: None,
-                    depth: 1,
+                    depth: 0,
                 },
                 &mut ctx,
             )?;
-            if depth > ctx.report.max_depth {
-                ctx.report.max_depth = depth;
+            // `depth` counts descents (0 = the root is a leaf); the
+            // report counts levels, so a single-leaf namespace is 1.
+            let levels = depth.saturating_add(1);
+            if levels > ctx.report.max_depth {
+                ctx.report.max_depth = levels;
             }
             ctx.report.namespaces_verified += 1;
         }
@@ -237,7 +244,10 @@ impl<'f> Space<'f> {
             let slot = pairs[idx].0;
             let end = idx + pairs[idx..].partition_point(|(s, _)| *s == slot);
 
-            ctx.walk.admit_for_verify(slot)?;
+            // A DataBatch hangs off a leaf entry rather than off a
+            // descent; this loop is iterative, so depth 0 (the visited
+            // set and the budget still apply).
+            ctx.walk.admit_for_verify(slot, 0)?;
             let pt = self.read_chunk_for_verify(slot, "owned-chunk AEAD failure on DataBatch")?;
             if pt.kind != ChunkKind::DataBatch {
                 return Err(Error::IntegrityFailure {
@@ -295,15 +305,15 @@ impl<'f> Space<'f> {
     }
 
     /// Recursively verify the IndexNode described by `exp` and its
-    /// children, returning the maximum depth observed (1 = leaf,
-    /// 2 = internal+leaves).
+    /// children, returning the greatest descent count observed below
+    /// it (0 = this node is a leaf). The caller turns that into the
+    /// report's level count.
     ///
-    /// Depth-capped via [`super::index::MAX_TREE_DEPTH`]; width- and
-    /// shape-capped via `ctx.walk`. The Merkle hash chain makes
-    /// adversarial *cycles* cryptographically infeasible (a cycle
-    /// needs a node to contain its own hash), but a **DAG** costs the
-    /// attacker nothing: the same child hash under many parents is
-    /// consistent, so without the visited set a depth-3 fan-out of ~90
+    /// Depth-, width- and shape-capped via `ctx.walk`. The Merkle hash
+    /// chain makes adversarial *cycles* cryptographically infeasible (a
+    /// cycle needs a node to contain its own hash), but a **DAG** costs
+    /// the attacker nothing: the same child hash under many parents is
+    /// consistent, so without the visited set a 4-level fan-out of ~90
     /// re-reads four distinct chunks 90³ times.
     ///
     /// `exp.namespace` is the namespace byte declared by the
@@ -322,13 +332,7 @@ impl<'f> Space<'f> {
     /// the first key of that child (`write_tree_for_namespace`), so a
     /// well-formed tree satisfies the bounds exactly.
     fn verify_subtree(&mut self, exp: Subtree<'_>, ctx: &mut VerifyCtx) -> Result<u8> {
-        if exp.depth > super::index::MAX_TREE_DEPTH {
-            return Err(Error::IntegrityFailure {
-                detail: "tree depth exceeded MAX_TREE_DEPTH",
-                slot: exp.slot,
-            });
-        }
-        ctx.walk.admit_for_verify(exp.slot)?;
+        ctx.walk.admit_for_verify(exp.slot, exp.depth)?;
         let pt = self.read_chunk_for_verify(exp.slot, "owned-chunk AEAD failure on IndexNode")?;
         if pt.kind != ChunkKind::IndexNode {
             return Err(Error::IntegrityFailure {
@@ -625,6 +629,135 @@ mod tests {
 
         let detail = integrity_detail(s.verify_integrity().unwrap_err());
         assert_eq!(detail, "chunk reachable more than once in one tree walk");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Stack a chain of single-child Internal nodes `descents` deep over
+    /// one leaf and publish it as `ns`'s root. Every link is
+    /// Merkle-consistent, every node decodes, the key ranges tile
+    /// correctly, and no slot repeats — the shape is a legal tree in
+    /// every respect except how tall it is.
+    fn publish_chain(s: &mut Space<'_>, ns: Namespace, descents: u8, seq: u64) {
+        let (mut slot, mut hash) = seal_node(s, &leaf(ns, &[(b"a", b"1")]), seq);
+        for _ in 0..descents {
+            let node = IndexNode::Internal(InternalNode {
+                namespace: ns,
+                children: vec![ChildPointer {
+                    first_key: b"a".to_vec(),
+                    child_slot: slot,
+                    child_hash: hash,
+                }],
+            });
+            (slot, hash) = seal_node(s, &node, seq);
+        }
+        publish(s, vec![kv_root(ns, slot, hash)], seq);
+    }
+
+    /// A tree deeper than the container could possibly hold. Every
+    /// walker must name it and stop — not recurse until the stack
+    /// overflows, and not read its way down a chain that could be as
+    /// long as the file has chunks (audit HV-15).
+    ///
+    /// The bound is not a constant but what this space's chunk count
+    /// could be arranged into, so this walks the boundary from both
+    /// sides: at every depth, accepted if and only if the chunks are
+    /// there for it. A dozen owned chunks cannot hold a three-descent
+    /// tree; the identical forgery is accepted in
+    /// [`the_same_chain_verifies_in_a_container_big_enough_for_it`],
+    /// where the only difference is the container's size.
+    #[test]
+    fn a_chain_deeper_than_the_container_could_hold_is_rejected() {
+        let path = scratch_path();
+        let mut c = Container::create(&path, Argon2Params::MIN).unwrap();
+        let mut s = c.create_space(b"pw").unwrap();
+        let ns = Namespace::SETTINGS;
+
+        let mut saw_reject = false;
+        for descents in 1..=5u8 {
+            publish_chain(&mut s, ns, descents, u64::from(descents));
+            let owned = s.audit_owned_chunk_count();
+            let bound = super::super::walk::max_depth_for_budget(owned);
+
+            if descents <= bound {
+                s.verify_integrity().unwrap_or_else(|e| {
+                    panic!("{descents} descents fit in {owned} chunks (bound {bound}): {e:?}")
+                });
+                assert_eq!(s.get(ns, b"a").unwrap().as_deref(), Some(&b"1"[..]));
+                continue;
+            }
+
+            saw_reject = true;
+            // One descent past the bound must already be refused —
+            // this is the "near miss", not a chain of thousands.
+            assert_eq!(
+                descents,
+                bound + 1,
+                "walking the boundary one step at a time"
+            );
+            let detail = integrity_detail(s.verify_integrity().unwrap_err());
+            assert_eq!(detail, "tree deeper than this space's chunk count can hold");
+            // Every read path, not just the integrity walk: `get`
+            // follows one path and would otherwise loop; `count` /
+            // `list` recurse.
+            for err in [
+                s.get(ns, b"a").unwrap_err(),
+                s.count(ns).unwrap_err(),
+                s.list(ns).unwrap_err(),
+                // The vacuum walk decides what to scrub; a chain it
+                // cannot walk must abort the pass rather than declare
+                // live chunks unreachable.
+                s.vacuum_orphans().unwrap_err(),
+            ] {
+                assert!(
+                    matches!(err, Error::Malformed(d) if d.contains("deeper than")),
+                    "every walker must refuse the same shape, got {err:?}"
+                );
+            }
+            break;
+        }
+        assert!(saw_reject, "a near-empty container must run out of depth");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The control for the test above: the *same* forged chain, in a
+    /// space that owns enough chunks for a tree that tall, verifies.
+    ///
+    /// This is what makes the bound a budget and not a magic number —
+    /// what changed between the two tests is the container's size, and
+    /// nothing else.
+    #[test]
+    fn the_same_chain_verifies_in_a_container_big_enough_for_it() {
+        let path = scratch_path();
+        let mut c = Container::create(&path, Argon2Params::MIN).unwrap();
+        let mut s = c.create_space(b"pw").unwrap();
+
+        // Real data, purely to make the space own enough chunks: a
+        // three-descent tree needs at least 161 of them.
+        let mut tx = s.begin_tx();
+        for i in 0..8000u32 {
+            tx.put(Namespace::MEDIA, format!("k{i:08}").as_bytes(), &[b'v'; 64])
+                .unwrap();
+        }
+        tx.commit().unwrap();
+
+        let ns = Namespace::SETTINGS;
+        let descents = 3u8;
+        let seq = s.state.superblock.seq + 1;
+        publish_chain(&mut s, ns, descents, seq);
+
+        let owned = s.audit_owned_chunk_count();
+        let bound = super::super::walk::max_depth_for_budget(owned);
+        assert!(
+            descents <= bound,
+            "{owned} owned chunks should permit {descents} descents, got {bound}"
+        );
+
+        let report = s.verify_integrity().unwrap();
+        assert_eq!(report.max_depth, descents + 1, "levels = descents + 1");
+        assert_eq!(s.get(ns, b"a").unwrap().as_deref(), Some(&b"1"[..]));
+        assert_eq!(s.count(ns).unwrap(), 1);
 
         let _ = std::fs::remove_file(&path);
     }

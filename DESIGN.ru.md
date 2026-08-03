@@ -403,8 +403,11 @@ Audit pass 16 (R-STREAMING-REPACK) сделал `repack` memory-bounded:
 log-namespaces проходятся постранично через
 `iter_log_after(ns, cursor, log_page_size)` с per-page `Tx::commit` на
 destination, working-set ≈ 4 MiB на страницу независимо от общего объёма
-лога. KV-namespaces всё ещё собираются целиком (структурно ограничено
-2-уровневым B+ tree cap'ом ≈ 5–10 K записей). Прежняя реализация держала
+лога. KV-namespaces всё ещё собираются целиком: раньше это было
+структурно ограничено 2-уровневым B+ tree cap'ом ≈ 5–10 K записей, но
+аудит HV-15 этот cap снял (индекс растит уровни по мере надобности), и
+теперь рабочий набор ограничен размером самого namespace — см.
+`docs/ru/contributing/benchmarks.md`. Прежняя реализация держала
 все живые записи в памяти на обеих фазах (Phase 1: read all, Phase 2:
 write all) — multi-GiB log-namespaces могли OOM'ить хост.
 

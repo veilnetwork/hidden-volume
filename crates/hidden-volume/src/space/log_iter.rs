@@ -7,7 +7,7 @@ use crate::chunk::ChunkKind;
 use crate::{Error, Result};
 
 use super::Space;
-use super::index::{self, IndexNode, Namespace};
+use super::index::{IndexNode, Namespace};
 use super::log;
 use super::walk::TreeWalk;
 
@@ -420,13 +420,10 @@ impl<'f> Space<'f> {
         walk: &mut TreeWalk,
         out: &mut Vec<(Vec<u8>, Vec<u8>)>,
     ) -> Result<()> {
-        if depth > index::MAX_TREE_DEPTH {
-            return Err(Error::Malformed("tree depth exceeded MAX_TREE_DEPTH"));
-        }
         if out.len() >= limit {
             return Ok(());
         }
-        walk.admit(slot)?;
+        walk.admit(slot, depth)?;
         let node = self.read_index_node_at_expected(slot, namespace)?;
         match node {
             IndexNode::Leaf(l) => {
@@ -499,13 +496,10 @@ impl<'f> Space<'f> {
         walk: &mut TreeWalk,
         out: &mut Vec<(Vec<u8>, Vec<u8>)>,
     ) -> Result<()> {
-        if depth > index::MAX_TREE_DEPTH {
-            return Err(Error::Malformed("tree depth exceeded MAX_TREE_DEPTH"));
-        }
         if out.len() >= limit {
             return Ok(());
         }
-        walk.admit(slot)?;
+        walk.admit(slot, depth)?;
         let node = self.read_index_node_at_expected(slot, namespace)?;
         match node {
             IndexNode::Leaf(l) => {
@@ -585,13 +579,10 @@ impl<'f> Space<'f> {
         walk: &mut TreeWalk,
         out: &mut Vec<(Vec<u8>, Vec<u8>)>,
     ) -> Result<bool> {
-        if depth > index::MAX_TREE_DEPTH {
-            return Err(Error::Malformed("tree depth exceeded MAX_TREE_DEPTH"));
-        }
         if out.len() >= limit {
             return Ok(true);
         }
-        walk.admit(slot)?;
+        walk.admit(slot, depth)?;
         let node = self.read_index_node_at_expected(slot, namespace)?;
         match node {
             IndexNode::Leaf(l) => {

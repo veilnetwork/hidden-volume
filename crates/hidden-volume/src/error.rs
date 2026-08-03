@@ -128,11 +128,22 @@ pub enum Error {
     #[error("payload exceeds chunk capacity")]
     PayloadTooLarge,
 
-    /// A namespace's KV index has grown beyond what the current
-    /// 2-level B+ tree can hold (~5000–10000 entries depending on
-    /// key/value sizes). For the message log specifically,
-    /// `DataBatch` (`append_log`) is the right tool.
-    #[error("index full: namespace exceeds 2-level B+ tree capacity")]
+    /// A namespace's KV index could not be built.
+    ///
+    /// **This is no longer a capacity limit** (audit HV-15). The index
+    /// grows a tree level whenever the level below outgrows one chunk,
+    /// so how much a namespace holds is bounded by the container, not
+    /// by the index — a full container raises
+    /// [`Self::ContainerTooLarge`] instead. What remains here is the
+    /// structural guard: a level that would not be narrower than the
+    /// one below it, which needs a single child pointer large enough to
+    /// fill a chunk on its own and is unreachable through
+    /// [`crate::space::index::MAX_KEY_LEN`] (298 bytes at most against
+    /// a ≈4040-byte payload).
+    ///
+    /// Before HV-15 this fired at ~4 000 entries with 64-byte values
+    /// and at 79 with 2 KiB values.
+    #[error("index full: an index level would not narrow")]
     IndexFull,
 
     /// zstd compression/decompression failure on a DataBatch payload.
