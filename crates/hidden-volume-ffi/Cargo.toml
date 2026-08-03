@@ -55,7 +55,7 @@ zeroize = "1.8"
 
 [dev-dependencies]
 tempfile = "3.10"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 # `libloading` is used by the FFI smoke-test in `tests/ffi_smoke.rs`,
 # which dlopens the host-target cdylib and probes the uniffi C ABI to
 # confirm the symbols downstream Flutter / Kotlin / Swift bindings
