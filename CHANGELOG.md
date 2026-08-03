@@ -14,6 +14,92 @@ format.
 
 ### Breaking — audit follow-through
 
+- **A commit costs the change, not the namespace (HV-16).** `commit_tx`
+  read a namespace's whole tree, applied the ops in memory and rebuilt
+  it. The *disk* cost of an edit was already the path to it (HV-14),
+  but the CPU and RAM were the namespace: writing 10⁶ 64-byte entries
+  as 500 transactions cost **96 s and 2.60 GiB**, against 0.64 s and
+  395 MiB for the same data in one. A one-key edit cost 362 ms at
+  N = 10⁶. `commit_tx` now descends to the affected leaf and rewrites
+  only the nodes the change reaches: **7.0 s and 12.7 MiB** for the
+  same 500 transactions (13.8× the wall, 210× the memory), and a
+  one-key edit is 11 ms at every size measured — flat at the 3-fsync
+  floor. The number of chunks a commit *appends* is unchanged at every
+  point in the table, which matters beyond speed: that number is what a
+  multi-snapshot observer counts, and HV-14 deliberately made it track
+  how localised a change was rather than how big the namespace is.
+
+  **Node boundaries are now content-defined, and that is the breaking
+  part.** Descending to a leaf is only worth anything if the rest of
+  the tree stays put, and under the previous greedy left-to-right
+  packing it does not: boundaries are a function of fill, so changing
+  one entry's size shifts every boundary to its right. Measured, a
+  greedy packer plus incremental descent reads 23 / 202 / 996 chunks
+  for one edit at N = 2 000 / 20 000 / 100 000 — still O(N). A node now
+  ends where one of its items' BLAKE3 says it does, with probability
+  `cost / (K × bytes still free)`, so an edit perturbs only the run it
+  lands in and the packing re-synchronises with the old tree a node or
+  two later: **4 chunk reads at all three sizes**.
+
+  This also makes the tree's shape a function of its key-value set and
+  of nothing else — the same entries always produce the same tree,
+  whether they were written in one transaction, one at a time, or
+  churned through deletes and re-inserts. That is a deniability
+  property, not a tidiness one: a B+ tree that splits a full node in
+  half in place records its own insertion order, so a key-holder could
+  tell a namespace that was written at once from one that was edited
+  into the same state. It is also what HV-14's content-keyed node reuse
+  has always assumed.
+
+  Breaking, and on disk:
+
+  - **Trees are shaped differently.** Node encodings, Merkle links, the
+    3-fsync protocol and the format version are all untouched — a
+    container written by the previous version reads correctly — but a
+    namespace rewritten by this version comes out cut at different
+    places. Nothing migrates; nothing needs to.
+  - **Containers are ~16 % larger for small values.** Mean node
+    utilisation is `K/(K+1)` = 6/7 ≈ 86 % against ~98 % greedy: 10⁶ ×
+    64 B goes from 19 866 to 23 144 chunks (77.6 → 90.4 MiB). Values of
+    2 KiB are unaffected (+0.2 %) — one fits in a chunk either way.
+    This is the standing price of a history-free shape.
+  - **`MIN_FULL_INTERNAL_FANOUT` is 4, not 12**, so the readers' depth
+    bound is 12 descents at the largest container the format permits
+    rather than 7. The bound is derived from the narrowest a level can
+    be, and content-defined boundaries guarantee nothing on their own —
+    a key-holder choosing keys whose hashes all fire would get
+    one-child nodes and unbounded depth. So the writer refuses to
+    honour a boundary before `MIN_INTERNAL_CHILDREN` = 4 children, and
+    4 is what the arithmetic uses. Honest fanout is 40–70, so honest
+    trees are the same height they were.
+  - `IntegrityReport::max_depth` can therefore reach 13.
+
+  What is **not** fixed: a commit costs the *span* of keys it touches,
+  not their number. Operations scattered across a whole namespace still
+  walk everything between the outermost two — the same O(namespace) the
+  previous implementation always paid, so nothing regresses. Numbers,
+  method and the greedy-packing comparison are in
+  `docs/en/contributing/benchmarks.md` (and the RU mirror).
+
+  Covered by `crates/hidden-volume/src/space/tree.rs` (one shape per key
+  set across eight different ways of writing it, at two and at three
+  levels; chunk reads per edit flat in N; a level grown and collapsed
+  again landing back on the shape it started with) and
+  `crates/hidden-volume/tests/hv16_incremental_commit.rs` (the same
+  content in 1 / 16 / 200 transactions producing byte-identical index
+  chunk counts and depths; a one-key edit at `2 + levels` chunks from
+  500 to 50 000 entries; a 24-round churn of inserts below, above and
+  through the middle checked entry by entry). Five break-check probes,
+  all caught: the level tag off by one in the incremental path (9
+  tests), boundaries disabled back to greedy packing (the read-count
+  test, at 23 / 202 / 996 chunks), the guaranteed-fanout floor dropped
+  (the writer refused the commit with `IndexFull` rather than writing an
+  unreadable namespace), the level prefix primed from the advanced
+  cursor instead of the descent (4 tests), and re-synchronising before
+  the operations were exhausted (16 tests). Two control probes — the
+  emitted-slot guard and the writer's own level-width check, both
+  documented as defence-in-depth — left the suite green.
+
 - **A namespace's capacity is no longer a property of one chunk
   (HV-15).** The writer emitted exactly two levels — a row of Leaves
   and one Internal node above them — so a namespace could hold no more
@@ -80,6 +166,14 @@ format.
   still want to partition — now a performance choice rather than a hard
   limit. Numbers and method in
   `docs/en/contributing/benchmarks.md` (and the RU mirror).
+
+  **Amended by HV-16 (above), which shipped in the same release.** The
+  per-commit cost this entry leaves open is closed: `commit_tx` no
+  longer materialises a namespace, so the RAM and CPU of a write track
+  the change rather than the namespace, and partitioning a large
+  namespace is no longer even a performance recommendation. The
+  reader-side depth bound below is recomputed there (7 descents → 12),
+  because the packing it is derived from changed.
 
   Covered by `crates/hidden-volume/tests/hv15_unbounded_depth.rs` (the
   exact entry counts that used to fail, a four-level tree built and read

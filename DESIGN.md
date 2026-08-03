@@ -419,7 +419,10 @@ of total log volume. KV namespaces still collect once per namespace,
 which used to be bounded structurally by the two-level B+ tree cap of
 ≈ 5–10 K entries — audit HV-15 removed that cap (the index now grows
 levels on demand), so this working set is now bounded by the namespace
-itself. See `docs/en/contributing/benchmarks.md`.
+itself. That is a `repack`-only cost since audit HV-16: an ordinary
+`Tx::commit` no longer materialises a namespace, it descends to the
+affected leaf and rewrites the path above it (`space::tree`). See
+`docs/en/contributing/benchmarks.md`.
 The previous implementation kept every live entry in memory across
 both phases (Phase 1: read all, Phase 2: write all) — multi-GiB log
 namespaces could OOM the host.

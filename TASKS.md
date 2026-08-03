@@ -883,16 +883,34 @@ post-pass-10; +4 new regression tests in `tests/pass11_audit.rs`).
       the traversal budget `TreeWalk` already held (see
       [`space/walk.rs`](crates/hidden-volume/src/space/walk.rs)) — a
       walk descends only as deep as the chunks the space owns could be
-      arranged into, which is 7 at the largest container the format
-      permits and shrinks with the container.
-      What is *not* closed: the per-commit cost. `commit_tx` still
-      re-materialises the whole namespace, so a 10⁵–10⁶-entry namespace
-      spends its own size in RAM per commit — measured in
-      `docs/en/contributing/benchmarks.md`. Option (c), caller-side
-      partitioning, therefore remains the advice for very large
-      namespaces, but as a performance choice rather than a hard limit.
+      arranged into, which is 12 at the largest container the format
+      permits (7 until audit HV-16 recomputed the fanout floor) and
+      shrinks with the container.
+      The per-commit cost this entry left open is **closed
+      2026-08-03 (audit HV-16)** — see R-INCREMENTAL-COMMIT below.
       Option (b) (range-page index) stays unimplemented and is now
       orthogonal.
+- [x] **R-INCREMENTAL-COMMIT** — **CLOSED 2026-08-03 (audit HV-16).**
+      `commit_tx` materialised a namespace's whole tree on every write.
+      Measured: 10⁶ 64-byte entries cost 96 s and 2.60 GiB written as
+      500 transactions against 0.64 s and 395 MiB in one; a one-key
+      edit cost 362 ms at N = 10⁶. It now descends to the affected leaf
+      and rewrites the path above it — 7.0 s and 12.7 MiB for the same
+      500 transactions, and 11 ms for a one-key edit at every size.
+      The enabling change is that node boundaries are **content-defined**
+      ([`space/index.rs`](crates/hidden-volume/src/space/index.rs)
+      `is_boundary`): greedy packing is deterministic but not local, so
+      descending to a leaf under it still reads 23 / 202 / 996 chunks
+      at N = 2 000 / 20 000 / 100 000, against 4 / 4 / 4 now. The same
+      change makes a tree's shape a function of its key-value set alone,
+      which closes a history leak an in-place-splitting B+ tree would
+      have opened. Costs: containers ~16 % larger for small values
+      (mean fill 6/7 against ~98 %), and the readers' depth bound moves
+      from 7 to 12 descents because the guaranteed fanout is now the
+      writer-enforced floor of 4 rather than greedy packing's 12.
+      Still open: a commit costs the *span* of keys it touches, so
+      operations scattered across a whole namespace walk everything
+      between them — unchanged from before, not a regression.
 - [x] **R-NSKIND** — CLOSED 2026-05-09. Typed
       [`NamespaceKind::{Kv, Log}`](crates/hidden-volume/src/tx/commit.rs)
       enum added; every `IndexRoot` carries an explicit `kind` byte

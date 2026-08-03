@@ -228,7 +228,7 @@ const Map<String, int> _methodChecksums = <String, int>{
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_erase_namespace': 7530,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_get': 28461,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_iter_log_range': 24184,
-  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_kv_keys': 9357,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_kv_keys': 13299,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_list_namespaces': 63954,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_read_log': 59826,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_set_padding_policy': 6532,
