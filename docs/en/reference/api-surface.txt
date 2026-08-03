@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-03T21:41:03Z
+# Captured: 2026-08-03T21:49:54Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -135,7 +135,7 @@ crypto/kdf.rs:  197:    pub const MAX_P_COST: u32 = 64;
 crypto/kdf.rs:  202:    pub fn validate(&self) -> Result<()> {
 crypto/kdf.rs:  244:    pub fn encode(&self) -> [u8; HEADER_PARAMS_LEN] {
 crypto/kdf.rs:  256:    pub fn decode(bytes: &[u8]) -> Result<Self> {
-crypto/kdf.rs:  297:pub fn derive_master_key(
+crypto/kdf.rs:  309:pub fn derive_master_key(
 crypto/mod.rs:  3:pub mod aead;
 crypto/mod.rs:  4:pub mod derive;
 crypto/mod.rs:  5:pub mod kdf;

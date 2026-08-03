@@ -412,6 +412,26 @@ format.
 
 ### Fixed — report5 follow-through
 
+- **`derive_master_key` validates its own parameters (HV-05).** The public
+  function's whole job is to burn CPU and RAM in proportion to its
+  arguments, and it delegated the bounds check to its callers — the rustdoc
+  said `params` "MUST have already passed `Argon2Params::validate`". Every
+  container path did; nothing made a direct caller. `m_cost_kib` one KiB
+  above the ceiling is a gibibyte of Argon2 working set with no error in
+  sight, and `t_cost` has no upper bound in the `argon2` crate at all. It
+  now calls `validate()` first. A hostile container was never able to reach
+  this (header params are validated on open, before any derivation), so
+  what is closed is misuse by this crate's own callers.
+
+  `crypto::kdf`'s new `master_key_derivation_validates_params` picks every
+  fixture so that *this crate's policy is the only thing that rejects it*
+  and asserts the `argon2` crate accepts each one — a `u32::MAX` fixture
+  would have tested the dependency's bounds and passed with the gate
+  removed. `tests/v3_key_schedule.rs`'s cross-generation assertion moved
+  into the module as `version_word_changes_the_master_key`, since a
+  synthesised `format_version = 2` / `4` is exactly what the new gate
+  refuses; what the integration test checks from outside is the gate.
+
 - **A container can be addressed by a bare file name again.** `Path::parent()`
   answers `Some("")` — not `None` — for `"store.hv"`, so the
   `parent().unwrap_or(Path::new("."))` in both parent-directory fsyncs never
