@@ -182,4 +182,53 @@ void main() {
 
     ms.close();
   });
+
+  // The `Option<Vec<u8>>` cursor argument is hand-encoded on the Dart
+  // side (`_optByteVec`), so nothing but a round-trip proves the tag
+  // byte and the i32 length prefix are what the Rust deserializer
+  // expects. A wrong encoding does not fail loudly — it decodes as some
+  // other cursor and quietly returns the wrong page.
+  test('kvKeysPage pages the namespace and honours its cursor', () {
+    final tmp = Directory.systemTemp.createTempSync('hv_kvkeys_');
+    final path = '${tmp.path}/store.bin';
+    addTearDown(() => tmp.deleteSync(recursive: true));
+
+    Uint8List u(String s) => Uint8List.fromList(s.codeUnits);
+
+    final space = HvSpace.create(
+      path: path,
+      password: u('pw'),
+      argon: ArgonPreset.light,
+    );
+    addTearDown(space.close);
+
+    final expected = <String>[
+      for (var i = 0; i < 10; i++) 'k${i.toString().padLeft(2, '0')}',
+    ];
+    space.commit([
+      for (final k in expected)
+        HvWriteOpPut(namespace: 1, key: u(k), value: u('v')),
+    ]);
+
+    expect(space.kvKeys(1).map(String.fromCharCodes).toList(), expected);
+
+    // Follow the cursor exactly as a host app would.
+    final seen = <String>[];
+    Uint8List? cursor;
+    while (true) {
+      final page = space.kvKeysPage(1, cursor, 3);
+      if (page.isEmpty) break;
+      expect(page.length, lessThanOrEqualTo(3));
+      cursor = page.last;
+      seen.addAll(page.map(String.fromCharCodes));
+      expect(seen.length, lessThanOrEqualTo(expected.length),
+          reason: 'cursor is not advancing');
+    }
+    expect(seen, expected);
+
+    // `after` is strictly-greater; `limit: 0` is empty, not "everything".
+    expect(space.kvKeysPage(1, u('k00'), 2).map(String.fromCharCodes).toList(),
+        ['k01', 'k02']);
+    expect(space.kvKeysPage(1, null, 0), isEmpty);
+  });
 }

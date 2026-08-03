@@ -339,6 +339,37 @@ format.
   side is the caller's to clear, and `space_keys` now says so instead of leaving
   it implied.
 
+### Added — report5 follow-through
+
+- **Keys can be enumerated without materialising the namespace (HV-04).**
+  The FFI `kv_keys` went through `Space::list`, which builds a
+  `Vec<(Vec<u8>, Vec<u8>)>` of every entry, and then dropped the values
+  while framing the keys. Its rustdoc meanwhile promised "the same O(N)
+  index walk as `count`" with "values not decoded" — `count` peaks at one
+  decoded node. On a namespace of message bodies that is the difference
+  between holding the keys and holding the whole plaintext, on the device
+  class this library exists for. Measured on 1500 × 2 KiB values: peak
+  3.21 MB → 108 KB.
+
+  - New `Space::list_keys` — the keys-only twin of `Space::list`. Each
+    leaf's values are dropped as the leaf is consumed, so the walk really
+    does peak at one node.
+  - New `Space::list_keys_after(namespace, after, limit)` — a key cursor,
+    the KV counterpart of `iter_log_after` and modelled on it. Bounded
+    result; as there, `limit` bounds the output and not the chunk reads.
+  - New FFI `SpaceHandle::kv_keys_page` / `MultiSpaceHandle::kv_keys_page`
+    and their Dart bindings, for namespaces whose size the host app does
+    not control. `kv_keys` keeps its signature and its meaning ("every
+    key") — what changed is that it no longer reads the values to get
+    there. Its doc now says what the call actually costs.
+  - `Space::erase_namespace` enumerates by key too. A delete is addressed
+    by key; the values it used to materialise alongside them were held for
+    the length of the whole transaction and never looked at.
+
+  Not breaking: `kv_keys` is unchanged on the wire, and the additions are
+  additive. The remaining HV-04 sites (`repack`, `vacuum`) still walk
+  whole namespaces and are untouched.
+
 ### Fixed — report5 follow-through
 
 - **A container can be addressed by a bare file name again.** `Path::parent()`
