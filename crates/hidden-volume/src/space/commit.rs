@@ -4,7 +4,7 @@
 //! security-sensitive write code in the crate) is reviewable as a
 //! self-contained ~280-LOC chunk.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use zeroize::Zeroizing;
 
@@ -14,9 +14,24 @@ use crate::tx::commit::{CommitPayload, IndexRoot, blake3_of};
 use crate::{Error, Result};
 
 use super::Space;
-use super::index::{ChildPointer, InternalNode, LeafNode, Namespace};
+use super::index::{ChildPointer, IndexNode, InternalNode, LeafNode, Namespace};
 use super::log;
 use super::superblock::Superblock;
+
+/// Index chunks of a namespace's **current** tree, keyed by the BLAKE3
+/// of their plaintext payload — the same hash the parent already stores
+/// as its Merkle link, so building this costs one chunk read (the root)
+/// and no hashing.
+///
+/// A rebuild that produces a node whose payload hashes to a key in here
+/// has produced a node that is already on disk, byte for byte, in a
+/// chunk this space owns and currently reaches. Pointing at that chunk
+/// is not an optimisation of the encoding — it *is* the same node.
+///
+/// The hash covers the node-type byte and the namespace byte (they sit
+/// in the encoded header), so a match cannot silently swap a leaf for
+/// an internal node or graft a chunk from a neighbouring namespace.
+type ReusableNodes = HashMap<[u8; 32], u64>;
 
 impl<'f> Space<'f> {
     /// Apply a Tx's pending KV + log operations and run the 3-fsync
@@ -243,9 +258,16 @@ impl<'f> Space<'f> {
             // apply ops, then rebuild the tree from scratch. This is
             // simpler than path-tracking incremental updates and is
             // fine at the namespace sizes we target (≤ ~10K entries).
-            let mut entries = match prior_roots_by_ns.get(ns_byte) {
-                Some(r) => self.flatten_tree(r.index_slot, ns)?,
-                None => Vec::new(),
+            //
+            // The rebuild is only a rebuild *in memory*. Every node it
+            // produces that already exists on disk is pointed at rather
+            // than written again — see `ReusableNodes` and audit HV-14.
+            let (mut entries, reusable) = match prior_roots_by_ns.get(ns_byte) {
+                Some(r) => (
+                    self.flatten_tree(r.index_slot, ns)?,
+                    self.reusable_nodes(r)?,
+                ),
+                None => (Vec::new(), ReusableNodes::new()),
             };
 
             for op in ops {
@@ -257,7 +279,8 @@ impl<'f> Space<'f> {
                 continue;
             }
 
-            let (root_slot, root_hash) = self.write_tree_for_namespace(ns, &entries, new_seq)?;
+            let (root_slot, root_hash) =
+                self.write_tree_for_namespace(ns, &entries, new_seq, &reusable)?;
             new_roots.push(IndexRoot {
                 namespace: ns,
                 kind: kind_for_namespace(*ns_byte),
@@ -384,20 +407,108 @@ impl<'f> Space<'f> {
         Ok(out)
     }
 
-    /// Build a tree from a sorted entries vec and write all its chunks.
-    /// Returns the root slot + hash.
+    /// Index chunks of `root`'s tree that a rebuild is allowed to point
+    /// at instead of writing again (audit HV-14).
+    ///
+    /// Costs exactly one chunk read — the root. An internal root already
+    /// carries `(child_hash, child_slot)` for every leaf, which is the
+    /// whole map; the leaves themselves are never touched for this.
+    ///
+    /// The root's own hash is included because a Tx whose ops all turn
+    /// out to be no-ops (`put` of the value already stored) rebuilds a
+    /// tree identical to the one on disk, and there is no reason for
+    /// that to cost a single write.
+    fn reusable_nodes(&mut self, root: &IndexRoot) -> Result<ReusableNodes> {
+        let mut map = ReusableNodes::new();
+        map.insert(root.payload_hash, root.index_slot);
+        if let IndexNode::Internal(node) =
+            self.read_index_node_at_expected(root.index_slot, root.namespace)?
+        {
+            for child in node.children {
+                map.insert(child.child_hash, child.child_slot);
+            }
+        }
+        Ok(map)
+    }
+
+    /// Put an index node on disk — or discover it is already there.
+    ///
+    /// A hash hit means the chunk at that slot decrypts to exactly these
+    /// bytes: same node type, same namespace, same entries. The chunk is
+    /// owned by this space and reachable from the committed tree, so it
+    /// is neither foreign, nor scrubbed, nor about to be: it stays
+    /// reachable from the tree being built, which is what
+    /// `vacuum_orphans` computes reachability against.
+    ///
+    /// `emitted` is a belt-and-braces guard, not a load-bearing check.
+    /// Two leaves of one tree hold disjoint key ranges and so cannot
+    /// encode to the same bytes; but a chunk reachable twice in one walk
+    /// is a structural failure the readers reject outright
+    /// (`space::walk`), and a hostile prior tree is the input here. If a
+    /// slot would be used twice, write a fresh chunk instead.
+    fn emit_index_node(
+        &mut self,
+        bytes: &[u8],
+        new_seq: u64,
+        reuse: &ReusableNodes,
+        emitted: &mut HashSet<u64>,
+    ) -> Result<(u64, [u8; 32])> {
+        let hash = blake3_of(bytes);
+        if let Some(&slot) = reuse.get(&hash)
+            && emitted.insert(slot)
+        {
+            return Ok((slot, hash));
+        }
+        let slot = self.append_chunk(ChunkKind::IndexNode, new_seq, bytes)?;
+        emitted.insert(slot);
+        Ok((slot, hash))
+    }
+
+    /// Build a tree from a sorted entries vec and write the chunks that
+    /// are not already on disk. Returns the root slot + hash.
     ///
     /// Strategy:
     /// 1. Try to fit everything in a single Leaf — emits one chunk.
     /// 2. If overflow, split into multiple Leaves and emit one Internal
     ///    node above them.
     /// 3. If the Internal node would overflow → Error::IndexFull.
+    ///
+    /// ## Why the whole tree is still built (audit HV-14)
+    ///
+    /// Changing one key used to append the *entire* namespace again:
+    /// 82 chunks (336 KiB) for a one-key edit in a 4 000-entry
+    /// namespace, 48 chunks (196 KiB) to append one 200-byte message to
+    /// an 8 000-message log. The chunks are immutable and content-
+    /// addressed, so the fix is to notice that almost all of them
+    /// already exist: `pack_into_leaves` is deterministic, an edit that
+    /// does not move a leaf boundary leaves every other leaf encoding to
+    /// identical bytes, and appending at the high end of a log moves no
+    /// boundary at all. Only the leaves that genuinely differ, plus the
+    /// root above them, are written — path copying, arrived at by
+    /// comparison rather than by descent.
+    ///
+    /// This cannot do worse than the old behaviour: a rebuild where
+    /// every leaf differs writes every leaf, exactly as before.
+    ///
+    /// The in-memory flatten-and-repack stays. Measurement is why: the
+    /// commit is fsync-bound (~11-22 ms flat from 10 to 8 000 entries on
+    /// an SSD), and the format's own `IndexFull` ceiling — one internal
+    /// root over ~79 leaves — caps the flattened working set at roughly
+    /// 320 KiB, so the O(N) CPU and RAM the audit flagged are bounded by
+    /// the format itself. Replacing the repack with incremental descent
+    /// and split/merge would buy nothing measurable here and would cost
+    /// the greedy repack's self-compaction, which is what keeps repeated
+    /// delete/insert cycles from fragmenting the tree into the
+    /// `IndexFull` ceiling. See `docs/en/contributing/benchmarks.md`.
     fn write_tree_for_namespace(
         &mut self,
         ns: Namespace,
         entries: &[(Vec<u8>, Vec<u8>)],
         new_seq: u64,
+        reuse: &ReusableNodes,
     ) -> Result<(u64, [u8; 32])> {
+        let mut emitted: HashSet<u64> = HashSet::new();
+
         // Try single-leaf first.
         let single = LeafNode {
             namespace: ns,
@@ -406,8 +517,7 @@ impl<'f> Space<'f> {
         if let Ok(bytes) = single.encode() {
             // Encoded leaf carries user KV bytes; scrub on drop.
             let bytes: Zeroizing<Vec<u8>> = Zeroizing::new(bytes);
-            let slot = self.append_chunk(ChunkKind::IndexNode, new_seq, &bytes)?;
-            return Ok((slot, blake3_of(&bytes)));
+            return self.emit_index_node(&bytes, new_seq, reuse, &mut emitted);
         }
 
         // Need to split. Pack greedily into leaves that each fit.
@@ -423,11 +533,11 @@ impl<'f> Space<'f> {
             let first_key = leaf.entries[0].0.clone();
             // Encoded leaf carries user KV bytes; scrub on drop.
             let bytes: Zeroizing<Vec<u8>> = Zeroizing::new(leaf.encode()?);
-            let slot = self.append_chunk(ChunkKind::IndexNode, new_seq, &bytes)?;
+            let (slot, hash) = self.emit_index_node(&bytes, new_seq, reuse, &mut emitted)?;
             children.push(ChildPointer {
                 first_key,
                 child_slot: slot,
-                child_hash: blake3_of(&bytes),
+                child_hash: hash,
             });
         }
 
@@ -437,8 +547,7 @@ impl<'f> Space<'f> {
         };
         // Encoded internal node carries user `first_key` bytes; scrub.
         let bytes: Zeroizing<Vec<u8>> = Zeroizing::new(internal.encode()?);
-        let slot = self.append_chunk(ChunkKind::IndexNode, new_seq, &bytes)?;
-        Ok((slot, blake3_of(&bytes)))
+        self.emit_index_node(&bytes, new_seq, reuse, &mut emitted)
     }
 }
 
