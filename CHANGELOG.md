@@ -14,6 +14,44 @@ format.
 
 ### Security — audit follow-through
 
+- **Changing one key no longer rewrites the whole namespace (HV-14).**
+  `commit_tx` materialised a namespace's entire tree, applied the ops and
+  rebuilt — and the rebuild reached the disk as well, so a one-key edit
+  re-appended every leaf. Measured, `PaddingPolicy::None`, one Superblock
+  replica: overwriting one key in a 4 000-entry namespace appended 82 chunks
+  (336 KiB, a 4 601× amplification over the 73 bytes actually changed);
+  appending one 200-byte message to an 8 000-message log appended 48 chunks
+  (196 KiB). Those chunks are only reclaimed by the next `vacuum_orphans` at
+  open, so a long-running session grew the container by that much per write.
+  Index chunks are immutable and Merkle-addressed, and `pack_into_leaves` is
+  deterministic, so a rebuild reproduces most leaves byte for byte: those are
+  now pointed at instead of written again, keyed by the BLAKE3 the parent
+  already stores as its Merkle link. Both cases drop to 4–5 chunks and stay
+  there — flat in N. The fallback is the old behaviour: an edit where every
+  leaf genuinely differs (a value-length change early in the key space) writes
+  every leaf, exactly as before, so this cannot do worse.
+
+  The in-memory flatten-and-repack stays, deliberately. The audit filed the
+  finding as "O(N) CPU, RAM and write amplification"; measurement says only the
+  third is real. Wall time is flat at 11–22 ms from N = 10 to N = 8 000 both
+  before and after — a commit is fsync-bound and the tree work does not surface
+  above the 3-fsync barrier. RAM is bounded by the format rather than by N:
+  the writer emits one internal root over at most ~79 children, so the
+  flattened working set cannot exceed roughly 320 KiB before `Error::IndexFull`
+  stops the commit outright. Replacing the repack with incremental descent and
+  split/merge would buy nothing measurable and would cost the greedy repack's
+  self-compaction, which is what keeps delete/insert churn from fragmenting a
+  namespace into that ceiling. Numbers, method and the still-open capacity
+  ceiling are in `docs/en/contributing/benchmarks.md` (and the RU mirror).
+
+  Forward secrecy is unchanged or better: a reused chunk is the live node, not
+  a stale copy, so each commit leaves *fewer* superseded plaintexts for
+  `vacuum_orphans` to scrub. Against a multi-snapshot observer the appended
+  chunk count now tracks how localised a change was rather than how large the
+  namespace is, and `PaddingPolicy::DEFAULT` still quantises the observable
+  file size to 1 MiB buckets. No format change: the bytes, the node encodings
+  and the Merkle links are identical — only which slot a `ChildPointer` names.
+
 - **An abandoned async call no longer disappears without a verdict (HV-11).**
   Dropping the future of `AsyncContainer::run` / `AsyncSpace::run` detached the
   `spawn_blocking` task: the closure ran to completion, its commit landed, and

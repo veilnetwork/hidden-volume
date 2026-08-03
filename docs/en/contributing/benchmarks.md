@@ -295,3 +295,84 @@ cargo bench --bench throughput --features parallel-scan  # for parallel paths
 Median values written to `target/criterion/<bench>/new/estimates.json`.
 Run again after any commit touching `space::commit_tx`,
 `open::scan_and_recover*`, `crypto::aead`, or `crypto::derive`.
+
+## Write amplification of a one-key edit (audit HV-14)
+
+Measured on macOS/APFS SSD (aarch64), `PaddingPolicy::None` so file
+growth is exactly the chunks the commit wrote, `Argon2Params::MIN`,
+one Superblock replica. "chunks" counts 4 KiB slots appended by a
+single `put` + `commit`; the floor is 2 (the Commit chunk and its
+Superblock replica).
+
+`commit_tx` materialises a namespace's whole tree, applies the ops and
+rebuilds. The rebuild used to reach the disk as well, so a one-key edit
+re-appended the entire namespace. Because index chunks are immutable
+and Merkle-addressed, the ones a rebuild reproduces byte-for-byte are
+now pointed at instead of written again.
+
+**One key overwritten in a KV namespace of N entries, 64-byte values:**
+
+| N | before | after | wall before | wall after |
+|---:|---:|---:|---:|---:|
+| 10 | 3 chunks | 3 chunks | 21.0 ms | 12.2 ms |
+| 100 | 5 | 4 | 17.4 ms | 11.8 ms |
+| 500 | 13 | 4 | 17.1 ms | 11.2 ms |
+| 1 000 | 23 | 4 | 17.3 ms | 12.1 ms |
+| 2 000 | 43 | 4 | 16.8 ms | 12.3 ms |
+| 4 000 | 82 (336 KiB) | 4 (16 KiB) | 22.6 ms | 12.9 ms |
+
+**One 200-byte message appended to a log namespace holding N:**
+
+| N | before | after |
+|---:|---:|---:|
+| 0 | 4 chunks | 4 chunks |
+| 100 | 4 | 4 |
+| 500 | 7 | 5 |
+| 1 000 | 10 | 5 |
+| 2 000 | 15.3 | 5 |
+| 4 000 | 26 | 5 |
+| 8 000 | 48 (196 KiB) | 5 (20 KiB) |
+
+The cost is now flat in N. It cannot be worse than before: an edit
+where every leaf genuinely differs writes every leaf, as it always did.
+
+### Why the in-memory flatten-and-repack was kept
+
+The audit filed this as "O(N) CPU, RAM and write amplification". Only
+the last of the three is real here, and the measurements are the
+reason:
+
+- **CPU / latency is flat** — 11–22 ms from N = 10 to N = 8 000, both
+  before and after. A commit is fsync-bound; the tree work does not
+  show above the 3-fsync barrier.
+- **RAM is bounded by the format, not by N.** The writer emits at most
+  one internal root over its children, and an internal node caps at
+  `(PAYLOAD_CAP - 4) / (2 + key_len + 8 + 32)` children — 79 with
+  9-byte keys. The flattened working set therefore cannot exceed about
+  `79 × PAYLOAD_CAP ≈ 320 KiB` before `Error::IndexFull` stops the
+  commit outright. Measured ceilings: 64-byte values reach ≥ 4 000
+  entries; 512-byte values fail between 500 and 1 000; 2 048-byte
+  values fail between 10 and 100.
+
+Replacing the repack with incremental descent plus split/merge would
+buy nothing measurable against those numbers, and would cost the
+greedy repack's self-compaction — the property that keeps repeated
+delete/insert cycles from fragmenting a namespace into the `IndexFull`
+ceiling.
+
+### What is still open
+
+The `IndexFull` ceiling above is a real capacity limit: a namespace
+cannot hold more than one root's worth of leaves. Lifting it needs a
+third tree level, which the readers already allow
+(`MAX_TREE_DEPTH = 3`) and the writer does not emit. That work — a
+genuine multi-level B+ tree with incremental split and merge — is
+separate from write amplification and is not attempted here.
+
+### Reproducing these numbers
+
+`crates/hidden-volume/tests/hv14_write_amplification.rs` asserts the
+flatness (the same edit against namespaces of very different sizes must
+cost the same number of chunks). The absolute numbers above came from
+ad-hoc harnesses over the public API: seed N entries, record
+`metadata(path).len()`, commit one `put`, record it again.
