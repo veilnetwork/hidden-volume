@@ -1495,7 +1495,9 @@ fn fsync_parent_dir(path: &std::path::Path) -> std::io::Result<()> {
     {
         #[cfg(test)]
         if fsync_parent_dir_should_fail() {
-            return Err(std::io::Error::other("test hook: forced parent-dir fsync failure"));
+            return Err(std::io::Error::other(
+                "test hook: forced parent-dir fsync failure",
+            ));
         }
         let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
         // Retry once on EINTR — a signal arriving mid-fsync is not a durability
@@ -1740,7 +1742,8 @@ mod hv03_tests {
             .open_space(b"new")
             .expect("the new password must open the container");
         assert_eq!(
-            s.get(crate::space::index::Namespace::SETTINGS, b"k").unwrap(),
+            s.get(crate::space::index::Namespace::SETTINGS, b"k")
+                .unwrap(),
             Some(b"v".to_vec()),
             "the rewritten container must still hold its data"
         );
