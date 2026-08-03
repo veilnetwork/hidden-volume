@@ -1,0 +1,167 @@
+// Audit HV-05 — the Dart bindings must verify per-method UniFFI checksums.
+//
+// `contractVersion()` answers "was this cdylib built by the same uniffi
+// minor". It says nothing about whether any individual METHOD still takes the
+// arguments `bindings.dart` passes. Generated bindings compare a per-method
+// checksum for exactly that reason; these bindings are hand-written and had
+// nothing to compare, so a library with the same contract version but changed
+// signatures was accepted and the first call decoded the wrong bytes.
+//
+// These tests hold three things:
+//   1. the table matches what the built library actually exports;
+//   2. the table covers every symbol the bindings bind — the drift that
+//      actually happens is somebody adding a method and not the checksum;
+//   3. the verifier really rejects a mismatch, rather than being a loop that
+//      happens to have nothing to disagree with.
+
+import 'dart:ffi' as ffi;
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:hidden_volume/src/bindings.dart';
+
+import 'test_dylib.dart';
+
+typedef _ChecksumNative = ffi.Uint16 Function();
+typedef _ChecksumDart = int Function();
+
+const _fnPrefix = 'uniffi_hidden_volume_ffi_fn_';
+const _checksumPrefix = 'uniffi_hidden_volume_ffi_checksum_';
+
+/// `clone_` / `free_` are object-lifecycle entry points, not signatures;
+/// uniffi emits no checksum for them.
+const _noChecksumPrefixes = <String>['clone_', 'free_'];
+
+/// The bindings source, so the test can derive what SHOULD be in the table
+/// instead of trusting a second hand-written list that drifts the same way.
+File _bindingsSource() {
+  final candidates = <String>[
+    '${Directory.current.path}/lib/src/bindings.dart',
+    '${Directory.current.path}/experimental/flutter_plugin/hidden_volume/lib/src/bindings.dart',
+  ];
+  for (final c in candidates) {
+    final f = File(c);
+    if (f.existsSync()) return f;
+  }
+  throw StateError('bindings.dart not found, searched: ${candidates.join(", ")}');
+}
+
+void main() {
+  late ffi.DynamicLibrary lib;
+
+  setUpAll(() {
+    lib = openTestDylib();
+    overrideDylib(lib);
+  });
+
+  test('the checksum table is not empty', () {
+    // An empty table would make the verifier a no-op that still reads like a
+    // check — the failure mode of every guard nobody regenerated.
+    expect(expectedMethodChecksums, isNotEmpty,
+        reason: 'run scripts/regen-dart-checksums.py against the built cdylib');
+  });
+
+  test('every checksum matches what the built library exports', () {
+    final mismatches = <String>[];
+    expectedMethodChecksums.forEach((symbol, expected) {
+      final actual =
+          lib.lookupFunction<_ChecksumNative, _ChecksumDart>(symbol)();
+      if (actual != expected) {
+        mismatches.add('$symbol: library $actual, table $expected');
+      }
+    });
+    expect(mismatches, isEmpty,
+        reason: 'stale table — run scripts/regen-dart-checksums.py');
+  });
+
+  test('the table covers every method the bindings actually call', () {
+    // The drift that happens in practice is not a changed checksum — the
+    // script catches those. It is a NEW binding added without a table entry,
+    // which leaves that one method unverified while everything looks green.
+    final source = _bindingsSource().readAsStringSync();
+    final bound = RegExp("'($_fnPrefix[a-z0-9_]+)'")
+        .allMatches(source)
+        .map((m) => m.group(1)!)
+        .toSet();
+    expect(bound, isNotEmpty, reason: 'no FFI lookups found — wrong file?');
+
+    final wanted = <String>{};
+    for (final symbol in bound) {
+      final tail = symbol.substring(_fnPrefix.length);
+      if (_noChecksumPrefixes.any(tail.startsWith)) continue;
+      wanted.add('$_checksumPrefix$tail');
+    }
+
+    expect(expectedMethodChecksums.keys.toSet(), wanted,
+        reason: 'the table and the bound symbols have drifted apart; '
+            'run scripts/regen-dart-checksums.py');
+  });
+
+  test('the real verifier refuses a checksum that is off by one', () {
+    // Everything above proves the table is currently right. This proves the
+    // verifier would SAY SO if it were not — and it drives the shipped
+    // comparison, not a re-implementation of it in the test, because a
+    // re-implementation would keep passing if the shipped one became a no-op.
+    final symbol = expectedMethodChecksums.keys.first;
+    final real = lib.lookupFunction<_ChecksumNative, _ChecksumDart>(symbol)();
+
+    expect(
+      () => verifyChecksumsAgainst(<String, int>{
+        ...expectedMethodChecksums,
+        symbol: (real + 1) & 0xFFFF,
+      }),
+      throwsA(isA<StateError>().having(
+        (e) => e.message,
+        'message',
+        allOf(contains(symbol), contains('Checksum mismatch')),
+      )),
+    );
+  });
+
+  test('the real verifier refuses a method the library does not have', () {
+    // The other half of a signature change: the method is gone entirely.
+    expect(
+      () => verifyChecksumsAgainst(<String, int>{
+        ...expectedMethodChecksums,
+        '${_checksumPrefix}method_spacehandle_no_such_method': 1,
+      }),
+      throwsA(isA<StateError>().having(
+        (e) => e.message,
+        'message',
+        allOf(contains('no_such_method'), contains('Absent from the library')),
+      )),
+    );
+  });
+
+  test('the real verifier refuses an empty table', () {
+    // A table nobody regenerated is the way this mechanism quietly stops being
+    // one. It must be an error, not a vacuously satisfied loop.
+    expect(
+      () => verifyChecksumsAgainst(const <String, int>{}),
+      throwsA(isA<StateError>()
+          .having((e) => e.message, 'message', contains('empty'))),
+    );
+  });
+
+  test('verifyAbiCompatibility passes against the matching library', () {
+    expect(verifyAbiCompatibility, returnsNormally);
+  });
+
+  test('the first FFI call verifies before it calls', () {
+    // The wiring. A verifier that exists but is never reached leaves exactly
+    // the hole it was added to close, and nothing else in this file would
+    // notice — the shipped table matches, so every other test passes either
+    // way.
+    resetAbiVerificationForTest();
+    final before = abiVerificationRuns;
+    try {
+      // Any call through `rustCall` will do; this one fails on the path, which
+      // is fine — the verification happens first.
+      headerInfo('${Directory.systemTemp.path}/hv-no-such-container-hv05');
+    } catch (_) {
+      // Expected: the file does not exist.
+    }
+    expect(abiVerificationRuns, greaterThan(before),
+        reason: 'an FFI call went through without verifying the ABI');
+  });
+}

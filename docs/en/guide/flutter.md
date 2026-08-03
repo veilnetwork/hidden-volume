@@ -106,6 +106,37 @@ plugin layout under `android/src/main/jniLibs/` and similar for iOS.
 async surface should map directly to Dart `Future<T>` without
 adapter code. Until then, expect minor manual wrapping.
 
+## The hand-written Dart bindings and their checksum table
+
+`experimental/flutter_plugin/hidden_volume/lib/src/bindings.dart` binds the
+uniffi 0.31 C ABI directly (see the file header for why it is not generated).
+Hand-written bindings do not get the safety net a generated one has: uniffi
+exports a per-method checksum symbol and generated bindings compare each
+against a value baked in at generation time, refusing to run on a mismatch.
+
+Without that comparison, an older or swapped library with the same *contract
+version* was accepted, and the first call decoded the wrong bytes — a native
+crash if lucky, silently wrong arguments against the user's real container if
+not (audit HV-05). `bindings.dart` now carries the table and checks every
+entry before the first FFI call.
+
+**Regenerate the table after ANY change to a Rust FFI signature:**
+
+```sh
+cargo build -p hidden-volume-ffi --release
+scripts/regen-dart-checksums.py            # rewrite the table in place
+scripts/regen-dart-checksums.py --check    # CI mode: fail if stale
+```
+
+The script dlopens the built cdylib and CALLS each checksum symbol — the value
+is the symbol's return, not its name, so `nm` / `strings` cannot produce it,
+and calling works identically on `.dylib` / `.so` / `.dll`. Its key set is
+derived from the symbol lookups in `bindings.dart` itself, so a newly bound
+method is picked up without editing a second list.
+
+A stale table fails closed at launch, which is its own outage — treat
+`--check` as part of the pre-tag gate.
+
 ## Path B — per-platform plugin (works today)
 
 Wrap the Kotlin and Swift bindings in a standard Flutter plugin

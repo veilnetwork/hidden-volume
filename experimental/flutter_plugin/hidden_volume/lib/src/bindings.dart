@@ -177,11 +177,160 @@ void _ensureAbiCompatible() {
   }
 }
 
+/// Per-method UniFFI checksums, one per function / method / constructor these
+/// bindings call (audit HV-05).
+///
+/// The contract version above answers "was this cdylib built by the same
+/// uniffi minor". It says nothing about whether any individual METHOD still
+/// takes the arguments this file passes. A generated binding compares a
+/// per-method checksum for exactly that reason and refuses to run when one
+/// differs; hand-written bindings had nothing to compare, so an older or
+/// swapped library with the same contract version was accepted, and the first
+/// call decoded the wrong bytes — a native crash if we were lucky, silently
+/// wrong arguments against the user's real container if we were not.
+///
+/// Regenerate after ANY change to a Rust FFI signature:
+///
+///     cargo build -p hidden-volume-ffi --release
+///     scripts/regen-dart-checksums.py
+///
+/// and `scripts/regen-dart-checksums.py --check` fails on a stale table. Do
+/// not hand-edit the block below: the script derives its key set from the
+/// symbol lookups in this same file, so a newly bound method is picked up
+/// automatically and a removed one disappears.
+// BEGIN GENERATED CHECKSUMS — scripts/regen-dart-checksums.py
+const Map<String, int> _methodChecksums = <String, int>{
+  'uniffi_hidden_volume_ffi_checksum_constructor_multispacehandle_open': 55952,
+  'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_add_space': 26649,
+  'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_create': 32815,
+  'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_open': 49007,
+  'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_open_with_keys': 38449,
+  'uniffi_hidden_volume_ffi_checksum_func_change_passwords': 27192,
+  'uniffi_hidden_volume_ffi_checksum_func_compact_known': 53321,
+  'uniffi_hidden_volume_ffi_checksum_func_header_info': 40142,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_commit': 27479,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_commit_seq': 20495,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_count': 7841,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_get': 65186,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_iter_log_range': 14894,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_kv_keys': 11837,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_open_space': 38306,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_read_log': 27036,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_set_padding_policy': 49029,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_space_count': 64423,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_space_keys': 15090,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_vacuum_data_batches': 40066,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_vacuum_space': 35449,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_commit': 59696,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_commit_history': 13502,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_commit_seq': 53179,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_count': 3982,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_erase_namespace': 7530,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_get': 28461,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_iter_log_range': 24184,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_kv_keys': 17454,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_list_namespaces': 63954,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_read_log': 59826,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_set_padding_policy': 6532,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_space_keys': 38453,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_stats': 53120,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_vacuum_data_batches': 48307,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_verify_integrity': 55085,
+};
+// END GENERATED CHECKSUMS
+
+/// Compare every entry of [table] against the loaded cdylib.
+///
+/// Fails closed and names every offender at once: whoever is staring at a
+/// mismatch wants the whole list, not the first entry in map order.
+///
+/// Takes the table as an argument so a test can drive THIS code — the real
+/// comparison and the real report — against a deliberately wrong value. A
+/// verifier that is only ever handed a matching table is a verifier nobody
+/// has seen refuse anything.
+void _verifyChecksums(Map<String, int> table) {
+  if (table.isEmpty) {
+    // An empty table would make this function a no-op that still reads like a
+    // check — the failure mode of every guard nobody regenerated.
+    throw StateError('hidden_volume: the UniFFI checksum table is empty. Run '
+        'scripts/regen-dart-checksums.py against the built cdylib.');
+  }
+  final missing = <String>[];
+  final mismatched = <String>[];
+  table.forEach((symbol, expected) {
+    final int actual;
+    try {
+      actual =
+          _dylib.lookupFunction<ffi.Uint16 Function(), int Function()>(symbol)();
+    } on ArgumentError {
+      // dart:ffi throws ArgumentError when the symbol is absent — the method
+      // this file calls does not exist in the loaded library at all.
+      missing.add(symbol);
+      return;
+    }
+    if (actual != expected) {
+      mismatched.add('$symbol (cdylib $actual, bindings $expected)');
+    }
+  });
+  if (missing.isEmpty && mismatched.isEmpty) return;
+  final report = StringBuffer(
+      'hidden_volume: the loaded native library does not match these bindings.\n'
+      'The uniffi contract version agrees, so this is a per-method signature '
+      'drift — calling through would corrupt arguments, not fail cleanly.\n');
+  if (missing.isNotEmpty) {
+    report.writeln('Absent from the library:');
+    for (final s in missing) {
+      report.writeln('  $s');
+    }
+  }
+  if (mismatched.isNotEmpty) {
+    report.writeln('Checksum mismatch:');
+    for (final s in mismatched) {
+      report.writeln('  $s');
+    }
+  }
+  report.write(
+      'Rebuild hidden-volume-ffi and run scripts/regen-dart-checksums.py.');
+  throw StateError(report.toString());
+}
+
+/// Force the ABI checks that otherwise run before the first FFI call.
+///
+/// Exposed so a host app can fail at a moment of its choosing — a launch
+/// screen rather than the middle of an unlock.
+void verifyAbiCompatibility() {
+  _ensureAbiCompatible();
+  _verifyChecksums(_methodChecksums);
+  abiVerificationRuns++;
+  _abiChecked = true;
+}
+
+/// The checksum table, for tests and tooling. Unmodifiable.
+Map<String, int> get expectedMethodChecksums =>
+    Map<String, int>.unmodifiable(_methodChecksums);
+
+/// Run the real verifier against a caller-supplied table. Test-only, in the
+/// same spirit as [overrideDylib]: the shipped table matches by construction,
+/// so this is the only way to watch the check actually refuse something.
+void verifyChecksumsAgainst(Map<String, int> table) => _verifyChecksums(table);
+
+/// How many times [verifyAbiCompatibility] has run. Test-only.
+///
+/// "The check is wired into the call path" is otherwise unobservable, and an
+/// uncalled check is indistinguishable from no check at all — which is the
+/// state this whole mechanism was added to leave (audit HV-05).
+int abiVerificationRuns = 0;
+
+/// Test-only: forget that the ABI was already verified, so the next FFI call
+/// verifies again.
+void resetAbiVerificationForTest() {
+  _abiChecked = false;
+}
+
 bool _abiChecked = false;
 void _ensureChecked() {
   if (!_abiChecked) {
-    _ensureAbiCompatible();
-    _abiChecked = true;
+    verifyAbiCompatibility();
   }
 }
 
