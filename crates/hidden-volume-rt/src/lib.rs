@@ -23,6 +23,42 @@
 //!   `Result<T, E>`. Generic over `E` so the consuming crate can
 //!   plug in its own error type (`hidden_volume::Error` for the
 //!   async crate, `HvError` for the FFI crate).
+//! - [`OpLedger`] — admission gate + outcome ledger for blocking
+//!   operations whose future may be dropped. See "Abandoned futures"
+//!   below.
+//!
+//! ## Abandoned futures (audit HV-11)
+//!
+//! `tokio::task::spawn_blocking` cannot be interrupted from the
+//! outside. Dropping the `JoinHandle` **detaches** the task; the
+//! closure keeps running on a pool thread and its mutation of the
+//! container lands anyway. So `timeout(d, space.run(..)).await`
+//! used to leave the caller with `Elapsed` and no way to learn
+//! whether the write happened, while the pool filled up with work
+//! nobody was waiting for.
+//!
+//! What is actually achievable is spelled out here rather than
+//! papered over:
+//!
+//! - **Before the closure starts, cancellation is real.** Every
+//!   spawned closure re-checks its cancel token as its first act.
+//!   An operation abandoned while still queued short-circuits
+//!   without touching the container, and reports
+//!   [`OpOutcome::NeverStarted`] — a *proof* of no effect, not a
+//!   hope.
+//! - **After it starts, cancellation is cooperative at best.** The
+//!   drop fires the token, and the sync core's long loops
+//!   (open-scan, repack, integrity walk) honour it at their
+//!   checkpoints. A commit already past its superblock fsync does
+//!   not unwind, and this crate does not pretend otherwise: the
+//!   operation is reported as [`OpOutcome::Running`] until it
+//!   settles, then as [`OpOutcome::Succeeded`] /
+//!   [`OpOutcome::Failed`].
+//! - **The outcome is not thrown away.** The abandoning caller is
+//!   gone, but the handle it abandoned is not. [`OpLedger`] files
+//!   every abandoned operation under an [`OpId`] and keeps its
+//!   live outcome readable via [`OpLedger::abandoned_operations`],
+//!   so the host app can reconcile instead of guessing.
 //!
 //! ## Why a separate crate
 //!
@@ -36,8 +72,13 @@
 #![deny(missing_docs)]
 #![warn(rust_2018_idioms)]
 
+use std::collections::VecDeque;
 use std::mem::ManuallyDrop;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
+use hidden_volume::cancel::CancelToken;
 use hidden_volume::container::Container;
 use hidden_volume::crypto::SpaceKeys;
 use hidden_volume::space::Space;
@@ -262,7 +303,7 @@ impl std::fmt::Debug for OwnedSpace {
 unsafe impl Send for OwnedSpace {}
 
 /// Reason a [`run_blocking`] call did not produce a result.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockingFailure {
     /// The closure panicked. Typed as a separate variant so consumers
     /// can map it to "internal error" in their own error type.
@@ -270,6 +311,12 @@ pub enum BlockingFailure {
     /// The blocking task was cancelled (typically because the runtime
     /// shut down).
     Cancelled,
+    /// The closure never ran: its cancel token was already fired when
+    /// the pool thread picked the task up, so it short-circuited
+    /// before touching any state. Distinct from [`Self::Cancelled`]
+    /// because it carries a *proof* that nothing was mutated — map it
+    /// to the consumer's "cancelled" error, never to "internal".
+    NotStarted,
 }
 
 /// Spawn `f` on Tokio's blocking pool and translate join errors into
@@ -292,8 +339,19 @@ pub enum BlockingFailure {
 /// run_blocking(closure, |fail| match fail {
 ///     BlockingFailure::Panicked => Error::Internal("task panicked"),
 ///     BlockingFailure::Cancelled => Error::Internal("task cancelled"),
+///     BlockingFailure::NotStarted => Error::Cancelled,
 /// }).await
 /// ```
+///
+/// ## Abandonment
+///
+/// Dropping the returned future arms the same short-circuit
+/// [`OpLedger`] uses: if the pool has not yet given the closure a
+/// thread, it will not run at all. Once it has, this helper cannot
+/// stop it and cannot tell anyone what it did — that is what
+/// [`OpLedger`] is for. Use this plain form only where there is no
+/// handle to report an abandoned outcome to (constructors, one-shot
+/// opens).
 pub async fn run_blocking<F, T, E>(
     f: F,
     map_err: impl FnOnce(BlockingFailure) -> E + Send + 'static,
@@ -303,9 +361,394 @@ where
     T: Send + 'static,
     E: Send + 'static,
 {
-    match tokio::task::spawn_blocking(f).await {
-        Ok(res) => res,
-        Err(e) if e.is_panic() => Err(map_err(BlockingFailure::Panicked)),
-        Err(_) => Err(map_err(BlockingFailure::Cancelled)),
+    let ledger = OpLedger::unbounded();
+    ledger.run(f, map_err).await
+}
+
+// =====================================================================
+// Operation ledger — HV-11.
+// =====================================================================
+
+/// Identifier of one blocking operation, unique within its
+/// [`OpLedger`]. Assigned at dispatch, before the task reaches the
+/// pool, so an operation that is abandoned while still queued still
+/// has a name to be reported under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OpId(pub u64);
+
+/// What is known about a blocking operation right now.
+///
+/// The three terminal "it ran" states are deliberately coarse: the
+/// value `T` an abandoned operation produced went nowhere (nobody was
+/// awaiting it), and `E` is not required to be `Clone`. What a host
+/// app needs after abandoning a write is whether the container may
+/// have changed — that is exactly what these variants say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpOutcome {
+    /// Dispatched, but the closure has not begun. Nothing has been
+    /// touched *yet*; this can still become any of the states below.
+    Queued,
+    /// The closure is executing. **The container may or may not have
+    /// been modified, and the operation cannot be undone.** This is
+    /// the honest answer to "did my abandoned write land?" while the
+    /// write is still in flight — not an error, and not a promise
+    /// that it was stopped.
+    Running,
+    /// Abandoned before the closure touched anything: either the
+    /// future was dropped before the task was ever dispatched, or the
+    /// pool thread found the cancel token already fired and
+    /// short-circuited. **Proof of no effect.**
+    NeverStarted,
+    /// The closure ran to completion and returned `Ok`.
+    Succeeded,
+    /// The closure ran to completion and returned `Err`. Whether it
+    /// left partial state behind is the operation's own contract
+    /// (e.g. `commit_tx` documents its post-failure state).
+    Failed,
+    /// The runtime discarded the task without running it (runtime
+    /// shutdown), or the closure panicked. Same uncertainty class as
+    /// [`Self::Running`], frozen.
+    Lost,
+}
+
+impl OpOutcome {
+    /// Has this operation reached a state it can no longer leave?
+    #[must_use]
+    pub fn is_settled(self) -> bool {
+        !matches!(self, Self::Queued | Self::Running)
+    }
+
+    /// Could this operation have modified the container? `false` only
+    /// for [`Self::NeverStarted`], which is backed by a proof; every
+    /// other state either did run or may still.
+    #[must_use]
+    pub fn may_have_mutated(self) -> bool {
+        !matches!(self, Self::NeverStarted)
+    }
+}
+
+/// One filed abandonment: the operation's id plus its outcome at the
+/// moment [`OpLedger::abandoned_operations`] was called. Re-read the
+/// ledger to observe a [`OpOutcome::Running`] entry settle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AbandonedOp {
+    /// Which operation.
+    pub id: OpId,
+    /// What is known about it now.
+    pub outcome: OpOutcome,
+}
+
+const OUT_PENDING: u8 = 0;
+const OUT_NEVER_STARTED: u8 = 1;
+const OUT_SUCCEEDED: u8 = 2;
+const OUT_FAILED: u8 = 3;
+const OUT_LOST: u8 = 4;
+
+/// How many abandonment records a ledger keeps before it starts
+/// forgetting the oldest ones. Bounded on purpose: a host app that
+/// abandons operations in a loop and never reads the ledger must not
+/// be able to grow it without limit.
+const MAX_ABANDONED_RECORDS: usize = 128;
+
+/// Shared state of one operation. Lives in an `Arc` held by three
+/// parties: the dispatching future, the spawned closure, and (once
+/// abandoned) the ledger. Any of them may outlive the others.
+#[derive(Debug)]
+struct OpState {
+    id: u64,
+    token: CancelToken,
+    started: AtomicBool,
+    outcome: AtomicU8,
+}
+
+impl OpState {
+    /// First writer wins. The closure settles the true outcome; the
+    /// drop guards only fill in a state nobody else claimed.
+    fn settle(&self, value: u8) {
+        let _ =
+            self.outcome
+                .compare_exchange(OUT_PENDING, value, Ordering::AcqRel, Ordering::Acquire);
+    }
+
+    fn outcome_now(&self) -> OpOutcome {
+        match self.outcome.load(Ordering::Acquire) {
+            OUT_NEVER_STARTED => OpOutcome::NeverStarted,
+            OUT_SUCCEEDED => OpOutcome::Succeeded,
+            OUT_FAILED => OpOutcome::Failed,
+            OUT_LOST => OpOutcome::Lost,
+            _ if self.started.load(Ordering::Acquire) => OpOutcome::Running,
+            _ => OpOutcome::Queued,
+        }
+    }
+}
+
+/// Fires when the spawned closure's captured environment is dropped
+/// without the body having settled an outcome — i.e. the runtime threw
+/// the task away, or the body panicked out.
+struct LostGuard(Arc<OpState>);
+
+impl Drop for LostGuard {
+    fn drop(&mut self) {
+        self.0.settle(OUT_LOST);
+    }
+}
+
+/// Admission gate and abandonment ledger for one handle's blocking
+/// operations.
+///
+/// A ledger does two things a bare `spawn_blocking` cannot:
+///
+/// 1. **Bounds how much of the blocking pool one handle can hold.**
+///    Callers wait for a permit as ordinary async tasks (cheap, and
+///    cancellable for free) instead of as parked pool threads. The
+///    permit is released only when the closure truly finishes, so an
+///    abandoned-but-still-running operation keeps applying
+///    backpressure — which is correct: the container is still busy.
+/// 2. **Remembers operations whose future was dropped.** The caller
+///    that walked away cannot be told anything, but the handle it
+///    walked away from can be asked. See [`Self::abandoned_operations`].
+///
+/// Cheap to construct; one per handle (`AsyncSpace`, `AsyncContainer`),
+/// shared by all clones of that handle.
+#[derive(Debug)]
+pub struct OpLedger {
+    next_id: AtomicU64,
+    permits: Arc<tokio::sync::Semaphore>,
+    abandoned: Mutex<VecDeque<Arc<OpState>>>,
+    forgotten: AtomicU64,
+}
+
+impl OpLedger {
+    /// Ledger admitting at most `max_concurrent` blocking operations
+    /// at a time. Handles that serialize internally on a mutex want
+    /// `1`: anything above that only moves the queue from tokio's
+    /// async scheduler onto parked pool threads.
+    ///
+    /// # Panics
+    ///
+    /// If `max_concurrent` is zero — a ledger that admits nothing
+    /// would hang every caller forever.
+    #[must_use]
+    pub fn new(max_concurrent: usize) -> Self {
+        assert!(max_concurrent > 0, "OpLedger needs at least one permit");
+        Self {
+            next_id: AtomicU64::new(0),
+            permits: Arc::new(tokio::sync::Semaphore::new(max_concurrent)),
+            abandoned: Mutex::new(VecDeque::new()),
+            forgotten: AtomicU64::new(0),
+        }
+    }
+
+    /// Ledger with no admission limit, used by the plain
+    /// [`run_blocking`] helper — it has no handle to bound and no
+    /// reader for its records.
+    fn unbounded() -> Self {
+        Self::new(tokio::sync::Semaphore::MAX_PERMITS)
+    }
+
+    /// Every abandonment this ledger still remembers, oldest first,
+    /// each with its outcome **as of this call**. Entries whose
+    /// outcome is [`OpOutcome::Running`] or [`OpOutcome::Queued`] are
+    /// not final — call again later to see them settle.
+    ///
+    /// This is the answer to "I timed out a write; did it land?".
+    #[must_use]
+    pub fn abandoned_operations(&self) -> Vec<AbandonedOp> {
+        let queue = self
+            .abandoned
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        queue
+            .iter()
+            .map(|state| AbandonedOp {
+                id: OpId(state.id),
+                outcome: state.outcome_now(),
+            })
+            .collect()
+    }
+
+    /// Forget the abandonment records that have reached a final
+    /// state. Unsettled ones are kept — they are exactly the records
+    /// still worth watching.
+    pub fn clear_settled_operations(&self) {
+        let mut queue = self
+            .abandoned
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        queue.retain(|state| !state.outcome_now().is_settled());
+    }
+
+    /// How many abandonment records were evicted because the ledger
+    /// hit its record cap. Non-zero means the host app is abandoning
+    /// faster than it reconciles, and that some uncertain outcomes are
+    /// no longer reported.
+    #[must_use]
+    pub fn forgotten_abandonments(&self) -> u64 {
+        self.forgotten.load(Ordering::Relaxed)
+    }
+
+    /// Dispatch `f` to the blocking pool under a fresh, private
+    /// cancel token. See [`Self::run_cancellable`] — this is that
+    /// method with a token the closure has no way to observe, so the
+    /// only cancellation it can benefit from is the pre-start
+    /// short-circuit.
+    pub async fn run<F, T, E>(
+        &self,
+        f: F,
+        map_err: impl FnOnce(BlockingFailure) -> E + Send + 'static,
+    ) -> Result<T, E>
+    where
+        F: FnOnce() -> Result<T, E> + Send + 'static,
+        T: Send + 'static,
+        E: Send + 'static,
+    {
+        self.run_cancellable(CancelToken::new(), f, map_err).await
+    }
+
+    /// Dispatch `f` to the blocking pool, wired to `token`.
+    ///
+    /// `token` is the caller's own token — clone it into `f` and the
+    /// sync core's cancellable entry points to get cooperative
+    /// cancellation. This ledger fires the same token when the
+    /// returned future is dropped, which is what turns "the caller
+    /// walked away" into a signal the sync core's checkpoints can act
+    /// on.
+    ///
+    /// ## What dropping the future actually does
+    ///
+    /// | State when dropped | Effect |
+    /// |---|---|
+    /// | Waiting for a permit | Never dispatched. [`OpOutcome::NeverStarted`]. |
+    /// | Queued on the pool | Short-circuits on the token. [`OpOutcome::NeverStarted`]. |
+    /// | Closure running | **Not interrupted.** Token fired; the closure stops at its next checkpoint if it has any, and runs to completion if it does not. [`OpOutcome::Running`] until it settles. |
+    ///
+    /// In every case the operation is filed in the ledger under a
+    /// fresh [`OpId`].
+    pub async fn run_cancellable<F, T, E>(
+        &self,
+        token: CancelToken,
+        f: F,
+        map_err: impl FnOnce(BlockingFailure) -> E + Send + 'static,
+    ) -> Result<T, E>
+    where
+        F: FnOnce() -> Result<T, E> + Send + 'static,
+        T: Send + 'static,
+        E: Send + 'static,
+    {
+        let state = Arc::new(OpState {
+            id: self.next_id.fetch_add(1, Ordering::Relaxed),
+            token,
+            started: AtomicBool::new(false),
+            outcome: AtomicU8::new(OUT_PENDING),
+        });
+
+        // Armed for the whole body. Every `return` below happens after
+        // `disarm`, so the guard fires only when this future is
+        // dropped mid-flight — the HV-11 case.
+        let mut guard = AbandonGuard {
+            ledger: self,
+            state: Some(Arc::clone(&state)),
+            dispatched: false,
+        };
+
+        let permit = match Arc::clone(&self.permits).acquire_owned().await {
+            Ok(permit) => permit,
+            // Unreachable: this ledger owns its semaphore and never
+            // closes it. Report it as "did not run", which is true.
+            Err(_) => {
+                guard.disarm();
+                state.settle(OUT_NEVER_STARTED);
+                return Err(map_err(BlockingFailure::NotStarted));
+            },
+        };
+
+        // From here on the task exists independently of this future.
+        guard.dispatched = true;
+        let task_state = Arc::clone(&state);
+        // Captured by the closure, NOT created inside it: if tokio
+        // drops the task without ever calling the body, dropping the
+        // environment is the only signal we get.
+        let lost = LostGuard(Arc::clone(&state));
+        let join = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let _lost = lost;
+            // The linearization point of the whole design: past this
+            // check the closure is unstoppable, before it the
+            // operation provably did nothing.
+            if task_state.token.is_cancelled() {
+                task_state.settle(OUT_NEVER_STARTED);
+                return None;
+            }
+            task_state.started.store(true, Ordering::Release);
+            let result = f();
+            task_state.settle(if result.is_ok() {
+                OUT_SUCCEEDED
+            } else {
+                OUT_FAILED
+            });
+            Some(result)
+        });
+
+        let joined = join.await;
+        guard.disarm();
+        match joined {
+            Ok(Some(result)) => result,
+            Ok(None) => Err(map_err(BlockingFailure::NotStarted)),
+            Err(e) if e.is_panic() => Err(map_err(BlockingFailure::Panicked)),
+            Err(_) => Err(map_err(BlockingFailure::Cancelled)),
+        }
+    }
+
+    fn file_abandoned(&self, state: Arc<OpState>) {
+        let mut queue = self
+            .abandoned
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while queue.len() >= MAX_ABANDONED_RECORDS {
+            queue.pop_front();
+            self.forgotten.fetch_add(1, Ordering::Relaxed);
+        }
+        queue.push_back(state);
+    }
+}
+
+impl Default for OpLedger {
+    /// One permit — the shape every handle in this workspace wants,
+    /// since each serializes on an internal mutex anyway.
+    fn default() -> Self {
+        Self::new(1)
+    }
+}
+
+/// Fires the cancel token and files the operation when the dispatching
+/// future is dropped before its blocking task reported back.
+struct AbandonGuard<'l> {
+    ledger: &'l OpLedger,
+    state: Option<Arc<OpState>>,
+    /// Whether `spawn_blocking` was already called. If not, nothing
+    /// can possibly run and the outcome is settled on the spot.
+    dispatched: bool,
+}
+
+impl AbandonGuard<'_> {
+    fn disarm(&mut self) {
+        self.state = None;
+    }
+}
+
+impl Drop for AbandonGuard<'_> {
+    fn drop(&mut self) {
+        let Some(state) = self.state.take() else {
+            return;
+        };
+        // Cooperative half: the sync core polls this at its
+        // checkpoints. It stops loops; it does not unwind commits.
+        state.token.cancel();
+        if !self.dispatched {
+            // Abandoned while waiting for a permit — no task was ever
+            // created, so "nothing happened" is a fact, not a guess.
+            state.settle(OUT_NEVER_STARTED);
+        }
+        self.ledger.file_abandoned(state);
     }
 }
