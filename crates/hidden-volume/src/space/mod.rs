@@ -607,6 +607,65 @@ impl<'f> Space<'f> {
         Ok(out)
     }
 
+    /// Keys of every entry in `namespace`, sorted ascending. Empty Vec
+    /// for namespaces that have never been written to.
+    ///
+    /// The keys-only counterpart to [`Self::list`]. Both walk the same
+    /// leaves and decode the same chunks; the difference is what
+    /// survives the walk. `list` keeps every value too, so its peak is
+    /// the namespace's entire plaintext — but the enumerate-then-act
+    /// callers (host-app GC of stale bookkeeping keys,
+    /// [`Self::erase_namespace`], the FFI `kv_keys`) never look at those
+    /// values, and were paying for them anyway. Here each leaf's values
+    /// are dropped as the leaf is consumed, so the walk peaks at one
+    /// decoded node the way [`Self::count`] does.
+    ///
+    /// The *result* is still O(total key bytes) by construction: it is
+    /// every key. Callers that can work a page at a time should use
+    /// [`Self::list_keys_after`], whose result is bounded by `limit`.
+    pub fn list_keys(&mut self, namespace: Namespace) -> Result<Vec<Vec<u8>>> {
+        self.list_keys_after(namespace, None, usize::MAX)
+    }
+
+    /// Paginate forward through a namespace's keys.
+    ///
+    /// Returns up to `limit` keys strictly greater than `after`, in
+    /// ascending key order. Pass `after = None` for the first page and
+    /// `after = Some(last_key_of_previous_page)` for each subsequent
+    /// one — the KV counterpart of [`Self::iter_log_after`], which is
+    /// the same walk keyed on `log_id` instead.
+    ///
+    /// Memory bound: `limit` keys plus one decoded node, independent of
+    /// the namespace's total size. As with `iter_log_after`, `limit`
+    /// bounds the OUTPUT and not the chunk reads — a subtree whose keys
+    /// all fail the `after` filter contributes nothing and the walk
+    /// keeps going, so paging all the way through an N-key namespace
+    /// still reads O(N) chunks per page. What it does not do is hold
+    /// O(N) bytes at once, which is the property a memory-constrained
+    /// host needs.
+    pub fn list_keys_after(
+        &mut self,
+        namespace: Namespace,
+        after: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<Vec<Vec<u8>>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let root_slot = match self.find_root_slot(namespace)? {
+            Some(s) => s,
+            None => return Ok(Vec::new()),
+        };
+        // Cap the pre-allocation: `list_keys` passes `usize::MAX` to mean
+        // "everything", and `Vec::with_capacity` panics on overflow.
+        let mut out: Vec<Vec<u8>> = Vec::with_capacity(limit.min(1024));
+        let mut walk = self.new_tree_walk();
+        self.collect_leaf_keys_after_at(
+            root_slot, namespace, after, limit, 0, &mut walk, &mut out,
+        )?;
+        Ok(out)
+    }
+
     /// Number of entries in `namespace`. Walks all leaves of the tree
     /// — O(N) but only chunk reads, no decode of values. There is no
     /// count cache: `count` is rarely on a UI hot path.
@@ -629,7 +688,8 @@ impl<'f> Space<'f> {
     ///
     /// ## Mechanics
     ///
-    /// 1. Enumerate all `(key, _)` pairs in the namespace via [`Self::list`].
+    /// 1. Enumerate the namespace's keys via [`Self::list_keys`] — keys
+    ///    only, since a delete is addressed by key.
     /// 2. Open a single `Tx`, issue a `delete` for each key, commit.
     /// 3. The new commit omits this namespace from its `IndexRoot` set
     ///    (since the rebuilt tree is empty). Old IndexNode chunks
@@ -664,20 +724,26 @@ impl<'f> Space<'f> {
     /// without commit when there is nothing to do).
     pub fn erase_namespace(&mut self, namespace: Namespace) -> Result<usize> {
         // R-NSKIND: works on both Kv AND Log namespaces. Internally
-        // we walk the KV index via `list` (which returns the raw
-        // `(key, value)` shape regardless of the namespace's kind —
-        // for Log namespaces that's `(log_id_key_be, batch_slot_le)`
-        // pointers) and queue Delete ops via the kind-bypassing
-        // internal helper. `commit_tx` permits pure-Delete op sets
-        // against a Log namespace because they cannot introduce
+        // we walk the KV index via `list_keys` (which enumerates keys
+        // regardless of the namespace's kind — for Log namespaces those
+        // are the `log_id_key_be` keys) and queue Delete ops via the
+        // kind-bypassing internal helper. `commit_tx` permits pure-Delete
+        // op sets against a Log namespace because they cannot introduce
         // mixed-kind state.
-        let entries = self.list(namespace)?;
-        if entries.is_empty() {
+        //
+        // `list_keys`, not `list`: a delete is addressed by key, so the
+        // values this used to materialise alongside them were read,
+        // held for the length of the whole transaction, and never
+        // looked at. On a namespace holding megabytes of message bodies
+        // that is the difference between peaking at the keys and
+        // peaking at the entire plaintext (report5 HV-04).
+        let keys = self.list_keys(namespace)?;
+        if keys.is_empty() {
             return Ok(0);
         }
-        let count = entries.len();
+        let count = keys.len();
         let mut tx = self.begin_tx();
-        for (key, _value) in &entries {
+        for key in &keys {
             tx.delete_internal(namespace, key)?;
         }
         tx.commit()?;
@@ -764,6 +830,73 @@ impl<'f> Space<'f> {
             IndexNode::Internal(i) => {
                 for c in i.children {
                     self.collect_leaves_at(c.child_slot, namespace, depth + 1, walk, out)?;
+                }
+                Ok(())
+            },
+        }
+    }
+
+    /// Walk leaves left-to-right, pushing the KEYS of entries greater
+    /// than `after` (all of them if `after` is `None`) into `out` and
+    /// dropping each entry's value as the leaf is consumed. Stops once
+    /// `out.len() >= limit`.
+    ///
+    /// The value-discarding twin of
+    /// [`log_iter`](super::log_iter)'s `collect_leaves_after_at`; it is
+    /// separate rather than a filter over that one because the whole
+    /// point is that no `Vec<(Vec<u8>, Vec<u8>)>` is ever built.
+    ///
+    /// Guarded like every other walker: `limit` bounds `out`, not the
+    /// number of chunks read, so on adversarial input it is the
+    /// traversal guard that terminates this — see [`super::walk`].
+    #[allow(clippy::too_many_arguments)]
+    fn collect_leaf_keys_after_at(
+        &mut self,
+        slot: u64,
+        namespace: Namespace,
+        after: Option<&[u8]>,
+        limit: usize,
+        depth: u8,
+        walk: &mut TreeWalk,
+        out: &mut Vec<Vec<u8>>,
+    ) -> Result<()> {
+        if out.len() >= limit {
+            return Ok(());
+        }
+        walk.admit(slot, depth)?;
+        let node = self.read_index_node_at_expected(slot, namespace)?;
+        match node {
+            IndexNode::Leaf(l) => {
+                // `for (k, _value) in l.entries` — by value, so each value's
+                // allocation is freed at the end of its iteration instead of
+                // being carried to the end of the walk.
+                for (k, _value) in l.entries {
+                    if out.len() >= limit {
+                        break;
+                    }
+                    if let Some(a) = after
+                        && k.as_slice() <= a
+                    {
+                        continue;
+                    }
+                    out.push(k);
+                }
+                Ok(())
+            },
+            IndexNode::Internal(i) => {
+                for c in i.children {
+                    if out.len() >= limit {
+                        break;
+                    }
+                    self.collect_leaf_keys_after_at(
+                        c.child_slot,
+                        namespace,
+                        after,
+                        limit,
+                        depth + 1,
+                        walk,
+                        out,
+                    )?;
                 }
                 Ok(())
             },

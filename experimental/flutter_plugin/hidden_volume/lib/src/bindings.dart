@@ -213,7 +213,8 @@ const Map<String, int> _methodChecksums = <String, int>{
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_count': 7841,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_get': 65186,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_iter_log_range': 14894,
-  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_kv_keys': 11837,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_kv_keys': 32138,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_kv_keys_page': 65359,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_open_space': 38306,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_read_log': 27036,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_set_padding_policy': 49029,
@@ -228,7 +229,8 @@ const Map<String, int> _methodChecksums = <String, int>{
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_erase_namespace': 7530,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_get': 28461,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_iter_log_range': 24184,
-  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_kv_keys': 13299,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_kv_keys': 32483,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_kv_keys_page': 45476,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_list_namespaces': 63954,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_read_log': 59826,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_set_padding_policy': 6532,
@@ -1102,6 +1104,16 @@ final _spKvKeys = _dylib.lookupFunction<
         RustBuffer Function(int, int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_spacehandle_kv_keys');
 
+// (handle, namespace, Option<Vec<u8>> after, u32 limit) -> framed keys.
+// Same argument shape as iter_log_range's cursor, keyed on a byte string
+// instead of a log_id.
+final _spKvKeysPage = _dylib.lookupFunction<
+        RustBuffer Function(ffi.Uint64, ffi.Uint8, RustBuffer, ffi.Uint32,
+            ffi.Pointer<RustCallStatus>),
+        RustBuffer Function(
+            int, int, RustBuffer, int, ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_method_spacehandle_kv_keys_page');
+
 final _spEraseNs = _dylib.lookupFunction<
         ffi.Uint64 Function(ffi.Uint64, ffi.Uint8, ffi.Pointer<RustCallStatus>),
         int Function(int, int, ffi.Pointer<RustCallStatus>)>(
@@ -1144,6 +1156,19 @@ final _spVerifyIntegrity = _dylib.lookupFunction<
         RustBuffer Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
         RustBuffer Function(int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_spacehandle_verify_integrity');
+
+/// Encode an `Option<Vec<u8>>` as: 1 byte tag (0=None, 1=Some) + (if Some)
+/// the i32-BE-length-prefixed bytes uniffi expects for a `Vec<u8>`.
+RustBuffer _optByteVec(Uint8List? v) {
+  final w = _Writer();
+  if (v == null) {
+    w.writeU8(0);
+  } else {
+    w.writeU8(1);
+    w.writeByteVec(v);
+  }
+  return _bufferFromBytes(w.toBytes());
+}
 
 /// Encode an `Option<u64>` as: 1 byte tag (0=None, 1=Some) + (if Some) u64 BE.
 RustBuffer _optU64(int? v) {
@@ -1303,15 +1328,32 @@ class SpaceHandleBindings {
     return rustCall<int>((s) => _spCount(h, _ns(namespace), s));
   }
 
-  /// Keys of every KV entry in [namespace], sorted ascending. O(N) — walks
-  /// the index like [count]; values are not transferred. Host apps use this
-  /// to garbage-collect stale bookkeeping keys (a namespace's 2-level B+
-  /// tree has a hard entry budget — `IndexFull` — so orphans must be
+  /// Keys of every KV entry in [namespace], sorted ascending. Host apps use
+  /// this to garbage-collect stale bookkeeping keys (a namespace's 2-level
+  /// B+ tree has a hard entry budget — `IndexFull` — so orphans must be
   /// enumerable to be deletable).
+  ///
+  /// The walk peaks at one decoded index node, like [count] — values are
+  /// neither transferred nor held. The RESULT, though, is every key: one
+  /// allocation on each side of the FFI boundary, proportional to the
+  /// namespace. On anything whose size this app does not control, use
+  /// [kvKeysPage].
   List<Uint8List> kvKeys(int namespace) {
     _ensureOpen();
     final h = _cloneHandle();
     final out = rustCall<RustBuffer>((s) => _spKvKeys(h, _ns(namespace), s));
+    return _decodeFramedKeys(_Reader(_bufferToBytes(out)).readByteVec());
+  }
+
+  /// One page of [kvKeys]: up to [limit] keys strictly greater than
+  /// [after], ascending. Pass `after: null` for the first page and the
+  /// last key of the previous page thereafter; a page shorter than
+  /// [limit] is the end.
+  List<Uint8List> kvKeysPage(int namespace, Uint8List? after, int limit) {
+    _ensureOpen();
+    final h = _cloneHandle();
+    final out = rustCall<RustBuffer>(
+        (s) => _spKvKeysPage(h, _ns(namespace), _optByteVec(after), limit, s));
     return _decodeFramedKeys(_Reader(_bufferToBytes(out)).readByteVec());
   }
 
@@ -1508,6 +1550,13 @@ final _msKvKeys = _dylib.lookupFunction<
         RustBuffer Function(int, int, int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_multispacehandle_kv_keys');
 
+final _msKvKeysPage = _dylib.lookupFunction<
+        RustBuffer Function(ffi.Uint64, ffi.Uint32, ffi.Uint8, RustBuffer,
+            ffi.Uint32, ffi.Pointer<RustCallStatus>),
+        RustBuffer Function(
+            int, int, int, RustBuffer, int, ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_method_multispacehandle_kv_keys_page');
+
 final _msCommitSeq =
     _dylib.lookupFunction<
             ffi.Uint64 Function(
@@ -1652,6 +1701,17 @@ class MultiSpaceHandleBindings {
     _ensureOpen();
     final h = _clone();
     final out = rustCall<RustBuffer>((s) => _msKvKeys(h, _sid(id), _ns(namespace), s));
+    return _decodeFramedKeys(_Reader(_bufferToBytes(out)).readByteVec());
+  }
+
+  /// One page of [kvKeys] for space [id] — the multi-space twin of
+  /// [SpaceHandleBindings.kvKeysPage].
+  List<Uint8List> kvKeysPage(int id, int namespace, Uint8List? after, int limit) {
+    _ensureOpen();
+    final afterBuf = _optByteVec(after);
+    final h = _clone();
+    final out = rustCall<RustBuffer>(
+        (s) => _msKvKeysPage(h, _sid(id), _ns(namespace), afterBuf, limit, s));
     return _decodeFramedKeys(_Reader(_bufferToBytes(out)).readByteVec());
   }
 
