@@ -206,7 +206,7 @@ impl<'f> Space<'f> {
     /// superblock points at the new chain. Seq is bumped (not reused)
     /// to preserve the same-seq-replicas-are-bit-equal invariant.
     pub(crate) fn maybe_self_heal_checkpoint(&mut self) -> Result<bool> {
-        if self.file.lock_mode == crate::container::file::LockMode::Shared {
+        if !self.file.lock_mode.allows_writes() {
             return Ok(false);
         }
         let total = self.file.slot_count();
@@ -241,7 +241,7 @@ impl<'f> Space<'f> {
     /// fresh chain, and publishes a bumped-seq superblock pointing at
     /// it. Returns [`Error::ReadOnly`] on a shared-locked handle.
     pub(crate) fn write_self_heal_checkpoint(&mut self) -> Result<()> {
-        if self.file.lock_mode == crate::container::file::LockMode::Shared {
+        if !self.file.lock_mode.allows_writes() {
             return Err(Error::ReadOnly);
         }
         let total = self.file.slot_count();

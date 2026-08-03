@@ -460,7 +460,7 @@ impl<'f> Space<'f> {
     /// async / FFI wrappers depend on (they route through
     /// `with_space_mut()`).
     pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
-        if self.file.lock_mode == crate::container::file::LockMode::Shared {
+        if !self.file.lock_mode.allows_writes() {
             return Err(Error::ReadOnly);
         }
         self.file.padding_policy = policy;

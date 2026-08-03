@@ -54,7 +54,7 @@ impl<'f> Space<'f> {
             let _ = seq;
             return Err(Error::UnreadableNewerState);
         }
-        if self.file.lock_mode == crate::container::file::LockMode::Shared {
+        if !self.file.lock_mode.allows_writes() {
             return Err(Error::ReadOnly);
         }
         // A publish that got a replica onto the disk and then failed leaves
@@ -183,7 +183,7 @@ impl<'f> Space<'f> {
     ///   `commit_history`, both of which `vacuum_data_batches`
     ///   leaves alone.
     pub fn vacuum_data_batches(&mut self) -> Result<usize> {
-        if self.file.lock_mode == crate::container::file::LockMode::Shared {
+        if !self.file.lock_mode.allows_writes() {
             return Err(Error::ReadOnly);
         }
         // A publish that got a replica onto the disk and then failed leaves
