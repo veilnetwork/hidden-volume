@@ -150,18 +150,45 @@ fn android_flock(file: &File, operation: i32) -> Result<()> {
 /// [`crate::Container::set_superblock_replicas`].
 pub const DEFAULT_SUPERBLOCK_REPLICAS: u8 = 3;
 
-/// File-lock mode held on the underlying [`File`].
+/// File-lock mode held on the underlying [`File`], and with it whether
+/// this handle is allowed to write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockMode {
     /// `flock(LOCK_EX | LOCK_NB)` — exactly one writer; blocks readers
     /// and other writers. Acquired by [`ContainerFile::create`] and
-    /// [`ContainerFile::open`].
+    /// [`ContainerFile::open`]. The only mode that permits writes.
     Exclusive,
+    /// `flock(LOCK_EX | LOCK_NB)` like [`LockMode::Exclusive`], but every
+    /// write path returns [`Error::ReadOnly`] — including the maintenance
+    /// the open paths run on their own initiative (`vacuum_orphans`, the
+    /// self-heal checkpoint). Acquired by
+    /// [`ContainerFile::open_exclusive_readonly`].
+    ///
+    /// The combination exists for one job: reading a container that is
+    /// about to be REPLACED, where the exclusive lock must be held
+    /// unbroken from the first read through the rename, and the source
+    /// bytes must survive an abandoned rewrite untouched. See
+    /// `atomic_rewrite_under_source_lock` (audit HV-06).
+    ExclusiveReadOnly,
     /// `flock(LOCK_SH | LOCK_NB)` — multiple readers may coexist;
     /// blocks any writer. Acquired by [`ContainerFile::open_readonly`].
     /// All `*_slot` and `*_garbage_chunks` write paths return
     /// [`Error::ReadOnly`] in this mode.
     Shared,
+}
+
+impl LockMode {
+    /// Whether a handle in this mode may modify the file.
+    ///
+    /// Every write gate in the crate asks THIS rather than comparing
+    /// against a specific variant. The comparisons it replaced were all
+    /// `== Shared`, which silently reads as "writable" for any mode added
+    /// later — and the mode added later is precisely the one whose whole
+    /// purpose is that it must not write.
+    #[must_use]
+    pub fn allows_writes(self) -> bool {
+        matches!(self, LockMode::Exclusive)
+    }
 }
 
 /// Low-level file-handle wrapper holding the cleartext header and slot
@@ -393,11 +420,44 @@ impl ContainerFile {
         })
     }
 
+    /// Open an existing container under an EXCLUSIVE flock that refuses
+    /// every write — see [`LockMode::ExclusiveReadOnly`] for why both
+    /// halves are wanted at once (audit HV-06).
+    ///
+    /// Same `Error::Busy` semantics as [`Self::open`]: the lock excludes
+    /// every other holder, shared or exclusive.
+    ///
+    /// **Trailing partial chunk handling.** Same as [`Self::open`].
+    pub fn open_exclusive_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
+        // `write(true)` is deliberately NOT requested: the descriptor
+        // itself cannot write, so a missed gate anywhere above this layer
+        // fails with EBADF instead of quietly editing the source.
+        let mut file = OpenOptions::new().read(true).open(path)?;
+        try_lock_exclusive(&file)?;
+        let len = file.metadata()?.len();
+        if len < CHUNK_SIZE as u64 {
+            return Err(Error::Malformed("file shorter than one chunk"));
+        }
+        let mut first = [0u8; CHUNK_SIZE];
+        file.seek(SeekFrom::Start(0))?;
+        file.read_exact(&mut first)?;
+        let header = Header::decode(&first)?;
+        let slot_count = (len / CHUNK_SIZE as u64) - 1;
+        Ok(Self {
+            file,
+            header,
+            slot_count,
+            padding_policy: PaddingPolicy::None,
+            superblock_replicas: DEFAULT_SUPERBLOCK_REPLICAS,
+            lock_mode: LockMode::ExclusiveReadOnly,
+        })
+    }
+
     fn check_writable(&self) -> Result<()> {
-        if self.lock_mode == LockMode::Shared {
-            Err(Error::ReadOnly)
-        } else {
+        if self.lock_mode.allows_writes() {
             Ok(())
+        } else {
+            Err(Error::ReadOnly)
         }
     }
 
