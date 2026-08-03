@@ -88,12 +88,14 @@ use std::sync::Mutex;
 
 use hidden_volume::Container;
 use hidden_volume::MultiSpace;
+use hidden_volume::Space;
+use hidden_volume::cancel::CancelToken;
 use hidden_volume::container::ContainerOptions;
 use hidden_volume::crypto::SpaceKeys;
 use hidden_volume::crypto::kdf::Argon2Params;
 use hidden_volume::padding::PaddingPolicy;
 use hidden_volume::space::index::Namespace;
-use hidden_volume_rt::OwnedSpace;
+use hidden_volume_rt::{OpLedger, OwnedSpace};
 
 /// Length of a serialized [`SpaceKeys`] across the FFI: `container_id` (32) ‖
 /// `aead_root` (32). These bytes are the per-space decryption root — opaque,
@@ -146,9 +148,15 @@ pub enum HvError {
     /// zstd compression / decompression failure.
     #[error("compression: {0}")]
     Compression(String),
-    /// Cooperative cancellation fired (only if a `CancelToken` was passed —
-    /// the FFI surface does not currently expose tokens; this can fire
-    /// only via internal use).
+    /// Cooperative cancellation fired.
+    ///
+    /// There is still no token in the FFI signatures — this is raised when
+    /// a caller drops the future of an [`AsyncSpaceHandle`] call before it
+    /// reported back and the work had not yet reached the container
+    /// (audit HV-02). **It is a proof of no effect**, so the call is safe
+    /// to retry even when it is not idempotent. An abandoned call that had
+    /// already started does *not* surface here at all — the caller is gone;
+    /// [`AsyncSpaceHandle::abandoned_operations`] is where its verdict goes.
     #[error("cancelled")]
     Cancelled,
     /// Wrong API for this namespace's kind. e.g. `read_log` /
@@ -625,6 +633,81 @@ pub struct NamespaceCount {
     pub namespace: u8,
     /// Number of entries in this namespace.
     pub count: u64,
+}
+
+/// What is known about one blocking operation whose future the foreign
+/// caller dropped. Mirrors [`hidden_volume_rt::OpOutcome`] across UniFFI.
+///
+/// The three "it ran" states are deliberately coarse. The value an
+/// abandoned operation produced went nowhere — nobody was awaiting it —
+/// so what is left to report is the only thing a host app can act on:
+/// whether the container may have changed.
+#[derive(uniffi::Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationOutcome {
+    /// Dispatched, but the closure has not begun. Can still become any
+    /// state below.
+    Queued,
+    /// Executing. **The container may or may not have been modified, and
+    /// the operation cannot be undone.** This is the honest answer to "did
+    /// my timed-out write land?" while it is still in flight — not an
+    /// error, and not a promise that anything was stopped.
+    Running,
+    /// Abandoned before the closure touched anything: dropped before
+    /// dispatch, or the pool thread found the cancel token already fired.
+    /// **Proof of no effect** — safe to retry a non-idempotent call.
+    NeverStarted,
+    /// Ran to completion and returned success.
+    Succeeded,
+    /// Ran to completion and returned an error. Whether it left partial
+    /// state behind is that operation's own contract.
+    Failed,
+    /// The runtime discarded the task without running it (shutdown), or
+    /// the closure panicked. Same uncertainty class as [`Self::Running`],
+    /// frozen.
+    Lost,
+}
+
+impl From<hidden_volume_rt::OpOutcome> for OperationOutcome {
+    fn from(o: hidden_volume_rt::OpOutcome) -> Self {
+        match o {
+            hidden_volume_rt::OpOutcome::Queued => Self::Queued,
+            hidden_volume_rt::OpOutcome::Running => Self::Running,
+            hidden_volume_rt::OpOutcome::NeverStarted => Self::NeverStarted,
+            hidden_volume_rt::OpOutcome::Succeeded => Self::Succeeded,
+            hidden_volume_rt::OpOutcome::Failed => Self::Failed,
+            hidden_volume_rt::OpOutcome::Lost => Self::Lost,
+        }
+    }
+}
+
+/// One filed abandonment: which operation, and what is known about it as
+/// of the [`AsyncSpaceHandle::abandoned_operations`] call that returned it.
+///
+/// A record whose `outcome` is `Queued` or `Running` is not final — ask
+/// again to watch it settle.
+#[derive(uniffi::Record, Debug, Clone, Copy)]
+pub struct AbandonedOperation {
+    /// Identifier, unique within the handle that filed it.
+    pub id: u64,
+    /// What is known about it now.
+    pub outcome: OperationOutcome,
+    /// `false` only for [`OperationOutcome::NeverStarted`], which is
+    /// backed by a proof. Every other state either did run or may still,
+    /// so a host app must reconcile before retrying a non-idempotent call.
+    pub may_have_mutated: bool,
+    /// Whether `outcome` can still change.
+    pub settled: bool,
+}
+
+impl From<hidden_volume_rt::AbandonedOp> for AbandonedOperation {
+    fn from(op: hidden_volume_rt::AbandonedOp) -> Self {
+        Self {
+            id: op.id.0,
+            outcome: op.outcome.into(),
+            may_have_mutated: op.outcome.may_have_mutated(),
+            settled: op.outcome.is_settled(),
+        }
+    }
 }
 
 /// Result of a [`SpaceHandle::verify_integrity`] walk.
@@ -1189,6 +1272,28 @@ use std::sync::Arc;
 /// Swift integrators get this automatically via uniffi's tokio
 /// bridge (started inside the Rust dylib). Pure-Rust callers must
 /// `#[tokio::main]` or wrap in their own runtime.
+///
+/// # Abandoned calls (audit HV-02)
+///
+/// `spawn_blocking` cannot interrupt a closure that has started. A
+/// foreign caller that times out a `commit` and walks away therefore has
+/// no way to know, from the call itself, whether the transaction landed —
+/// and retrying a non-idempotent `append_log` on a guess is data
+/// corruption.
+///
+/// Every method here runs through this handle's own
+/// [`hidden_volume_rt::OpLedger`], which files each abandoned call and
+/// keeps the record after the call is gone.
+/// [`Self::abandoned_operations`] is how the host asks. The ledger also
+/// admits one blocking operation at a time, so a fan-out of abandoned
+/// calls queues as cheap async tasks instead of occupying `spawn_blocking`
+/// threads that all end up waiting on one mutex.
+///
+/// The mechanism shipped with HV-11 and was wired into
+/// `hidden-volume-async`; this crate kept calling the plain
+/// [`hidden_volume_rt::run_blocking`], which builds a **fresh, unbounded**
+/// ledger per call and destroys it on return. Every verdict was filed into
+/// an object that then ceased to exist.
 #[derive(uniffi::Object)]
 pub struct AsyncSpaceHandle {
     // Inner `Arc` is required so each `spawn_blocking` closure can
@@ -1198,6 +1303,63 @@ pub struct AsyncSpaceHandle {
     // `Mutex<OwnedSpace>` directly (no inner Arc) because its
     // methods do not spawn off-thread.
     inner: Arc<Mutex<OwnedSpace>>,
+    /// Admission gate and abandonment ledger, shared by every call on
+    /// this handle and by every foreign clone of it (uniffi hands out
+    /// `Arc<Self>`). One permit: the handle serialises on `inner` anyway,
+    /// and anything above one only moves the queue from tokio's scheduler
+    /// onto parked pool threads.
+    ops: Arc<OpLedger>,
+}
+
+impl AsyncSpaceHandle {
+    fn new(inner: OwnedSpace) -> Arc<Self> {
+        Arc::new(Self {
+            inner: Arc::new(Mutex::new(inner)),
+            ops: Arc::new(OpLedger::default()),
+        })
+    }
+
+    /// Run `f` against the locked space through this handle's ledger.
+    ///
+    /// `f` receives the cancel token this call was dispatched under.
+    /// [`OpLedger::run_cancellable`] fires it when the returned future is
+    /// dropped, which is what lets an operation that has not begun refuse
+    /// to begin — the plain [`hidden_volume_rt::run_blocking`] this crate
+    /// used before creates that token internally, where no closure can
+    /// see it.
+    ///
+    /// **What the token stops, precisely.** Dropped before the permit is
+    /// granted: never dispatched. Dropped while queued on the pool: the
+    /// ledger's own pre-start check short-circuits it. Dropped after the
+    /// closure began: nothing stops it — the closure checks the token once
+    /// more before it touches the space, and past that point the sync core
+    /// has no cancellation checkpoints of its own, so the operation runs
+    /// to completion and is reported rather than pretended away.
+    async fn run_op<F, R>(&self, f: F) -> HvResult<R>
+    where
+        F: FnOnce(&mut Space<'_>, &CancelToken) -> HvResult<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        let inner = self.inner.clone();
+        let token = CancelToken::new();
+        let closure_token = token.clone();
+        self.ops
+            .run_cancellable(
+                token,
+                move || {
+                    let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
+                    if closure_token.is_cancelled() {
+                        // The caller walked away while we waited for the
+                        // lock. Nothing in this space has been touched, so
+                        // this is a real cancellation, not a report.
+                        return Err(HvError::Cancelled);
+                    }
+                    g.with_space_mut(|s| f(s, &closure_token))
+                },
+                map_blocking_failure,
+            )
+            .await
+    }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -1231,9 +1393,7 @@ impl AsyncSpaceHandle {
             Ok(OwnedSpace::wrap_create(container, &password)?)
         })
         .await?;
-        Ok(Arc::new(Self {
-            inner: Arc::new(Mutex::new(inner)),
-        }))
+        Ok(Self::new(inner))
     }
 
     /// Async equivalent of [`SpaceHandle::open`]. Argon2id KDF and the
@@ -1250,9 +1410,7 @@ impl AsyncSpaceHandle {
             Ok(OwnedSpace::wrap_open_constant_time(container, &password)?)
         })
         .await?;
-        Ok(Arc::new(Self {
-            inner: Arc::new(Mutex::new(inner)),
-        }))
+        Ok(Self::new(inner))
     }
 
     /// Async equivalent of [`SpaceHandle::add_space`]. Adds a new parallel,
@@ -1268,9 +1426,7 @@ impl AsyncSpaceHandle {
             Ok(OwnedSpace::wrap_create(container, &password)?)
         })
         .await?;
-        Ok(Arc::new(Self {
-            inner: Arc::new(Mutex::new(inner)),
-        }))
+        Ok(Self::new(inner))
     }
 
     /// Async equivalent of [`SpaceHandle::open_with_keys`]. Opens a space from
@@ -1290,57 +1446,41 @@ impl AsyncSpaceHandle {
             )?)
         })
         .await?;
-        Ok(Arc::new(Self {
-            inner: Arc::new(Mutex::new(inner)),
-        }))
+        Ok(Self::new(inner))
     }
 
     /// Async equivalent of [`SpaceHandle::space_keys`]. Exports this space's
     /// `SpaceKeys` as 64 opaque bytes for a master roster. **Sensitive** — keep
     /// only inside a deniable space, never log.
     pub async fn space_keys(&self) -> HvResult<Vec<u8>> {
-        let inner = self.inner.clone();
-        run_blocking(move || -> HvResult<Vec<u8>> {
-            let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
-            Ok(g.with_space_mut(|s| {
-                let keys = s.space_keys();
-                let mut out = Vec::with_capacity(SPACE_KEYS_LEN);
-                out.extend_from_slice(&keys.container_id);
-                out.extend_from_slice(&keys.aead_root);
-                out
-            }))
+        self.run_op(move |s, _cancel| -> HvResult<Vec<u8>> {
+            let keys = s.space_keys();
+            let mut out = Vec::with_capacity(SPACE_KEYS_LEN);
+            out.extend_from_slice(&keys.container_id);
+            out.extend_from_slice(&keys.aead_root);
+            Ok(out)
         })
         .await
     }
 
     /// Current monotonic commit counter.
     pub async fn commit_seq(&self) -> HvResult<u64> {
-        let inner = self.inner.clone();
-        run_blocking(move || -> HvResult<u64> {
-            let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
-            Ok(g.with_space_mut(|s| s.commit_seq()))
-        })
-        .await
+        self.run_op(move |s, _cancel| -> HvResult<u64> { Ok(s.commit_seq()) })
+            .await
     }
 
     /// Recoverable commit-anchor history.
     pub async fn commit_history(&self) -> HvResult<Vec<u64>> {
-        let inner = self.inner.clone();
-        run_blocking(move || -> HvResult<Vec<u64>> {
-            let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
-            Ok(g.with_space_mut(|s| s.commit_history().to_vec()))
-        })
-        .await
+        self.run_op(move |s, _cancel| -> HvResult<Vec<u64>> { Ok(s.commit_history().to_vec()) })
+            .await
     }
 
     /// Set the post-commit padding policy — see
     /// [`SpaceHandle::set_padding_policy`] for the rationale (audit
     /// pass 7 S1).
     pub async fn set_padding_policy(&self, preset: PaddingPreset) -> HvResult<()> {
-        let inner = self.inner.clone();
-        run_blocking(move || -> HvResult<()> {
-            let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
-            g.with_space_mut(|s| s.set_padding_policy(preset.to_policy()))?;
+        self.run_op(move |s, _cancel| -> HvResult<()> {
+            s.set_padding_policy(preset.to_policy())?;
             Ok(())
         })
         .await
@@ -1348,10 +1488,8 @@ impl AsyncSpaceHandle {
 
     /// List namespaces with at least one entry.
     pub async fn list_namespaces(&self) -> HvResult<Vec<u8>> {
-        let inner = self.inner.clone();
-        run_blocking(move || -> HvResult<Vec<u8>> {
-            let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
-            let v = g.with_space_mut(|s| s.list_namespaces())?;
+        self.run_op(move |s, _cancel| -> HvResult<Vec<u8>> {
+            let v = s.list_namespaces()?;
             Ok(v.into_iter().map(|n| n.as_u8()).collect())
         })
         .await
@@ -1360,10 +1498,8 @@ impl AsyncSpaceHandle {
     /// Number of entries in `namespace`.
     pub async fn count(&self, namespace: u8) -> HvResult<u64> {
         check_namespace(namespace)?;
-        let inner = self.inner.clone();
-        run_blocking(move || -> HvResult<u64> {
-            let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
-            let n = g.with_space_mut(|s| s.count(Namespace(namespace)))?;
+        self.run_op(move |s, _cancel| -> HvResult<u64> {
+            let n = s.count(Namespace(namespace))?;
             Ok(n as u64)
         })
         .await
@@ -1372,10 +1508,8 @@ impl AsyncSpaceHandle {
     /// Read one KV value.
     pub async fn get(&self, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
         check_namespace(namespace)?;
-        let inner = self.inner.clone();
-        run_blocking(move || -> HvResult<Option<Vec<u8>>> {
-            let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
-            Ok(g.with_space_mut(|s| s.get(Namespace(namespace), &key))?)
+        self.run_op(move |s, _cancel| -> HvResult<Option<Vec<u8>>> {
+            Ok(s.get(Namespace(namespace), &key)?)
         })
         .await
     }
@@ -1383,10 +1517,8 @@ impl AsyncSpaceHandle {
     /// Read one log entry.
     pub async fn read_log(&self, namespace: u8, log_id: u64) -> HvResult<Option<Vec<u8>>> {
         check_namespace(namespace)?;
-        let inner = self.inner.clone();
-        run_blocking(move || -> HvResult<Option<Vec<u8>>> {
-            let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
-            Ok(g.with_space_mut(|s| s.read_log(Namespace(namespace), log_id))?)
+        self.run_op(move |s, _cancel| -> HvResult<Option<Vec<u8>>> {
+            Ok(s.read_log(Namespace(namespace), log_id)?)
         })
         .await
     }
@@ -1400,12 +1532,8 @@ impl AsyncSpaceHandle {
         limit: u32,
     ) -> HvResult<Vec<LogEntry>> {
         check_namespace(namespace)?;
-        let inner = self.inner.clone();
-        run_blocking(move || -> HvResult<Vec<LogEntry>> {
-            let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
-            let v = g.with_space_mut(|s| {
-                s.iter_log_range(Namespace(namespace), start, end, limit as usize)
-            })?;
+        self.run_op(move |s, _cancel| -> HvResult<Vec<LogEntry>> {
+            let v = s.iter_log_range(Namespace(namespace), start, end, limit as usize)?;
             Ok(v.into_iter()
                 .map(|(log_id, payload)| LogEntry { log_id, payload })
                 .collect())
@@ -1416,58 +1544,65 @@ impl AsyncSpaceHandle {
     /// Apply a batch of write ops as one Tx + commit. Returns the new
     /// `commit_seq`. Empty `ops` → no commit chunk emitted.
     pub async fn commit(&self, ops: Vec<WriteOp>) -> HvResult<u64> {
-        let inner = self.inner.clone();
-        run_blocking(move || -> HvResult<u64> {
-            let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
-            g.with_space_mut(|s| -> HvResult<u64> {
-                if ops.is_empty() {
-                    return Ok(s.commit_seq());
+        self.run_op(move |s, cancel| -> HvResult<u64> {
+            if ops.is_empty() {
+                return Ok(s.commit_seq());
+            }
+            let mut tx = s.begin_tx();
+            for op in ops {
+                // The Tx is pure in-memory accumulation until `commit`,
+                // so a caller who walked away mid-assembly can still be
+                // honoured here with a provable no-effect abort — the one
+                // point in this method where that is true (audit HV-02).
+                //
+                // Defence in depth, and honestly labelled as such: its
+                // trigger window is "the future was dropped after the pool
+                // thread entered this loop and before it left", which no
+                // deterministic test can force from outside — removing this
+                // line leaves the whole suite green. Everything a test *can*
+                // pin about abandonment is pinned in
+                // `tests/abandoned_operations.rs`.
+                cancel.check().map_err(HvError::from)?;
+                match op {
+                    WriteOp::Put {
+                        namespace,
+                        key,
+                        value,
+                    } => {
+                        tx.put(Namespace(namespace), &key, &value)?;
+                    },
+                    WriteOp::Delete { namespace, key } => {
+                        tx.delete(Namespace(namespace), &key)?;
+                    },
+                    WriteOp::AppendLog {
+                        namespace,
+                        log_id,
+                        payload,
+                    } => {
+                        tx.append_log(Namespace(namespace), log_id, &payload)?;
+                    },
+                    WriteOp::DeleteLog { namespace, log_id } => {
+                        tx.delete_log(Namespace(namespace), log_id)?;
+                    },
                 }
-                let mut tx = s.begin_tx();
-                for op in ops {
-                    match op {
-                        WriteOp::Put {
-                            namespace,
-                            key,
-                            value,
-                        } => {
-                            tx.put(Namespace(namespace), &key, &value)?;
-                        },
-                        WriteOp::Delete { namespace, key } => {
-                            tx.delete(Namespace(namespace), &key)?;
-                        },
-                        WriteOp::AppendLog {
-                            namespace,
-                            log_id,
-                            payload,
-                        } => {
-                            tx.append_log(Namespace(namespace), log_id, &payload)?;
-                        },
-                        WriteOp::DeleteLog { namespace, log_id } => {
-                            tx.delete_log(Namespace(namespace), log_id)?;
-                        },
-                    }
-                }
-                Ok(tx.commit()?)
-            })
+            }
+            Ok(tx.commit()?)
         })
         .await
     }
 
     /// Aggregated per-space stats.
     pub async fn stats(&self) -> HvResult<StatsInfo> {
-        let inner = self.inner.clone();
-        run_blocking(move || -> HvResult<StatsInfo> {
-            let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
-            let s = g.with_space_mut(|sp| sp.stats())?;
-            let total: usize = s.namespace_counts.iter().map(|(_, n)| *n).sum();
+        self.run_op(move |s, _cancel| -> HvResult<StatsInfo> {
+            let stats = s.stats()?;
+            let total: usize = stats.namespace_counts.iter().map(|(_, n)| *n).sum();
             Ok(StatsInfo {
-                commit_seq: s.commit_seq,
-                commit_history_len: s.commit_history_len as u64,
-                owned_chunk_count: s.owned_chunk_count as u64,
-                total_slot_count: s.total_slot_count,
+                commit_seq: stats.commit_seq,
+                commit_history_len: stats.commit_history_len as u64,
+                owned_chunk_count: stats.owned_chunk_count as u64,
+                total_slot_count: stats.total_slot_count,
                 total_entries: total as u64,
-                namespace_counts: s
+                namespace_counts: stats
                     .namespace_counts
                     .into_iter()
                     .map(|(ns, c)| NamespaceCount {
@@ -1482,10 +1617,8 @@ impl AsyncSpaceHandle {
 
     /// Walk the Merkle tree. Errors on hash mismatch.
     pub async fn verify_integrity(&self) -> HvResult<IntegrityResult> {
-        let inner = self.inner.clone();
-        run_blocking(move || -> HvResult<IntegrityResult> {
-            let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
-            let r = g.with_space_mut(|s| s.verify_integrity())?;
+        self.run_op(move |s, _cancel| -> HvResult<IntegrityResult> {
+            let r = s.verify_integrity()?;
             Ok(IntegrityResult {
                 namespaces_verified: r.namespaces_verified as u64,
                 chunks_verified: r.chunks_verified as u64,
@@ -1499,10 +1632,8 @@ impl AsyncSpaceHandle {
     /// Async equivalent of [`SpaceHandle::vacuum_data_batches`].
     /// Audit pass 11 R-FFI-1.
     pub async fn vacuum_data_batches(&self) -> HvResult<u64> {
-        let inner = self.inner.clone();
-        run_blocking(move || -> HvResult<u64> {
-            let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
-            let n = g.with_space_mut(|s| s.vacuum_data_batches())?;
+        self.run_op(move |s, _cancel| -> HvResult<u64> {
+            let n = s.vacuum_data_batches()?;
             Ok(n as u64)
         })
         .await
@@ -1512,13 +1643,53 @@ impl AsyncSpaceHandle {
     /// Audit pass 11 R-FFI-1.
     pub async fn erase_namespace(&self, namespace: u8) -> HvResult<u64> {
         check_namespace(namespace)?;
-        let inner = self.inner.clone();
-        run_blocking(move || -> HvResult<u64> {
-            let mut g = inner.lock().map_err(|_| poisoned_mutex())?;
-            let n = g.with_space_mut(|s| s.erase_namespace(Namespace(namespace)))?;
+        self.run_op(move |s, _cancel| -> HvResult<u64> {
+            let n = s.erase_namespace(Namespace(namespace))?;
             Ok(n as u64)
         })
         .await
+    }
+}
+
+/// Reconciliation surface for abandoned calls (audit HV-02).
+///
+/// Separate `impl` block because these are **not** `async`: they read a
+/// lock-free record the ledger already holds and must be answerable from a
+/// `finally` / `catch` / `defer` path, which is exactly where a host app
+/// discovers it abandoned something.
+#[uniffi::export]
+impl AsyncSpaceHandle {
+    /// Every call on this handle whose future was dropped before it
+    /// reported back, oldest first, each with what is known about it **as
+    /// of this call**.
+    ///
+    /// This is the answer to "I timed out a `commit`; did it land?".
+    /// Records with [`OperationOutcome::Running`] or `Queued` are not
+    /// final — ask again to watch them settle. A record with
+    /// `may_have_mutated == false` is a proof of no effect and the only
+    /// state under which a non-idempotent call may be retried blind.
+    ///
+    /// The ledger keeps at most 128 records and drops the oldest beyond
+    /// that; see [`Self::forgotten_abandonments`].
+    pub fn abandoned_operations(&self) -> Vec<AbandonedOperation> {
+        self.ops
+            .abandoned_operations()
+            .into_iter()
+            .map(AbandonedOperation::from)
+            .collect()
+    }
+
+    /// Drop the records that have reached a final state. Unsettled ones
+    /// are kept — they are exactly the ones still worth watching.
+    pub fn clear_settled_operations(&self) {
+        self.ops.clear_settled_operations();
+    }
+
+    /// How many records were evicted because the ledger hit its cap.
+    /// Non-zero means this app abandons faster than it reconciles, and
+    /// that some uncertain outcomes are no longer reportable.
+    pub fn forgotten_abandonments(&self) -> u64 {
+        self.ops.forgotten_abandonments()
     }
 }
 
@@ -1535,7 +1706,15 @@ where
     F: FnOnce() -> HvResult<R> + Send + 'static,
     R: Send + 'static,
 {
-    hidden_volume_rt::run_blocking(f, |fail| match fail {
+    hidden_volume_rt::run_blocking(f, map_blocking_failure).await
+}
+
+/// The one place a [`hidden_volume_rt::BlockingFailure`] becomes an
+/// [`HvError`]. Shared by the plain `run_blocking` above (constructors) and
+/// by [`AsyncSpaceHandle::run_op`] (everything else), so the two cannot
+/// drift into disagreeing about what a dropped task means.
+fn map_blocking_failure(fail: hidden_volume_rt::BlockingFailure) -> HvError {
+    match fail {
         hidden_volume_rt::BlockingFailure::Panicked => {
             HvError::Internal("AsyncSpaceHandle blocking task panicked".into())
         },
@@ -1554,8 +1733,7 @@ where
             // (audit HV-11).
             HvError::Cancelled
         },
-    })
-    .await
+    }
 }
 
 // ---------- MultiSpaceHandle ----------

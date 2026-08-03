@@ -274,6 +274,38 @@ another deniable space (a master roster) and never logs them. Wrong
 length → `Malformed`; non-matching keys → `AuthFailed`, the same
 indistinguishable path as a wrong password.
 
+### Abandoned calls — the ledger (audit HV-02)
+
+`spawn_blocking` cannot interrupt a closure that has begun. A foreign
+caller that wraps `commit` in `withTimeout` / `Task.withTimeout` and
+walks away therefore cannot learn from the call whether the transaction
+landed — and retrying a non-idempotent `append_log` on a guess corrupts
+the log.
+
+Every `AsyncSpaceHandle` method runs through the handle's own
+`OpLedger`, which outlives the call:
+
+| Method | Answers |
+|---|---|
+| `abandoned_operations()` | Every dropped call, oldest first, with its outcome **as of this call**. `Queued` / `Running` are not final — ask again. |
+| `clear_settled_operations()` | Retire the finished records; keep the ones still worth watching. |
+| `forgotten_abandonments()` | How many records were evicted at the 128-record cap. Non-zero means the app abandons faster than it reconciles. |
+
+`AbandonedOperation.may_have_mutated` is the field to branch on. It is
+`false` only for `NeverStarted`, which is backed by a proof that the
+closure never touched the container — the one state under which a
+non-idempotent call may be retried blind. Every other outcome, including
+`Running`, means reconcile first.
+
+The ledger also admits **one** blocking operation per handle at a time.
+Callers wait for the permit as ordinary async tasks — cheap, and
+cancellable for free — instead of as parked `spawn_blocking` threads all
+queueing on the same internal mutex.
+
+Constructors (`create`, `open`, `add_space`, `open_with_keys`) stay on
+the plain `run_blocking` path: there is no handle yet for an abandoned
+constructor to report to.
+
 ### What we still don't ship
 
 - **Streaming `iter_log_*`**. uniffi async returns single futures, not
@@ -282,7 +314,12 @@ indistinguishable path as a wrong password.
   would need uniffi callback-interfaces or a foreign-side `Flow` /
   `AsyncSequence` adapter.
 - **Cancellation tokens through the FFI boundary**. Would need uniffi
-  callback-interface support; defer to actual demand.
+  callback-interface support; defer to actual demand. Dropping a call's
+  future *is* wired to a token internally (see the ledger above): before
+  the closure starts, abandonment is a real cancellation and the record
+  says `NeverStarted`; after it starts, the sync core has no cancellation
+  checkpoints of its own, so the operation runs to completion and is
+  reported rather than pretended away.
 - **`async-stream`-based pagination helpers** like the pure-Rust
   `hidden-volume-async::AsyncSpace::stream_log_pages_*` methods.
   Pure-Rust callers should use `hidden-volume-async` directly for
