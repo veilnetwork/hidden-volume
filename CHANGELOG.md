@@ -412,6 +412,21 @@ format.
 
 ### Fixed — report5 follow-through
 
+- **The third `flock` site is taken on Android too (HV-09).** The tmp-file
+  pin `atomic_rewrite_under_source_lock` holds through the rename — the
+  guard against someone substituting the tmp between the writer finishing
+  and the rename landing — sat behind `#[cfg(not(target_os = "android"))]`
+  with an inline `File::try_lock`. On Android the pin was therefore not
+  taken at all, and the comment beside it recorded the gap as a follow-up
+  rather than closing it. The reason for the `cfg` was real (std's
+  `try_lock` answers `Err(Unsupported)` there), and it was solved back in
+  v1.0 for the two *container* locks by routing them through `flock(2)` via
+  libc; this site was simply never wired to the same helper. It now calls
+  `container::file::try_lock_exclusive`, which is the crate's one exclusive
+  lock dispatcher, so Android gets the same real `flock(LOCK_EX | LOCK_NB)`
+  as every other Unix and the "filesystem does not honour flock" degradation
+  is identical on all of them.
+
 - **`derive_master_key` validates its own parameters (HV-05).** The public
   function's whole job is to burn CPU and RAM in proportion to its
   arguments, and it delegated the bounds check to its callers — the rustdoc
