@@ -211,7 +211,8 @@ pub struct ContainerFile {
 /// may simply not be there after a power loss (audit HV-16).
 #[cfg(unix)]
 fn fsync_parent_dir_strict(path: &std::path::Path) -> Result<()> {
-    if CREATE_FSYNC_FAILS.load(std::sync::atomic::Ordering::Relaxed) {
+    #[cfg(test)]
+    if create_fsync_should_fail() {
         return Err(Error::Io(std::io::Error::other(
             "test hook: forced parent-dir fsync failure",
         )));
@@ -229,14 +230,30 @@ fn fsync_parent_dir_strict(_path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// Test-only switch that makes `create`'s final durability step fail.
-///
-/// It is the last `?` before the success path, so it stands in for every
-/// failure in the window where the file already exists — the flock, the
-/// CSPRNG, the header write, either fsync. None of those can be provoked from
-/// outside on a file `create_new` just made.
-static CREATE_FSYNC_FAILS: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+thread_local! {
+    /// Test-only switch that makes `create`'s final durability step fail.
+    ///
+    /// It is the last `?` before the success path, so it stands in for every
+    /// failure in the window where the file already exists — the flock, the
+    /// CSPRNG, the header write, either fsync. None of those can be provoked
+    /// from outside on a file `create_new` just made.
+    ///
+    /// **Thread-local, not a process-global.** As a `static AtomicBool` it
+    /// armed the hook for the WHOLE test binary, and `cargo test` runs the
+    /// binary's tests on parallel threads: every unrelated
+    /// `Container::create` that happened to land inside the arming test's
+    /// window failed with the injected error. That made the suite fail on
+    /// roughly three runs in five, on a defect-free tree — a red gate nobody
+    /// can read, and a green one nobody should trust. A thread-local reaches
+    /// exactly the `create` the arming test calls, and reaches nothing else.
+    static CREATE_FSYNC_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn create_fsync_should_fail() -> bool {
+    CREATE_FSYNC_FAILS.with(std::cell::Cell::get)
+}
 
 impl ContainerFile {
     /// Create a new container at `path` with the given Argon2 params.
@@ -575,14 +592,14 @@ mod hv07_tests {
 
     impl ForcedCreateFailure {
         fn arm() -> Self {
-            CREATE_FSYNC_FAILS.store(true, std::sync::atomic::Ordering::Relaxed);
+            CREATE_FSYNC_FAILS.with(|c| c.set(true));
             Self
         }
     }
 
     impl Drop for ForcedCreateFailure {
         fn drop(&mut self) {
-            CREATE_FSYNC_FAILS.store(false, std::sync::atomic::Ordering::Relaxed);
+            CREATE_FSYNC_FAILS.with(|c| c.set(false));
         }
     }
 
