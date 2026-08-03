@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-03T13:05:23Z
+# Captured: 2026-08-03T13:30:57Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -172,12 +172,12 @@ multi.rs:  50:    pub fn new(container: Container) -> Self {
 multi.rs:  60:    pub fn derive_space_keys(&self, password: &[u8]) -> Result<SpaceKeys> {
 multi.rs:  84:    pub fn open_space(&mut self, keys: SpaceKeys) -> Result<usize> {
 multi.rs:  138:    pub fn open_space_constant_time(&mut self, keys: SpaceKeys) -> Result<usize> {
-multi.rs:  161:    pub fn vacuum_hosted(&mut self, id: usize) -> Result<()> {
-multi.rs:  174:    pub fn create_space(&mut self, keys: SpaceKeys) -> Result<usize> {
-multi.rs:  185:    pub fn len(&self) -> usize {
-multi.rs:  191:    pub fn is_empty(&self) -> bool {
-multi.rs:  197:    pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
-multi.rs:  218:    pub fn with_space<R>(&mut self, id: usize, f: impl FnOnce(&mut Space<'_>) -> R) -> Result<R> {
+multi.rs:  168:    pub fn vacuum_hosted(&mut self, id: usize) -> Result<()> {
+multi.rs:  181:    pub fn create_space(&mut self, keys: SpaceKeys) -> Result<usize> {
+multi.rs:  192:    pub fn len(&self) -> usize {
+multi.rs:  198:    pub fn is_empty(&self) -> bool {
+multi.rs:  204:    pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
+multi.rs:  225:    pub fn with_space<R>(&mut self, id: usize, f: impl FnOnce(&mut Space<'_>) -> R) -> Result<R> {
 open/mod.rs:  121:pub const MAX_OPEN_SCAN_CHUNKS: u64 = 16 * 1024 * 1024;
 padding/mod.rs:  36:pub enum PaddingPolicy {
 padding/mod.rs:  69:    pub const DEFAULT: Self = Self::BucketGrowth { bucket_chunks: 256 };
