@@ -220,7 +220,11 @@ protected plaintext).
 - **Content-dependence.** Rust stack frames content-
   independent для normal-функций (нет `alloca`-style stack
   growth без `unsafe`). Recursion в B+ tree walker'ах
-  bounded depth ≤ 2 (writer invariant).
+  ограничена пределом глубины `TreeWalk`: с аудита HV-15
+  писатель порождает столько уровней, сколько нужно данным,
+  поэтому предел выводится из числа chunk'ов, которыми владеет
+  space (7 спусков на самом большом контейнере, допустимом
+  форматом), а не из writer-инварианта depth ≤ 2.
 - **Verdict.** **Defended.**
 
 #### M-3. Page-fault patterns в mmap mode

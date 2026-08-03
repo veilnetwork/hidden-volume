@@ -1,4 +1,5 @@
-//! Per-space KV index. 2-level B+ tree with split-on-overflow.
+//! Per-space KV index. B+ tree of arbitrary depth, grown level by
+//! level on overflow.
 //!
 //! ## Tree shape
 //!
@@ -8,22 +9,36 @@
 //!                           │
 //!                           ├── Leaf(small ns)            — fits in one chunk
 //!                           │
-//!                           └── Internal(large ns)
-//!                                  ├── leaf 0
-//!                                  ├── leaf 1
-//!                                  └── leaf N
+//!                           ├── Internal(larger ns)
+//!                           │      ├── leaf 0
+//!                           │      ├── leaf 1
+//!                           │      └── leaf N
+//!                           │
+//!                           └── Internal(larger still)    — and so on, one
+//!                                  ├── Internal             new level each
+//!                                  │      ├── leaf 0        time the level
+//!                                  │      └── leaf 1        below outgrows
+//!                                  └── Internal             a single chunk
+//!                                         └── leaf 2
 //! ```
 //!
 //! Small namespaces (≤ ~100 entries depending on value sizes) use a
-//! single Leaf node — no overhead. When a Leaf overflows on encode, it
-//! splits in half and a new Internal node is emitted referencing the
-//! two halves; the namespace's root pointer is updated.
+//! single Leaf node — no overhead. When a Leaf overflows on encode,
+//! the entries are packed into a row of Leaves and an Internal node is
+//! emitted above them. If that row does not fit in one Internal node
+//! either, it is packed into a row of Internal nodes and another level
+//! goes on top — repeated until one node covers the whole level. There
+//! is no depth limit in the format: a namespace grows until the
+//! container itself hits [`crate::MAX_OPEN_SCAN_CHUNKS`]
+//! (`Error::ContainerTooLarge`).
 //!
 //! Internal nodes hold one entry per child: `(first_key, child_slot,
-//! child_hash)`. With ~30-byte keys, ~56 children fit in one chunk;
-//! at ~100 entries per leaf this caps a namespace at ~5600 entries.
-//! Larger namespaces need a deeper tree (not implemented; trigger is a
-//! real user hitting the cap) or `DataBatch` (for the message log).
+//! child_hash)`. With ~30-byte keys, ~56 children fit in one chunk; at
+//! ~100 entries per leaf that is ~5 600 entries under a single
+//! Internal node, ~313 K under two levels, ~17 M under three — the
+//! reason honest depth stays small even for very large namespaces (see
+//! `MIN_FULL_INTERNAL_FANOUT` and the traversal guard in
+//! `space::walk`, both internal).
 //!
 //! ## On-disk encoding
 //!
@@ -88,52 +103,34 @@ pub const MAX_KEY_LEN: usize = 256;
 /// Maximum allowed length for a KV value (2048 bytes).
 pub const MAX_VALUE_LEN: usize = 2048;
 
-/// Maximum permitted depth of a B+ tree walked by any reader. The
-/// writer-side invariant ([`crate::space::Space`]'s
-/// `write_tree_for_namespace`) only ever emits trees of depth ≤ 2 (a
-/// single Leaf, or one Internal node over a row of Leaves), so the
-/// cap = 3 leaves one level of safety margin without constraining
-/// any legitimate use.
+/// Largest an encoded [`ChildPointer`] can be: `first_key_len` (2) +
+/// a maximum-length key + `child_slot` (8) + `child_hash` (32).
+pub(crate) const MAX_CHILD_ENTRY_BYTES: usize = 2 + MAX_KEY_LEN + 8 + 32;
+
+/// Children a **full** internal node is guaranteed to hold.
 ///
-/// ## Semantics of the cap (locked-down 2026-05-28)
+/// The writer packs a level greedily and seals a node only when the
+/// next child no longer fits, so every node of a level except the last
+/// is full. A full node holding `c` children satisfies
+/// `HEADER_LEN + c × MAX_CHILD_ENTRY_BYTES ≥ encoded_len >
+/// PAYLOAD_CAP - MAX_CHILD_ENTRY_BYTES` (otherwise one more child
+/// would have fit), so
+/// `c > (PAYLOAD_CAP - HEADER_LEN) / MAX_CHILD_ENTRY_BYTES - 1`.
+/// Integer division rounds that down, which is the conservative
+/// direction for a *lower* bound.
 ///
-/// `depth` is incremented every time a walker descends from one
-/// `IndexNode::Internal` to the next layer; the root counts as
-/// `depth = 0`. Every walker uses the **strict-greater** comparison
-/// `depth > MAX_TREE_DEPTH` so that:
-///
-/// - `depth = 0` (root, may be Internal or Leaf) is always allowed;
-/// - `depth = 1, 2, 3` (Internal-over-row, or the legitimate
-///   two-level shape, or one extra step) are allowed;
-/// - `depth = 4` is the first value that trips the cap.
-///
-/// The post-v3 (audit pass 19 follow-through) refactor brought every
-/// walker — `Space::get`, `collect_leaves_at`, `count_leaves_at`,
-/// `log_iter::*`, `integrity::*`, `vacuum::*` — onto the same
-/// strict-greater comparison so behaviour is identical across the
-/// read paths. Previously `Space::get` used `>=` which capped one
-/// step earlier; the inconsistency was cosmetic (writer-side
-/// invariant guarantees depth ≤ 2 in well-formed containers) but
-/// the unified shape is easier to review.
-///
-/// The cap is **defense-in-depth** against:
-///
-/// 1. a writer-bug regression that emits a cycle of `IndexNode`
-///    chunks (would otherwise stack-overflow or loop-forever the
-///    reader);
-/// 2. an adversarial key-holder hand-crafting cyclic `IndexNode`
-///    chunks (out of the strict threat model but cheap to defend
-///    against — see
-///    [`docs/en/security/audits/adversarial-stance.md` F-A5](../../../../docs/en/security/audits/adversarial-stance.md));
-/// 3. any future format change that legitimately needs deeper trees
-///    — bump this constant alongside the format-version bump (the
-///    `R-LOG-INDEX-3L` v1.x candidate in `TASKS.md` would raise it
-///    to ≥ 4).
-///
-/// Walkers exceeding this cap return
-/// [`Error::Malformed`](crate::Error::Malformed)
-/// (`"tree depth exceeded MAX_TREE_DEPTH"`).
-pub(crate) const MAX_TREE_DEPTH: u8 = 3;
+/// This is what makes tree depth self-limiting: a level is at least
+/// this many times wider than the level above it, so depth grows
+/// logarithmically in the chunk count and a container can only be as
+/// deep as its size permits. [`crate::space::walk::max_depth_for_budget`]
+/// turns that into the readers' depth bound.
+pub(crate) const MIN_FULL_INTERNAL_FANOUT: usize =
+    (PAYLOAD_CAP - HEADER_LEN) / MAX_CHILD_ENTRY_BYTES - 1;
+
+// A fanout of 1 would mean a level need not be wider than the one
+// above it, i.e. depth would not be bounded by the chunk count at all
+// — and the writer's level-growing loop would not terminate.
+const _: () = assert!(MIN_FULL_INTERNAL_FANOUT >= 2);
 
 const NODE_TYPE_LEAF: u8 = 0;
 const NODE_TYPE_INTERNAL: u8 = 1;

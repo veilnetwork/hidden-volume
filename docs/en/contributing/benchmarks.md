@@ -360,14 +360,11 @@ greedy repack's self-compaction — the property that keeps repeated
 delete/insert cycles from fragmenting a namespace into the `IndexFull`
 ceiling.
 
-### What is still open
+### What was still open — and is closed below
 
-The `IndexFull` ceiling above is a real capacity limit: a namespace
-cannot hold more than one root's worth of leaves. Lifting it needs a
-third tree level, which the readers already allow
-(`MAX_TREE_DEPTH = 3`) and the writer does not emit. That work — a
-genuine multi-level B+ tree with incremental split and merge — is
-separate from write amplification and is not attempted here.
+The `IndexFull` ceiling above was a real capacity limit: a namespace
+could not hold more than one root's worth of leaves. That is what the
+next section removes.
 
 ### Reproducing these numbers
 
@@ -376,3 +373,114 @@ flatness (the same edit against namespaces of very different sizes must
 cost the same number of chunks). The absolute numbers above came from
 ad-hoc harnesses over the public API: seed N entries, record
 `metadata(path).len()`, commit one `put`, record it again.
+
+## The namespace capacity ceiling (audit HV-15)
+
+Same rig as above: macOS/APFS SSD (aarch64), `PaddingPolicy::None`,
+`Argon2Params::MIN`, one Superblock replica, 9-byte keys, release
+build.
+
+The writer used to emit exactly two levels — a row of Leaves and one
+Internal node above them — so a namespace held no more entries than
+fit under a single root. Binary-searching the largest N that commits:
+
+| value size | last N that committed | first N that failed |
+|---:|---:|---:|
+| 64 B | 4 029 | 4 030 → `Error::IndexFull` |
+| 512 B | 553 | 554 → `Error::IndexFull` |
+| 2 048 B | **79** | 80 → `Error::IndexFull` |
+
+Past those, the data could not be stored at all. Adding a third level
+would only have moved the wall (79 → ~6 200 for 2 KiB values), so
+instead the writer grows a level whenever the level below outgrows one
+chunk. The same sizes now:
+
+| value size | N stored, read back and `verify_integrity`-clean | levels | container | vs. before |
+|---:|---:|---:|---:|---:|
+| 64 B | 1 000 000 | 4 | 19 866 chunks (77.6 MiB) | 248× |
+| 512 B | 250 000 | 4 | 36 885 chunks (144.1 MiB) | 452× |
+| 2 048 B | 100 000 | 4 | 101 530 chunks (396.6 MiB) | 1 266× |
+
+Those are not ceilings — nothing in the writer stops there. The only
+remaining limit is the container's own `MAX_OPEN_SCAN_CHUNKS`
+(16 M chunks / 64 GiB), which refuses with `Error::ContainerTooLarge`
+rather than `IndexFull`.
+
+### The readers' depth bound
+
+Removing the writer's ceiling means the readers can no longer assume a
+depth. Their cap is not a new constant but the inverse of the same
+arithmetic: each level of a well-formed tree is at least
+`MIN_FULL_INTERNAL_FANOUT` (12) times wider than the one above it, so a
+tree of depth *d* costs at least this many chunks:
+
+| depth | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| minimum chunks | 3 | 16 | 161 | 1 890 | 22 627 | 271 460 | 3 257 445 |
+
+A walk may descend as deep as the chunks the space owns could be
+arranged into — no deeper. Honest data is never refused (its chunks are
+on the disk by definition), and at the largest container the format
+permits the bound is 7, so a hostile chain costs 7 chunk reads and 8
+stack frames instead of the 16 M the budget alone would have allowed.
+
+### Write amplification at depth (HV-14 still holds)
+
+A one-key overwrite appends the Commit chunk, one Superblock replica,
+and exactly one index node per level — the path, not the namespace:
+
+| N | value size | levels | chunks appended |
+|---:|---:|---:|---:|
+| 1 000 | 64 B | 2 | 4 |
+| 4 000 | 64 B | 2 | 4 |
+| 100 000 | 64 B | 3 | 5 |
+| 79 | 2 048 B | 2 | 4 |
+| 20 000 | 2 048 B | 4 | 6 |
+
+This needs the HV-14 reuse map to cover *every* level of the previous
+tree, not just the row under the root; it does, because it is now
+collected during the flatten walk the commit already performs (so it
+also costs one chunk read less than the HV-14 version did).
+
+### What is still open: per-commit cost is O(namespace), not O(change)
+
+`commit_tx` materialises the whole namespace, applies the ops and
+rebuilds. HV-14 measured that and kept it, on the grounds that the
+format's own ceiling capped the working set at ~320 KiB. **That
+argument is gone with the ceiling** — the disk cost of an edit is flat
+(the table above), but its CPU and RAM cost now scale with the
+namespace:
+
+| workload | wall | peak RSS |
+|---|---:|---:|
+| 1 000 000 × 64 B, one Tx | 1.6 s | 414 MiB |
+| 1 000 000 × 64 B, 500 Txs of 2 000 | 97 s | 2.9 GiB |
+| 100 000 × 2 KiB, 50 Txs of 2 000 | 37 s | 593 MiB |
+
+The gap between the first two rows is the whole story: each commit
+re-flattens everything, so seeding in K batches costs O(N × K). A
+one-key edit shows the same shape — 12.6 ms at N = 1 000, 48 ms at
+N = 100 000 (64 B values), 247 ms at N = 20 000 (2 KiB values).
+
+Two consequences for host-apps, until incremental descent lands:
+
+- Prefer fewer, larger `Tx`es when seeding or importing.
+- A namespace in the 10⁵–10⁶ range costs its own size in RAM on every
+  commit. Partitioning by namespace (per-conversation, per-account)
+  keeps each commit cheap; the format now permits either choice, which
+  it previously did not.
+
+`Container::repack` inherits this: it collects each KV namespace with
+one `list()` call (log namespaces were already paginated by audit pass
+16). What used to be "bounded structurally by the two-level cap" is now
+bounded by the namespace.
+
+### Reproducing these numbers
+
+`crates/hidden-volume/tests/hv15_unbounded_depth.rs` pins the
+properties: the exact N that used to fail now commits, a four-level
+tree is built and read back, deleting collapses the levels again, and a
+one-key edit costs `2 + levels` chunks at any depth. The absolute
+numbers above came from an ad-hoc harness over the public API — binary
+search on N for the ceilings, `metadata(path).len()` for the chunk
+counts, `/usr/bin/time -l` for peak RSS.

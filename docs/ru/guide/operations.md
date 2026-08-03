@@ -223,8 +223,10 @@ race, который библиотека чинит внутри — source-loc
 постранично, с per-page `Tx::commit`, working-set ≈ 4 МиБ на
 страницу независимо от общего объёма лога. Multi-GiB
 log-namespaces больше не требуют мониторинга RSS хоста во время
-repack; KV-namespaces всё ещё собираются целиком на namespace, но
-структурно ограничены 2-уровневым B+ tree cap'ом.
+repack; KV-namespaces всё ещё собираются целиком на namespace. Раньше
+их ограничивал 2-уровневый B+ tree cap; аудит HV-15 его снял, поэтому
+теперь этот working-set равен размеру namespace — крупные KV-namespace
+стоит разбивать (см. `docs/ru/contributing/benchmarks.md`).
 
 **File-size cap.** Рост destination в repack ограничен
 `MAX_OPEN_SCAN_CHUNKS = 16M` чанков ≈ 64 ГиБ (audit pass 17 B);

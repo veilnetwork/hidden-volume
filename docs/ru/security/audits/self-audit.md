@@ -303,8 +303,8 @@ forward (Superblock написан), либо roll back (Superblock не
 |---|---|---|---|
 | **TM1** | Open-scan timing oracle утекает ~owned-fraction наблюдателю процесса | **Частично смягчено 2026-05-28**: opt-in `Container::open_space_constant_time` запускает ChaCha20-equalizer на MAC-fail, закрывая ChaCha20-body компоненту (~1-3 µs из ~40 µs/chunk swing). Parsing/alloc residual остаётся; полное закрытие отложено как v1.x #7 follow-up. | [threat-model F-TM1 §4.4](../threat-model.md) |
 | **F-PAD** | (v2) Padding-policy byte в cleartext header'е не аутентифицирован, позволял T2-противнику silent privacy degradation | **Реклассифицирован в DoS-class в v3** (2026-05-28). v3 криптографический version-binding step (#9) свёртывает весь u32 `params.version` (включая `padding_policy_index`) в `master_key`. Tamper теперь даёт `AuthFailed`, не silent degradation. DoS-поверхность остаётся приемлемой (любой cleartext-header tamper и так может denied open). | [threat-model F-PAD §4.1](../threat-model.md) |
-| **R-LOG-INDEX-3L** | 2-level B+ tree капается на ~10-20K unique log_id'ов в Log namespace | Caller-side partitioning — текущая рекомендация; 3-level tree поднял бы до ~1.5M. Решение отложено до первого интегратора, упёршегося в cap. | [`docs/ru/guide/integration.md`](../../guide/integration.md) §13 |
-| **Cycle detection в non-verify walker'ах** | `collect_leaves`, `count_leaves`, `iter_log_*`, `vacuum_orphans` рекурсивны на writer-produced деревьях без visited-set'а | Writer-side инвариант гарантирует depth ≤ 2. Adversarial cycle требует key-holder threat (out-of-scope). `verify_integrity` cycle-resistant по Merkle-hash binding'у. | Этот dossier |
+| ~~**R-LOG-INDEX-3L**~~ | 2-level B+ tree капался на ~10-20K unique log_id'ов в Log namespace | **Закрыт 03.08.2026 (аудит HV-15)**, и шире, чем просил пункт: вместо третьего уровня писатель добавляет уровень всякий раз, когда нижний перестаёт помещаться в один chunk, — cap'а не осталось, namespace ограничен контейнером (`ContainerTooLarge`). Измерено: 20 K log_id и 10⁶ KV-записей. Осталась стоимость, а не предел: каждый commit заново материализует namespace, поэтому для очень больших разбиение по-прежнему рекомендуется. | [`docs/ru/contributing/benchmarks.md`](../../contributing/benchmarks.md) |
+| ~~**Cycle detection в non-verify walker'ах**~~ | `collect_leaves`, `count_leaves`, `iter_log_*`, `vacuum_orphans` были рекурсивны на writer-produced деревьях без visited-set'а | **Закрыто.** Все walker'ы делят общий `TreeWalk` — visited set, бюджет обхода и (с аудита HV-15, снявшего writer-инвариант глубины вместе с потолком ёмкости) предел глубины, выведенный из числа chunk'ов space'а. В том числе `Space::get`, который раньше опирался только на константу глубины. | [`space/walk.rs`](../../../../crates/hidden-volume/src/space/walk.rs) |
 | **Format v1 final freeze** | Pre-1.0 status; формат может ломаться в v0.x → v0.y bump'ах | Gated на «ready to commit forever»; завязан на external community review. | [`docs/ru/reference/semver.md`](../../reference/semver.md) |
 
 ---
@@ -427,8 +427,9 @@ offer'а. Кратко:
    пробелы без external input'а:
    - TM1 constant-time AEAD path.
    - v3 format с cryptographic version-binding.
-   - 3-level B+ tree (R-LOG-INDEX-3L) когда первому интегратору
-     понадобится.
+   - **Многоуровневое B+ дерево (R-LOG-INDEX-3L) — сделано**
+     03.08.2026, причём как произвольная глубина, а не третий
+     уровень (аудит HV-15).
 5. **Если security-researcher engage'нется с проектом** (через
    bug bounty или community), их публичный отчёт становится
    external review'ом по факту публичности + technical-ности +

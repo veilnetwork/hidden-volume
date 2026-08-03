@@ -219,7 +219,11 @@ Two **INFO observations** worth flagging for v1.x roadmap:
 - **Content-dependence.** Rust stack frames are content-
   independent for normal functions (no `alloca`-style stack
   growth without `unsafe`). Recursion in B+ tree walkers is
-  bounded by depth ≤ 2 (writer invariant).
+  bounded by `TreeWalk`'s depth bound — since audit HV-15 the
+  writer emits as many levels as the data needs, so the bound is
+  derived from the chunks the space owns (7 descents at the
+  largest container the format permits) rather than from a
+  writer invariant of depth ≤ 2.
 - **Verdict.** **Defended.**
 
 #### M-3. Page-fault patterns in mmap mode

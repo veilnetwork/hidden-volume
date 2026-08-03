@@ -303,8 +303,8 @@ These are **known** and **documented**; they are not bugs.
 |---|---|---|---|
 | **TM1** | Open-scan timing oracle leaks ~owned-fraction to a process-watching observer | **Partially mitigated 2026-05-28**: opt-in `Container::open_space_constant_time` runs ChaCha20-equalizer on MAC-fail, closing the ChaCha20-body component (~1-3 µs of the ~40 µs/chunk swing). Parsing/alloc residual remains; full closure tracked as v1.x #7 follow-up. | [threat-model F-TM1 §4.4](../threat-model.md) |
 | **F-PAD** | (v2) Padding-policy byte in the cleartext header was unauthenticated, allowing silent privacy degradation by a T2 adversary | **Reclassified to DoS-class in v3** (2026-05-28). The v3 cryptographic version-binding step (#9) folds the full `params.version` u32 (including `padding_policy_index`) into `master_key`. Tamper now causes `AuthFailed`, not silent degradation. The DoS surface remains acceptable (any cleartext-header tamper can deny open). | [threat-model F-PAD §4.1](../threat-model.md) |
-| **R-LOG-INDEX-3L** | 2-level B+ tree caps a Log namespace at ~10-20K unique log_ids | Caller-side partitioning is the current recommendation; 3-level tree would push to ~1.5M. Decision deferred to first integrator hitting the cap. | [`docs/en/guide/integration.md`](../../guide/integration.md) §13 |
-| **Cycle detection in non-verify walkers** | `collect_leaves`, `count_leaves`, `iter_log_*`, `vacuum_orphans` recurse on writer-produced trees without visited-set | Writer-side invariant guarantees depth ≤ 2. Adversarial cycle requires key-holder threat (out-of-scope). `verify_integrity` is cycle-resistant by Merkle hash binding. | This dossier |
+| ~~**R-LOG-INDEX-3L**~~ | 2-level B+ tree capped a Log namespace at ~10-20K unique log_ids | **Closed 2026-08-03 (audit HV-15)**, and past what the item asked for: rather than a third level, the writer grows a level whenever the level below outgrows one chunk, so there is no cap left — a namespace is bounded by the container (`ContainerTooLarge`). Measured 20 K log ids and 10⁶ KV entries. What remains is a cost, not a limit: each commit re-materialises the namespace, so partitioning stays the advice for very large ones. | [`docs/en/contributing/benchmarks.md`](../../contributing/benchmarks.md) |
+| ~~**Cycle detection in non-verify walkers**~~ | `collect_leaves`, `count_leaves`, `iter_log_*`, `vacuum_orphans` recursed on writer-produced trees without a visited-set | **Closed.** Every walker now shares `TreeWalk` — visited set, traversal budget, and (since audit HV-15, which removed the writer's depth invariant along with the capacity ceiling) a depth bound derived from the space's chunk count. `Space::get` too, which used to rely on the depth constant alone. | [`space/walk.rs`](../../../../crates/hidden-volume/src/space/walk.rs) |
 | **Format v1 final freeze** | Pre-1.0 status; format may break in v0.x → v0.y bumps | Gated on "ready to commit forever"; tied to external community review. | [`docs/en/reference/semver.md`](../../reference/semver.md) |
 
 ---
@@ -429,7 +429,8 @@ In order of expected cost-effectiveness:
    - **Per-space derived `container_id` (#10) — shipped** (closes D1-A2).
    - **Kind-tag bytes in BLAKE3 inputs (#8) — shipped** (explicit
      `0x01`/`0x02` domain separation, no length-distinguishes convention).
-   - 3-level B+ tree (R-LOG-INDEX-3L) when first integrator needs it.
+   - **Multi-level B+ tree (R-LOG-INDEX-3L) — shipped** 2026-08-03 as
+     unbounded depth rather than a third level (audit HV-15).
 5. **If a security researcher engages with the project** (via bug
    bounty or community), their public report becomes the external
    review by virtue of being public + technical + signed.

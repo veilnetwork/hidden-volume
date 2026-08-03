@@ -634,6 +634,23 @@ pass commit.
   owned-chunk count. So the "no visited-set" clause above is no longer
   accurate for any walker. `verify_integrity` additionally checks
   sibling key ranges, which the hash chain likewise cannot express.
+- **Follow-up (2026-08-03, audit HV-15).** The constant is gone; the
+  defence is not. `MAX_TREE_DEPTH = 3` was also the writer's capacity
+  ceiling — a namespace could hold no more than one root's worth of
+  leaves (79 entries with 2 KiB values), so lifting the ceiling meant
+  the readers could no longer assume a depth. The bound is now derived
+  from the traversal budget already in `TreeWalk`: each level of a
+  well-formed tree is at least `MIN_FULL_INTERNAL_FANOUT` times wider
+  than the one above it, so a walk may descend only as deep as the
+  chunks the space owns could be arranged into. At the largest
+  container the format permits (`MAX_OPEN_SCAN_CHUNKS`) that is 7
+  descents, and it shrinks with the container: a near-empty space
+  refuses a three-descent chain. This is strictly better against the
+  finding as written — depth a key-holder cannot pay for in chunks is
+  unreachable, where a constant granted the same depth to a 4 KiB
+  container as to a 64 GiB one. The writer refuses to publish a tree
+  its own readers would reject, so the two sides cannot drift apart
+  silently.
 
 ### Build / supply-chain
 
