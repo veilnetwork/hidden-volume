@@ -72,7 +72,7 @@ The following pub items are `#[non_exhaustive]`:
 
 | Item | Kind | Why |
 |---|---|---|
-| `Error` | enum | Has grown from 5 to 16 variants pre-1.0 (audit pass 17 added `ContainerTooLarge` for the write-side scan-budget gate); further variants expected as new operations land. |
+| `Error` | enum | Has grown from 5 to 16 variants pre-1.0 (audit pass 17 added `ContainerTooLarge` for the write-side scan-budget gate; HV-13 gave it the `chunks` field and made the open side answer with it too); further variants expected as new operations land. |
 | `ChunkKind` | enum | Format-version reserves room for new chunk kinds; downstream `match` must `_ =>`. |
 | `PaddingPolicy` | enum | New policies (e.g. exponential growth) may land in minor releases. |
 | `IntegrityReport` | struct | Library-only construction; future fields (timing, tree statistics) may be added. |

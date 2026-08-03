@@ -228,7 +228,8 @@ repack; KV-namespaces всё ещё собираются целиком на nam
 
 **File-size cap.** Рост destination в repack ограничен
 `MAX_OPEN_SCAN_CHUNKS = 16M` чанков ≈ 64 ГиБ (audit pass 17 B);
-превышение surface'ится как `Error::ContainerTooLarge { extra, cap }`.
+превышение surface'ится как `Error::ContainerTooLarge { chunks, cap }`
+и на write-side, и на open-side (audit HV-13).
 Учтите, что это срабатывает **посреди копирования**, а не до
 первой записи — когда вы вызываете сырой примитив
 `Container::repack(path, dest, ..)` напрямую, partial `dest` уже

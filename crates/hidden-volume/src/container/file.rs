@@ -629,16 +629,26 @@ impl ContainerFile {
 /// Symmetric counterpart to `crate::open::check_scan_budget` on the
 /// read side. Both sides share the same constant — a write that
 /// passes this check is guaranteed to produce a file the open path
-/// can read.
+/// can read — and, since audit HV-13, the same error variant, so a
+/// caller does not have to learn two vocabularies for one condition.
 fn check_write_budget(current: u64, extra: u64) -> Result<()> {
     let cap = crate::open::MAX_OPEN_SCAN_CHUNKS;
-    let total = current
-        .checked_add(extra)
-        .ok_or(Error::ContainerTooLarge { extra, cap })?;
+    let total = current.checked_add(extra).ok_or(Error::ContainerTooLarge {
+        chunks: u64::MAX,
+        cap,
+    })?;
     if total > cap {
-        return Err(Error::ContainerTooLarge { extra, cap });
+        return Err(Error::ContainerTooLarge { chunks: total, cap });
     }
     Ok(())
+}
+
+/// The write side's refusal, for the cross-module symmetry test in
+/// `crate::open`. Test-only: the gate itself has no business being
+/// callable outside the append paths that own it.
+#[cfg(test)]
+pub(crate) fn write_budget_error_for_test(current: u64, extra: u64) -> Error {
+    check_write_budget(current, extra).expect_err("caller must pass an over-budget pair")
 }
 
 #[cfg(test)]
