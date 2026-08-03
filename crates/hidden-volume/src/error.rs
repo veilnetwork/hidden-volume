@@ -171,20 +171,37 @@ pub enum Error {
         limit: usize,
     },
 
-    /// A write would push the container past the open-scan budget
-    /// ([`crate::MAX_OPEN_SCAN_CHUNKS`]), making the resulting
-    /// file un-openable by `Container::open` (which would reject it
-    /// with `Error::Malformed` to bound DoS). Audit pass 17 B closed
-    /// the symmetry gap: previously the read-side cap could be
-    /// tripped by a write-side that happily blew past it.
+    /// The container is past the open-scan budget
+    /// ([`crate::MAX_OPEN_SCAN_CHUNKS`]) — raised by BOTH sides of the
+    /// gate: a write that would push the file over it, and an open of a
+    /// file already over it.
     ///
-    /// Caller-actionable: shrink `initial_garbage_chunks`, pick a less
-    /// aggressive [`crate::padding::PaddingPolicy`], or partition the
-    /// container.
-    #[error("container would exceed open-scan budget (slot_count + {extra} > {cap})")]
+    /// Audit pass 17 B closed the symmetry gap in the CHECK (the write
+    /// side could blow past a cap the read side enforced). Audit HV-13
+    /// closed it in the ANSWER: the read side used to report
+    /// `Error::Malformed` — the corruption error — for a file that is not
+    /// corrupt at all. A host meeting one could not tell "this container
+    /// is damaged" from "this container is 64 GiB", and those call for
+    /// opposite responses: the second one's data is intact and recoverable
+    /// by splitting it or by a build with a larger budget, the first one's
+    /// is not.
+    ///
+    /// Caller-actionable. On the write side: shrink
+    /// `initial_garbage_chunks`, pick a less aggressive
+    /// [`crate::padding::PaddingPolicy`], or partition the container. On
+    /// the read side the file needs to be shrunk before this build can
+    /// open it — see the operations guide.
+    ///
+    /// Nothing about this outcome depends on a password: the check runs on
+    /// the slot count alone, before any key material is touched, and the
+    /// slot count is a property of the file that anyone who can `stat` it
+    /// already knows. It is not a deniability signal.
+    #[error("container exceeds open-scan budget ({chunks} chunks > cap {cap})")]
     ContainerTooLarge {
-        /// Slots that the failing write would have added.
-        extra: u64,
+        /// The chunk count that tripped the budget: the file's slot count
+        /// on the read side, the count the refused write would have
+        /// produced on the write side.
+        chunks: u64,
         /// Hard cap (`MAX_OPEN_SCAN_CHUNKS`).
         cap: u64,
     },

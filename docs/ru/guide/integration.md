@@ -560,9 +560,13 @@ A: Жёсткий cap — `MAX_OPEN_SCAN_CHUNKS = 16M` чанков ≈ **64 Г�
 (audit pass 16 TM1 — ограничивает DoS через раздутый файл). И write-side
 (`Container::create_with_options` initial garbage, post-commit padding,
 `repack` destination growth), и read-side (open-scan) отказываются
-переходить этот cap; write-side поверхность — `Error::ContainerTooLarge
-{ extra, cap }` (audit pass 17 B), read-side — `Error::Malformed
-("container exceeds open-scan budget")`. В пределах cap практический
+переходить этот cap, и ОБЕ стороны отвечают одним и тем же
+`Error::ContainerTooLarge { chunks, cap }` (write-side gate — audit
+pass 17 B; согласованный ответ read-side — audit HV-13). Раньше
+read-side отвечал `Error::Malformed`, то есть сообщал о цельном
+контейнере как об испорченном — разница существенная: контейнер сверх
+бюджета ничего не потерял и восстанавливается разделением файла, а
+malformed — потерял. В пределах cap практический
 лимит — RAM во время open scan; streaming-open держит RAM ограниченным
 `O(M·16 B)`, где M = количество owned chunks (см. DESIGN §5). `repack`
 тоже ограничен — audit pass 16 R-STREAMING-REPACK сделал его

@@ -541,10 +541,13 @@ A: Hard cap is `MAX_OPEN_SCAN_CHUNKS = 16M` chunks ≈ **64 GiB**
 (audit pass 16 TM1 — bounds DoS via inflated-file). Both the
 write-side (`Container::create_with_options` initial garbage,
 post-commit padding, `repack` destination growth) and the read-side
-(open-scan) refuse to cross this cap; the write-side surfaces it as
-`Error::ContainerTooLarge { extra, cap }` (audit pass 17 B), the
-read-side as `Error::Malformed("container exceeds open-scan
-budget")`. Within the cap, the practical limit is RAM during the
+(open-scan) refuse to cross this cap, and BOTH surface it as
+`Error::ContainerTooLarge { chunks, cap }` (write-side gate: audit
+pass 17 B; matching read-side answer: audit HV-13). The read side
+used to answer `Error::Malformed`, which told the caller its intact
+container was corrupt — a distinction that matters, because an
+over-budget container has lost nothing and is recoverable by
+splitting it, while a malformed one has. Within the cap, the practical limit is RAM during the
 open scan; streaming open keeps RAM bounded by `O(M·16 B)` where M =
 owned chunks (see DESIGN §5). `repack` is also bounded — audit pass
 16 R-STREAMING-REPACK made it pageable through log namespaces with

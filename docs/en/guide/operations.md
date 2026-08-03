@@ -221,7 +221,8 @@ structurally bounded by the 2-level B+ tree cap.
 
 **File-size cap.** Repack destination growth is gated by
 `MAX_OPEN_SCAN_CHUNKS = 16M` chunks ≈ 64 GiB (audit pass 17 B);
-exceeding it surfaces as `Error::ContainerTooLarge { extra, cap }`.
+exceeding it surfaces as `Error::ContainerTooLarge { chunks, cap }`
+on both the write side and the open side (audit HV-13).
 Note this fires **mid-copy**, not before any write — when you call
 the raw `Container::repack(path, dest, ..)` primitive directly, a
 partial `dest` may already exist on disk at the point the error is
