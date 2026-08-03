@@ -14,14 +14,15 @@ use crate::tx::commit::{CommitPayload, IndexRoot, blake3_of};
 use crate::{Error, Result};
 
 use super::Space;
-use super::index::{ChildPointer, IndexNode, InternalNode, LeafNode, Namespace};
+use super::index::{ChildPointer, InternalNode, LeafNode, Namespace};
 use super::log;
 use super::superblock::Superblock;
 
 /// Index chunks of a namespace's **current** tree, keyed by the BLAKE3
 /// of their plaintext payload — the same hash the parent already stores
-/// as its Merkle link, so building this costs one chunk read (the root)
-/// and no hashing.
+/// as its Merkle link, so building this costs no extra chunk read and
+/// no hashing: it falls out of the flatten walk the commit performs
+/// anyway ([`Space::flatten_tree`]).
 ///
 /// A rebuild that produces a node whose payload hashes to a key in here
 /// has produced a node that is already on disk, byte for byte, in a
@@ -32,6 +33,10 @@ use super::superblock::Superblock;
 /// in the encoded header), so a match cannot silently swap a leaf for
 /// an internal node or graft a chunk from a neighbouring namespace.
 type ReusableNodes = HashMap<[u8; 32], u64>;
+
+/// A namespace's entries, flattened and sorted, plus the nodes of the
+/// tree they came out of that a rebuild may point at again.
+type FlattenedNamespace = (Vec<(Vec<u8>, Vec<u8>)>, ReusableNodes);
 
 impl<'f> Space<'f> {
     /// Apply a Tx's pending KV + log operations and run the 3-fsync
@@ -256,17 +261,14 @@ impl<'f> Space<'f> {
             let ns = Namespace(*ns_byte);
             // Load the entire tree's current entries into a flat sorted vec,
             // apply ops, then rebuild the tree from scratch. This is
-            // simpler than path-tracking incremental updates and is
-            // fine at the namespace sizes we target (≤ ~10K entries).
+            // simpler than path-tracking incremental updates, and the
+            // commit is fsync-bound at every size measured (HV-14).
             //
             // The rebuild is only a rebuild *in memory*. Every node it
             // produces that already exists on disk is pointed at rather
             // than written again — see `ReusableNodes` and audit HV-14.
             let (mut entries, reusable) = match prior_roots_by_ns.get(ns_byte) {
-                Some(r) => (
-                    self.flatten_tree(r.index_slot, ns)?,
-                    self.reusable_nodes(r)?,
-                ),
+                Some(r) => self.flatten_tree(r)?,
                 None => (Vec::new(), ReusableNodes::new()),
             };
 
@@ -381,15 +383,33 @@ impl<'f> Space<'f> {
         Ok(new_seq)
     }
 
-    /// Read all entries of a namespace's tree into a flat sorted Vec.
-    /// Used during commit_tx to load the prior state before applying ops.
-    fn flatten_tree(
-        &mut self,
-        root_slot: u64,
-        namespace: Namespace,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    /// Read all entries of a namespace's tree into a flat sorted Vec,
+    /// and collect the nodes a rebuild may point at instead of writing
+    /// again (audit HV-14). Used during commit_tx to load the prior
+    /// state before applying ops.
+    ///
+    /// The reuse map is a by-product of the walk, not a second pass:
+    /// flattening reads every node of the tree already, and every one
+    /// of them is reached through a parent that stores its BLAKE3. So
+    /// the map costs no extra read and no hashing, and — unlike the
+    /// root-only map this replaces — it covers every level, which is
+    /// what keeps a one-key edit at one write per level once trees grow
+    /// past two levels (audit HV-15).
+    ///
+    /// The root's own hash is included because a Tx whose ops all turn
+    /// out to be no-ops (`put` of the value already stored) rebuilds a
+    /// tree identical to the one on disk, and there is no reason for
+    /// that to cost a single write.
+    fn flatten_tree(&mut self, root: &IndexRoot) -> Result<FlattenedNamespace> {
         let mut out = Vec::new();
-        self.collect_leaves(root_slot, namespace, &mut out)?;
+        let mut reusable = ReusableNodes::new();
+        reusable.insert(root.payload_hash, root.index_slot);
+        self.collect_leaves_and_links(
+            root.index_slot,
+            root.namespace,
+            &mut out,
+            &mut Some(&mut reusable),
+        )?;
         // Per-node decode only checks intra-leaf order; the *global*
         // (cross-leaf) order is an assumption the rest of the commit
         // path relies on (`apply_op_to_sorted` binary-searches the
@@ -404,31 +424,7 @@ impl<'f> Space<'f> {
                 "tree leaves are not globally sorted / contain duplicate keys",
             ));
         }
-        Ok(out)
-    }
-
-    /// Index chunks of `root`'s tree that a rebuild is allowed to point
-    /// at instead of writing again (audit HV-14).
-    ///
-    /// Costs exactly one chunk read — the root. An internal root already
-    /// carries `(child_hash, child_slot)` for every leaf, which is the
-    /// whole map; the leaves themselves are never touched for this.
-    ///
-    /// The root's own hash is included because a Tx whose ops all turn
-    /// out to be no-ops (`put` of the value already stored) rebuilds a
-    /// tree identical to the one on disk, and there is no reason for
-    /// that to cost a single write.
-    fn reusable_nodes(&mut self, root: &IndexRoot) -> Result<ReusableNodes> {
-        let mut map = ReusableNodes::new();
-        map.insert(root.payload_hash, root.index_slot);
-        if let IndexNode::Internal(node) =
-            self.read_index_node_at_expected(root.index_slot, root.namespace)?
-        {
-            for child in node.children {
-                map.insert(child.child_hash, child.child_slot);
-            }
-        }
-        Ok(map)
+        Ok((out, reusable))
     }
 
     /// Put an index node on disk — or discover it is already there.
@@ -469,9 +465,37 @@ impl<'f> Space<'f> {
     ///
     /// Strategy:
     /// 1. Try to fit everything in a single Leaf — emits one chunk.
-    /// 2. If overflow, split into multiple Leaves and emit one Internal
-    ///    node above them.
-    /// 3. If the Internal node would overflow → Error::IndexFull.
+    /// 2. If overflow, pack the entries into a row of Leaves.
+    /// 3. While the row does not fit under a single Internal node, pack
+    ///    it into a row of Internal nodes and go up one level.
+    /// 4. The level that ends up one node wide is the root.
+    ///
+    /// ## Why there is no depth limit (audit HV-15)
+    ///
+    /// Step 3 used to be "emit one Internal node over the leaves, or
+    /// `Error::IndexFull` if they do not fit under it". That made the
+    /// namespace's capacity a property of the *shape of one chunk*: an
+    /// internal node holds `(PAYLOAD_CAP - 4) / (2 + key_len + 8 + 32)`
+    /// children — 79 with 9-byte keys — so a namespace stopped at 79
+    /// leaves. Measured, that was 4 029 entries with 64-byte values,
+    /// 553 with 512-byte values and **79 with 2 048-byte values**, and
+    /// nothing above it could be stored at all.
+    ///
+    /// Adding one more fixed level would only move the wall (79 → 6 241
+    /// leaves). Growing levels until one node covers them removes it:
+    /// what a namespace can hold is now what the container can hold,
+    /// and the container's own budget — `MAX_OPEN_SCAN_CHUNKS`, checked
+    /// on every append — is what refuses, with `ContainerTooLarge`.
+    /// Depth stays small on its own because each level is at least
+    /// [`super::index::MIN_FULL_INTERNAL_FANOUT`] times narrower than
+    /// the one below: 3 levels index ~17 M entries. The readers derive
+    /// their bound from the same arithmetic, so nothing needs to agree
+    /// on a constant — see [`super::walk`].
+    ///
+    /// `Error::IndexFull` survives as the guard on step 3 making no
+    /// progress, which needs a child pointer so large that two do not
+    /// fit in a chunk. Not reachable through `MAX_KEY_LEN`: the largest
+    /// possible pointer is 298 bytes against a 4 040-byte payload.
     ///
     /// ## Why the whole tree is still built (audit HV-14)
     ///
@@ -480,26 +504,25 @@ impl<'f> Space<'f> {
     /// namespace, 48 chunks (196 KiB) to append one 200-byte message to
     /// an 8 000-message log. The chunks are immutable and content-
     /// addressed, so the fix is to notice that almost all of them
-    /// already exist: `pack_into_leaves` is deterministic, an edit that
-    /// does not move a leaf boundary leaves every other leaf encoding to
+    /// already exist: the packing is deterministic, an edit that does
+    /// not move a leaf boundary leaves every other leaf encoding to
     /// identical bytes, and appending at the high end of a log moves no
-    /// boundary at all. Only the leaves that genuinely differ, plus the
-    /// root above them, are written — path copying, arrived at by
-    /// comparison rather than by descent.
+    /// boundary at all. Only the nodes that genuinely differ, plus the
+    /// path of parents above them, are written — path copying, arrived
+    /// at by comparison rather than by descent. That holds at any
+    /// depth: the reuse map covers every level of the previous tree
+    /// (`collect_leaves_and_links`), so a one-key edit costs one node
+    /// per level, not one node per level *below the root*.
     ///
     /// This cannot do worse than the old behaviour: a rebuild where
-    /// every leaf differs writes every leaf, exactly as before.
+    /// every node differs writes every node, exactly as before.
     ///
     /// The in-memory flatten-and-repack stays. Measurement is why: the
-    /// commit is fsync-bound (~11-22 ms flat from 10 to 8 000 entries on
-    /// an SSD), and the format's own `IndexFull` ceiling — one internal
-    /// root over ~79 leaves — caps the flattened working set at roughly
-    /// 320 KiB, so the O(N) CPU and RAM the audit flagged are bounded by
-    /// the format itself. Replacing the repack with incremental descent
-    /// and split/merge would buy nothing measurable here and would cost
-    /// the greedy repack's self-compaction, which is what keeps repeated
-    /// delete/insert cycles from fragmenting the tree into the
-    /// `IndexFull` ceiling. See `docs/en/contributing/benchmarks.md`.
+    /// commit is fsync-bound (~11-22 ms flat from 10 to 8 000 entries
+    /// on an SSD), so the O(N) CPU the audit flagged does not surface;
+    /// and the repack's greedy self-compaction is what keeps repeated
+    /// delete/insert cycles from fragmenting a namespace into ever more
+    /// half-empty chunks. See `docs/en/contributing/benchmarks.md`.
     fn write_tree_for_namespace(
         &mut self,
         ns: Namespace,
@@ -509,14 +532,17 @@ impl<'f> Space<'f> {
     ) -> Result<(u64, [u8; 32])> {
         let mut emitted: HashSet<u64> = HashSet::new();
 
-        // Try single-leaf first.
-        let single = LeafNode {
-            namespace: ns,
-            entries: entries.to_vec(),
-        };
-        if let Ok(bytes) = single.encode() {
+        // Try single-leaf first. Measure before cloning: `entries` is
+        // the whole namespace, and now that a namespace can be
+        // arbitrarily large, cloning it only to watch `encode` refuse
+        // it is a copy of everything the user has stored (audit HV-15).
+        if leaf_encoded_len(entries) <= crate::chunk::format::PAYLOAD_CAP {
+            let single = LeafNode {
+                namespace: ns,
+                entries: entries.to_vec(),
+            };
             // Encoded leaf carries user KV bytes; scrub on drop.
-            let bytes: Zeroizing<Vec<u8>> = Zeroizing::new(bytes);
+            let bytes: Zeroizing<Vec<u8>> = Zeroizing::new(single.encode()?);
             return self.emit_index_node(&bytes, new_seq, reuse, &mut emitted);
         }
 
@@ -526,28 +552,76 @@ impl<'f> Space<'f> {
             return Err(Error::Internal("pack_into_leaves returned empty"));
         }
 
-        // Emit each leaf as a chunk and collect ChildPointers for the
-        // Internal root.
-        let mut children = Vec::with_capacity(leaves.len());
+        // Emit each leaf as a chunk and collect the ChildPointers that
+        // the level above will index.
+        let mut level = Vec::with_capacity(leaves.len());
         for leaf in leaves {
             let first_key = leaf.entries[0].0.clone();
             // Encoded leaf carries user KV bytes; scrub on drop.
             let bytes: Zeroizing<Vec<u8>> = Zeroizing::new(leaf.encode()?);
             let (slot, hash) = self.emit_index_node(&bytes, new_seq, reuse, &mut emitted)?;
-            children.push(ChildPointer {
+            level.push(ChildPointer {
                 first_key,
                 child_slot: slot,
                 child_hash: hash,
             });
         }
 
-        let internal = InternalNode {
-            namespace: ns,
-            children,
-        };
-        // Encoded internal node carries user `first_key` bytes; scrub.
-        let bytes: Zeroizing<Vec<u8>> = Zeroizing::new(internal.encode()?);
-        self.emit_index_node(&bytes, new_seq, reuse, &mut emitted)
+        // Grow levels until one node covers the whole row.
+        let mut nodes = level.len();
+        let mut descents: u8 = 0;
+        while level.len() > 1 {
+            let parents = pack_into_internals(ns, &level)?;
+            // Every level is strictly narrower than the one below it —
+            // `pack_into_internals` seals a node only when the next
+            // pointer does not fit, so a node holds ≥ 2 pointers unless
+            // one alone fills a chunk. Without progress this would spin
+            // forever appending chunks; refuse instead.
+            if parents.len() >= level.len() {
+                return Err(Error::IndexFull);
+            }
+            let mut next = Vec::with_capacity(parents.len());
+            for node in parents {
+                let first_key = match node.children.first() {
+                    Some(c) => c.first_key.clone(),
+                    None => return Err(Error::Internal("internal node packed with no children")),
+                };
+                // Encoded internal node carries user `first_key` bytes; scrub.
+                let bytes: Zeroizing<Vec<u8>> = Zeroizing::new(node.encode()?);
+                let (slot, hash) = self.emit_index_node(&bytes, new_seq, reuse, &mut emitted)?;
+                next.push(ChildPointer {
+                    first_key,
+                    child_slot: slot,
+                    child_hash: hash,
+                });
+            }
+            nodes += next.len();
+            descents = descents.saturating_add(1);
+            level = next;
+        }
+
+        // Never publish a tree this crate's own readers would refuse.
+        //
+        // Their depth bound is derived from the chunks a space owns
+        // ([`super::walk::max_depth_for_budget`]), which is always at
+        // least this tree's own node count — so checking against that
+        // count is the strictest form of the same question. A greedy
+        // pack cannot fail it: the bound is the inverse of exactly the
+        // "every node but the last of a level is full" property
+        // `pack_into_internals` provides. What this catches is a future
+        // change that quietly weakens that packing, which would
+        // otherwise commit successfully and leave the namespace
+        // unreadable — the worst failure this crate has.
+        if descents > super::walk::max_depth_for_budget(nodes) {
+            return Err(Error::IndexFull);
+        }
+
+        match level.pop() {
+            Some(root) => Ok((root.child_slot, root.child_hash)),
+            // `pack_into_leaves` returned a non-empty row and every
+            // packing step preserves that, so this is unreachable.
+            None => Err(Error::Internal("tree build produced no root")),
+        }
     }
 }
 
@@ -568,6 +642,55 @@ fn apply_op_to_sorted(entries: &mut Vec<(Vec<u8>, Vec<u8>)>, op: &KvOp) {
             }
         },
     }
+}
+
+/// What [`LeafNode::encoded_len`] would report for a leaf holding
+/// `entries` — without building one. The header size is taken from an
+/// empty `LeafNode` so this cannot drift from the encoder.
+fn leaf_encoded_len(entries: &[(Vec<u8>, Vec<u8>)]) -> usize {
+    let header = LeafNode::new(Namespace::RESERVED).encoded_len();
+    entries.iter().fold(header, |n, (k, v)| {
+        n.saturating_add(2 + k.len() + 4 + v.len())
+    })
+}
+
+/// Split a row of child pointers into InternalNodes that each fit under
+/// PAYLOAD_CAP. Greedy first-fit, exactly like [`pack_into_leaves`]:
+/// pack into the current node until the next pointer would overflow,
+/// then start a new one. Every node but the last of the row is
+/// therefore *full*, which is what bounds tree depth — see
+/// [`super::index::MIN_FULL_INTERNAL_FANOUT`].
+///
+/// Determinism matters as much as the packing: an unchanged stretch of
+/// a level must re-pack to byte-identical nodes, or the HV-14 reuse
+/// map never hits and every commit rewrites the whole tree.
+fn pack_into_internals(ns: Namespace, children: &[ChildPointer]) -> Result<Vec<InternalNode>> {
+    let mut out: Vec<InternalNode> = Vec::new();
+    let mut current = InternalNode::new(ns);
+
+    for c in children {
+        let entry_cost = 2 + c.first_key.len() + 8 + 32;
+        if current.children.is_empty()
+            && current.encoded_len() + entry_cost > crate::chunk::format::PAYLOAD_CAP
+        {
+            // Unreachable via MAX_KEY_LEN (298 bytes at most against a
+            // 4 040-byte payload), but a first_key is copied from user
+            // data and this is the write path.
+            return Err(Error::Malformed(
+                "single child pointer too large for any internal node",
+            ));
+        }
+        if current.encoded_len() + entry_cost > crate::chunk::format::PAYLOAD_CAP {
+            out.push(std::mem::replace(&mut current, InternalNode::new(ns)));
+        }
+        current.children.push(c.clone());
+    }
+
+    if !current.children.is_empty() {
+        out.push(current);
+    }
+
+    Ok(out)
 }
 
 /// Split a sorted entries vec into LeafNodes that each fit under

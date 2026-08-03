@@ -415,8 +415,11 @@ Audit pass 16 (R-STREAMING-REPACK) made `repack` memory-bounded: log
 namespaces are walked one paginated page at a time via
 `iter_log_after(ns, cursor, log_page_size)` with per-page `Tx::commit`
 on the destination, so the working set is ≈ 4 MiB per page regardless
-of total log volume. KV namespaces still collect once per namespace
-(bounded structurally by the 2-level B+ tree cap of ≈ 5–10 K entries).
+of total log volume. KV namespaces still collect once per namespace,
+which used to be bounded structurally by the two-level B+ tree cap of
+≈ 5–10 K entries — audit HV-15 removed that cap (the index now grows
+levels on demand), so this working set is now bounded by the namespace
+itself. See `docs/en/contributing/benchmarks.md`.
 The previous implementation kept every live entry in memory across
 both phases (Phase 1: read all, Phase 2: write all) — multi-GiB log
 namespaces could OOM the host.

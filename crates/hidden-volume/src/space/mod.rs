@@ -128,9 +128,14 @@ pub struct IntegrityReport {
     /// Total IndexNode + Commit chunks read and hash-matched against
     /// their parent's recorded hash.
     pub chunks_verified: usize,
-    /// Maximum tree depth observed across all namespaces. 0 = empty
-    /// space, 1 = single-leaf namespace, 2 = leaf-and-internal split.
-    /// Bounded by the format's B+ tree max-depth (see DESIGN §11.4).
+    /// Maximum tree depth observed across all namespaces, counted in
+    /// levels: 0 = empty space, 1 = single-leaf namespace, 2 =
+    /// leaf-and-internal split, and one more per level the writer had
+    /// to add. Not capped by the format — a namespace grows a level
+    /// whenever the level below outgrows one chunk — but bounded in
+    /// practice by how many chunks a container may hold at all
+    /// ([`crate::MAX_OPEN_SCAN_CHUNKS`]): 8 levels at 64 GiB. See
+    /// DESIGN §11.4.
     pub max_depth: u8,
     /// Total `DataBatch` chunks visited while walking log namespaces.
     /// AEAD-decrypted and `decode_batch`-validated; counts each batch
@@ -532,36 +537,35 @@ impl<'f> Space<'f> {
     /// Read a single value from `namespace` by `key`. `Ok(None)` if the
     /// key is absent or the namespace has never been written to.
     ///
-    /// Errors with [`Error::Malformed`] if the B+ tree depth exceeds
-    /// the internal `MAX_TREE_DEPTH` (currently 3) — defense-in-depth
-    /// against a writer-bug regression or adversarial-key-holder cycle
-    /// in the IndexNode chain. See
+    /// Errors with [`Error::Malformed`] if the descent leaves the shape
+    /// a tree can have — deeper than this space's chunk count could
+    /// hold, or through a chunk it has already read (a cycle).
+    /// Defense-in-depth against a writer-bug regression or an
+    /// adversarial key-holder; see the `space::walk` guard and
     /// [`docs/en/security/audits/adversarial-stance.md` F-A5](../../../docs/en/security/audits/adversarial-stance.md).
     pub fn get(&mut self, namespace: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let root_slot = match self.find_root_slot(namespace)? {
             Some(s) => s,
             None => return Ok(None),
         };
-        // Walk down to the leaf containing `key`. `depth` caps a
-        // pathological cyclic Internal→Internal chain that would
-        // otherwise loop forever; the writer-side invariant
-        // guarantees depth ≤ 2. The check is performed on *entry* to
-        // each node — BEFORE matching Leaf vs Internal — so that a
-        // forged tree presenting a `Leaf` at depth > MAX is rejected
-        // identically to `collect_leaves_at` / `count_leaves_at`
-        // (audit pass 20: the prior placement inside the `Internal`
-        // arm let `get` accept a Leaf one level deeper than every
-        // other walker, contradicting the `index::MAX_TREE_DEPTH`
-        // "identical across read paths" invariant).
+        // Walk down to the leaf containing `key` under the same guard
+        // every other walker uses — a `get` is a one-path walk, but the
+        // path is still attacker-shaped: a cyclic Internal→Internal
+        // chain would otherwise loop forever. The guard is consulted on
+        // *entry* to each node — BEFORE matching Leaf vs Internal — so
+        // a forged tree presenting a `Leaf` below the depth bound is
+        // rejected identically to `collect_leaves_at` /
+        // `count_leaves_at` (audit pass 20: the prior placement inside
+        // the `Internal` arm let `get` accept a Leaf one level deeper
+        // than every other walker).
         // `read_index_node_at_expected` additionally gates
         // `IndexNode.namespace == namespace` (audit pass 19 round 6
         // root-relabel closure).
+        let mut walk = self.new_tree_walk();
         let mut depth: u8 = 0;
         let mut slot = root_slot;
         loop {
-            if depth > index::MAX_TREE_DEPTH {
-                return Err(Error::Malformed("tree depth exceeded MAX_TREE_DEPTH"));
-            }
+            walk.admit(slot, depth)?;
             match self.read_index_node_at_expected(slot, namespace)? {
                 IndexNode::Leaf(l) => return Ok(l.get(key).map(|v| v.to_vec())),
                 IndexNode::Internal(i) => {
@@ -697,8 +701,10 @@ impl<'f> Space<'f> {
     // documented here.
 
     /// A fresh traversal guard sized for this space: at most one read
-    /// per owned chunk. Every recursive tree walk starts here — see
-    /// [`walk`] for why the depth cap alone is not enough.
+    /// per owned chunk, and no deeper than that many chunks could be
+    /// arranged into. Every tree walk starts here — see [`walk`] for
+    /// why one of those bounds alone is not enough, and why the depth
+    /// bound is derived from the chunk count rather than fixed.
     pub(in crate::space) fn new_tree_walk(&self) -> TreeWalk {
         TreeWalk::with_budget(self.state.owned_slots.len())
     }
@@ -708,17 +714,42 @@ impl<'f> Space<'f> {
     /// `commit.rs` flatten-and-rebuild path.
     ///
     /// **Errors:** propagates AEAD failure or `Malformed` from
-    /// [`Self::read_index_node_at`]; returns `Malformed` if depth
-    /// exceeds [`index::MAX_TREE_DEPTH`], if a chunk is reachable
-    /// twice, or if the walk outruns its traversal budget.
+    /// [`Self::read_index_node_at`]; returns `Malformed` if the walk
+    /// descends deeper than this space's chunk count could hold, if a
+    /// chunk is reachable twice, or if the walk outruns its traversal
+    /// budget.
     pub(super) fn collect_leaves(
         &mut self,
         slot: u64,
         namespace: Namespace,
         out: &mut Vec<(Vec<u8>, Vec<u8>)>,
     ) -> Result<()> {
+        self.collect_leaves_and_links(slot, namespace, out, &mut None)
+    }
+
+    /// [`Self::collect_leaves`], additionally recording every Merkle
+    /// link the walk passes through into `links` as
+    /// `child_hash -> child_slot`.
+    ///
+    /// This is how `commit_tx` learns which index chunks it may point
+    /// at instead of writing again (audit HV-14). The hashes are the
+    /// ones the parents already store, so the map costs no extra reads
+    /// and no hashing — the walk was going to read every one of these
+    /// nodes anyway to flatten the namespace — and it covers every
+    /// level of the tree, not just the row under the root.
+    ///
+    /// Only chunks this walk actually reached are recorded, so an entry
+    /// in the map is by construction a chunk the space owns, reachable
+    /// in this namespace, at this commit.
+    pub(super) fn collect_leaves_and_links(
+        &mut self,
+        slot: u64,
+        namespace: Namespace,
+        out: &mut Vec<(Vec<u8>, Vec<u8>)>,
+        links: &mut Option<&mut std::collections::HashMap<[u8; 32], u64>>,
+    ) -> Result<()> {
         let mut walk = self.new_tree_walk();
-        self.collect_leaves_at(slot, namespace, 0, &mut walk, out)
+        self.collect_leaves_at(slot, namespace, 0, &mut walk, out, links)
     }
 
     fn collect_leaves_at(
@@ -728,11 +759,9 @@ impl<'f> Space<'f> {
         depth: u8,
         walk: &mut TreeWalk,
         out: &mut Vec<(Vec<u8>, Vec<u8>)>,
+        links: &mut Option<&mut std::collections::HashMap<[u8; 32], u64>>,
     ) -> Result<()> {
-        if depth > index::MAX_TREE_DEPTH {
-            return Err(Error::Malformed("tree depth exceeded MAX_TREE_DEPTH"));
-        }
-        walk.admit(slot)?;
+        walk.admit(slot, depth)?;
         let node = self.read_index_node_at_expected(slot, namespace)?;
         match node {
             IndexNode::Leaf(l) => {
@@ -740,8 +769,13 @@ impl<'f> Space<'f> {
                 Ok(())
             },
             IndexNode::Internal(i) => {
+                if let Some(links) = links.as_deref_mut() {
+                    for c in &i.children {
+                        links.insert(c.child_hash, c.child_slot);
+                    }
+                }
                 for c in i.children {
-                    self.collect_leaves_at(c.child_slot, namespace, depth + 1, walk, out)?;
+                    self.collect_leaves_at(c.child_slot, namespace, depth + 1, walk, out, links)?;
                 }
                 Ok(())
             },
@@ -760,10 +794,7 @@ impl<'f> Space<'f> {
         depth: u8,
         walk: &mut TreeWalk,
     ) -> Result<usize> {
-        if depth > index::MAX_TREE_DEPTH {
-            return Err(Error::Malformed("tree depth exceeded MAX_TREE_DEPTH"));
-        }
-        walk.admit(slot)?;
+        walk.admit(slot, depth)?;
         let node = self.read_index_node_at_expected(slot, namespace)?;
         match node {
             IndexNode::Leaf(l) => Ok(l.entries.len()),

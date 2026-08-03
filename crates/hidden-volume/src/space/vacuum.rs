@@ -270,9 +270,9 @@ impl<'f> Space<'f> {
 
     /// Walk the tree rooted at `slot` and append every IndexNode chunk
     /// slot (Leaves and Internal nodes) into `out`. Used at vacuum time.
-    /// Depth-capped via [`super::index::MAX_TREE_DEPTH`] and guarded by
-    /// `walk` (visited set + traversal budget) to defend against cyclic
-    /// or DAG-shaped IndexNode chains — writer-bug regression or
+    /// Guarded by `walk` (visited set + traversal budget + the depth
+    /// that budget can hold) against cyclic, DAG-shaped or
+    /// unboundedly-deep IndexNode chains — writer-bug regression or
     /// adversarial key-holder. `out` deduplicates the *result*, so
     /// before the guard a DAG cost `fanout^depth` reads to produce a
     /// handful of distinct slots; see [`super::walk`].
@@ -295,10 +295,7 @@ impl<'f> Space<'f> {
         walk: &mut TreeWalk,
         out: &mut std::collections::HashSet<u64>,
     ) -> Result<()> {
-        if depth > super::index::MAX_TREE_DEPTH {
-            return Err(Error::Malformed("tree depth exceeded MAX_TREE_DEPTH"));
-        }
-        walk.admit(slot)?;
+        walk.admit(slot, depth)?;
         out.insert(slot);
         let node = self.read_index_node_at(slot)?;
         if let IndexNode::Internal(i) = node {

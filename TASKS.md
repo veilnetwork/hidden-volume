@@ -346,6 +346,17 @@ v1.0 blockers — они либо defense-in-depth (опциональные), �
       integrity walker). 391 tests pass — honest depth-≤-2 trees
       unaffected. See
       [adversarial-stance.md F-A5](docs/en/security/audits/adversarial-stance.md).
+      **Superseded 2026-08-03 (audit HV-15).** The constant was also the
+      capacity ceiling, so it went with it; the cap it provided is now
+      derived from `TreeWalk`'s chunk budget instead, which is stricter
+      on small containers and does not constrain honest data on large
+      ones. Same walkers, same error shape.
+- [x] ~~**3-level B+ tree (Phase 3)**~~ — the v0.2 skip above is
+      **reversed 2026-08-03 (audit HV-15)**, and the skip's reasoning is
+      why: "handles ~5-10K KV entries" was true only for small values
+      (measured: 4 029 at 64 B, but **79** at 2 KiB), and `IndexFull`
+      is a poor sentinel when the data simply cannot be stored. The
+      writer now grows levels on demand — see R-LOG-INDEX-3L below.
 - [ ] **SC-INFO1 / constant-time decode shell** — **REJECTED**
       для текущего scope: защищает out-of-strict-scope противника
       (key-holder), maintenance burden > benefit. Может быть
@@ -721,11 +732,10 @@ tests pass** (was 385 post-pass-15; +2 new streaming-repack regressions).
 
 - **R-STREAMING-REPACK** marked CLOSED above; the prior roadmap entry
   in the pass-11 section retained for archival continuity.
-- **R-LOG-INDEX-3L** — kept as roadmap (caller-side option (c) in
-  `docs/en/guide/integration.md` is the v1.0 recommendation; (a)/(b)
-  await first integrator hitting the cap). Decision deferred is
-  intentional — caller-side partitioning is structurally cheaper
-  than a format v3 bump.
+- **R-LOG-INDEX-3L** — CLOSED 2026-08-03 (audit HV-15) by removing the
+  ceiling entirely rather than raising it; see the entry below. The
+  "caller-side partitioning is cheaper than a format bump" reasoning
+  held up in an unexpected way: no format bump was needed either.
 
 ### Skip / document-only (justified)
 
@@ -852,26 +862,37 @@ post-pass-10; +4 new regression tests in `tests/pass11_audit.rs`).
       by structural index cap). Working-set ≈ 4 MiB regardless of
       total log volume. See pass-16 section for the full closure
       record.
-- **R-LOG-INDEX-3L** — The 2-level B+ tree caps a Log namespace at
-      roughly 10K-20K **unique** `log_id` values before
-      `Error::IndexFull`. Total messages can scale further (multiple
-      `log_id`s share one DataBatch chunk via per-Tx auto-split),
-      but the per-namespace KV index is the structural ceiling. The
-      `Tx::append_log` rustdoc was made honest in audit pass 14;
-      the limit itself remains. Plan options:
-      (a) Bump to a 3-level B+ tree (≈ 1.5M unique `log_id`s) by
-          adding an internal layer; format-version bump v3 because
-          the on-disk encoding gains an internal-node-of-internals
-          layer.
-      (b) Range-page index: pack contiguous `log_id` ranges into
-          `(low, high) → batch_slot` entries instead of one
-          per-`log_id` pointer. Drastically reduces index entries
-          for monotonic `log_id` writers (typical messenger pattern).
-      (c) Caller-side namespace partitioning (per-conversation
-          namespace, roll over on cap). No format change needed;
-          documented in `docs/en/guide/integration.md`.
-      Decision deferred to first integrator running into the cap;
-      until then, (c) is the recommended pattern.
+- [x] **R-LOG-INDEX-3L** — **CLOSED 2026-08-03 (audit HV-15)**, and
+      wider than any of the three options below. The 2-level B+ tree
+      capped a namespace at one root's worth of leaves: measured, 4 029
+      entries with 64-byte values, 553 with 512-byte, and **79 with
+      2 KiB values**, `Error::IndexFull` past that. Option (a) — a
+      third level — was rejected on measurement: it only moves the wall
+      (79 → ~6 200). The writer instead grows a level whenever the
+      level below outgrows one chunk, so there is **no depth limit and
+      no capacity limit**; a namespace is bounded by the container
+      (`MAX_OPEN_SCAN_CHUNKS` → `Error::ContainerTooLarge`). Verified
+      by writing and reading back 10⁶ entries (64 B), 250 K (512 B),
+      100 K (2 KiB) and 20 K unique `log_id`s.
+      No format-version bump: node encodings and Merkle links are
+      unchanged — an Internal node's children were always allowed to be
+      Internal nodes, the writer simply never emitted them.
+      Reader-side, `MAX_TREE_DEPTH = 3` is **gone**: it was the same
+      ceiling seen from the other end, and a constant cannot bound a
+      tree that has no fixed shape. The depth bound is now derived from
+      the traversal budget `TreeWalk` already held (see
+      [`space/walk.rs`](crates/hidden-volume/src/space/walk.rs)) — a
+      walk descends only as deep as the chunks the space owns could be
+      arranged into, which is 7 at the largest container the format
+      permits and shrinks with the container.
+      What is *not* closed: the per-commit cost. `commit_tx` still
+      re-materialises the whole namespace, so a 10⁵–10⁶-entry namespace
+      spends its own size in RAM per commit — measured in
+      `docs/en/contributing/benchmarks.md`. Option (c), caller-side
+      partitioning, therefore remains the advice for very large
+      namespaces, but as a performance choice rather than a hard limit.
+      Option (b) (range-page index) stays unimplemented and is now
+      orthogonal.
 - [x] **R-NSKIND** — CLOSED 2026-05-09. Typed
       [`NamespaceKind::{Kv, Log}`](crates/hidden-volume/src/tx/commit.rs)
       enum added; every `IndexRoot` carries an explicit `kind` byte
