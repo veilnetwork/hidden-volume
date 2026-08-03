@@ -1305,32 +1305,34 @@ where
             return Err(Error::Io(e));
         },
     };
-    // The tmp-handle lock pin is gated off on Android: std's
-    // `File::try_lock` returns `Err(Unsupported)` there (the v1.x
-    // Android-flock hardening routed the *container* locks through
-    // `libc` flock for exactly this reason, but this third lock site
-    // was never wired to that helper — audit pass 20). On Android the
-    // pin is therefore ABSENT; the substitute-tmp race is bounded only
-    // by the header-validate + inode-pin checks below and by the
-    // threat model's trusted-parent-directory precondition. Wiring it
-    // through `android_flock` is tracked as follow-up.
-    #[cfg(not(target_os = "android"))]
-    {
-        // Best-effort exclusive lock pin. WouldBlock would mean an
-        // attacker raced and acquired LOCK_EX first — refuse the
-        // rename rather than ship attacker content into `path`.
-        match tmp_handle.try_lock() {
-            Ok(()) => {},
-            Err(std::fs::TryLockError::WouldBlock) => {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(Error::Busy);
-            },
-            Err(std::fs::TryLockError::Error(_)) => {
-                // Filesystem doesn't support flock (e.g. an exotic
-                // non-Unix FS) — proceed; the header-validate + inode
-                // pin below remain the active substitution guards.
-            },
-        }
+    // Exclusive lock pin on the tmp we are about to rename into place.
+    // WouldBlock means an attacker raced us and holds LOCK_EX first —
+    // refuse the rename rather than ship attacker content into `path`.
+    //
+    // Audit HV-09: this used to be an inline `File::try_lock` behind
+    // `#[cfg(not(target_os = "android"))]`, so on Android the pin was
+    // ABSENT and the substitute-tmp race was bounded only by the
+    // header-validate + inode-pin checks below. std's `try_lock` really
+    // does answer `Err(Unsupported)` there, which is why the *container*
+    // locks were routed through libc `flock(2)` back in v1.0 — this third
+    // site was simply never wired to the same helper, and the comment
+    // beside it recorded that as a follow-up instead of doing it. It now
+    // goes through `file::try_lock_exclusive`, the one dispatcher both
+    // container locks already use, so Android gets the same real
+    // `flock(LOCK_EX | LOCK_NB)` as every other Unix.
+    match file::try_lock_exclusive(&tmp_handle) {
+        Ok(()) => {},
+        Err(Error::Busy) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(Error::Busy);
+        },
+        Err(_) => {
+            // The filesystem does not honour flock (an exotic non-Unix
+            // FS; on Android an errno other than EWOULDBLOCK) — proceed;
+            // the header-validate + inode pin below remain the active
+            // substitution guards. Same degradation the container locks
+            // accept, and the same one this site accepted before.
+        },
     }
     // Verify the writer produced a real container — at minimum a
     // valid cleartext header (v3 layout: 48 bytes = salt(32) +
@@ -1696,6 +1698,55 @@ mod hv06_tests {
         })
         .expect_err("the closure returned an error");
         assert!(matches!(err, Error::Cancelled), "got {err:?}");
+    }
+
+    /// Audit HV-09: the tmp-file pin must actually be taken.
+    ///
+    /// Someone else holding `LOCK_EX` on the tmp between the writer
+    /// finishing and the rename is the substitution race the pin exists to
+    /// stop, and the rewrite must refuse rather than publish whatever is at
+    /// that path. Until this pass the whole pin sat behind
+    /// `#[cfg(not(target_os = "android"))]`, so on Android it was not taken
+    /// at all — this test cannot see that target, but it fails the moment
+    /// the pin is compiled out of whichever one it does run on.
+    ///
+    /// The closure writes a *valid* container at `tmp` on purpose: the
+    /// header-validate and inode-pin below the lock would otherwise refuse
+    /// it for their own reasons and the test would pass without the pin
+    /// existing. The competing holder is a second `open()` in this same
+    /// process, which is a separate open file description and therefore
+    /// contends for `flock(2)` exactly as another process would (see
+    /// `tests/locking.rs`).
+    #[cfg(unix)]
+    #[test]
+    fn the_tmp_pin_refuses_a_tmp_someone_else_has_locked() {
+        let (_guard, path) = scratch("tmp-pin");
+        {
+            let mut c = Container::create_with_options(&path, options()).unwrap();
+            let _ = c.create_space(b"pw").unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+
+        let mut rival = None;
+        let err = atomic_rewrite_under_source_lock(&path, "hv-compact", None, |_src, tmp, _c| {
+            let mut out = Container::create_with_options(tmp, options())?;
+            let _ = out.create_space(b"pw")?;
+            drop(out);
+
+            let handle = std::fs::OpenOptions::new().read(true).open(tmp)?;
+            file::try_lock_exclusive(&handle)
+                .expect("the rival must get the lock first for this test to mean anything");
+            rival = Some(handle);
+            Ok(())
+        })
+        .expect_err("a locked tmp must not be renamed into place");
+        assert!(matches!(err, Error::Busy), "got {err:?}");
+        drop(rival);
+
+        assert!(
+            std::fs::read(&path).unwrap() == before,
+            "the rewrite published something despite refusing"
+        );
     }
 }
 

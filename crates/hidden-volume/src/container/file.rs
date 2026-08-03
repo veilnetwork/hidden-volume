@@ -77,7 +77,15 @@ use crate::{CHUNK_SIZE, Error, FIRST_SLOT_OFFSET, Result};
 /// §4.2 for the documented set of safe paths (app-private
 /// `Context.getFilesDir()` / `getCacheDir()` is recommended; shared
 /// / external / MediaStore paths remain out-of-scope).
-fn try_lock_exclusive(file: &File) -> Result<()> {
+///
+/// **This is the crate's only exclusive-lock dispatcher (audit HV-09).**
+/// The third lock site — the tmp-file pin `atomic_rewrite` holds through
+/// the rename — used to inline `File::try_lock` behind a
+/// `#[cfg(not(target_os = "android"))]`, which is precisely the shape this
+/// function exists to stop anyone writing again: on Android that `cfg`
+/// meant *no pin at all*, and the comment beside it recorded the gap as a
+/// follow-up rather than closing it.
+pub(crate) fn try_lock_exclusive(file: &File) -> Result<()> {
     #[cfg(not(target_os = "android"))]
     {
         match file.try_lock() {
