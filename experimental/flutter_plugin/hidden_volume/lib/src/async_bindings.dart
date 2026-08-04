@@ -24,9 +24,11 @@ library;
 
 import 'dart:async';
 import 'dart:isolate';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'bindings.dart';
+import 'deferred_vacuum.dart';
 
 // ------------------------------------------------------------------
 // Worker entry-point + spawn config
@@ -158,6 +160,10 @@ class _SetPaddingPolicyRequest extends _Request {
 
 class _StatsRequest extends _Request {
   const _StatsRequest({required SendPort reply}) : super(reply);
+}
+
+class _VacuumAfterOpenRequest extends _Request {
+  const _VacuumAfterOpenRequest({required SendPort reply}) : super(reply);
 }
 
 class _VacuumDataBatchesRequest extends _Request {
@@ -313,6 +319,8 @@ void _dispatch(SpaceHandleBindings space, _Request msg, ReceivePort rx) {
       run(() => space.stats());
     case _VacuumDataBatchesRequest():
       run(() => space.vacuumDataBatches());
+    case _VacuumAfterOpenRequest():
+      run(() => space.vacuumAfterOpen());
     case _VerifyIntegrityRequest():
       run(() => space.verifyIntegrity());
     case _CloseRequest():
@@ -350,6 +358,7 @@ class HvAsyncSpace {
   /// completes (audit HV-09).
   final _WorkerDeath _death;
   bool _closed = false;
+  final DeferredVacuum _deferredVacuum = DeferredVacuum();
 
   /// Spawn a worker, create a fresh container at [path], bootstrap a
   /// space inside it under [password]. See [HvSpace.create] for argument
@@ -382,10 +391,17 @@ class HvAsyncSpace {
   /// matching [password]. See [HvSpace.open] for semantics (especially
   /// the deniability invariant: do NOT distinguish wrong-password from
   /// no-such-space in your UI).
+  ///
+  /// The unlock takes the constant-time scan, which no longer scrubs
+  /// inline (audit HV-01) — so this arms the deferred scrub on the worker
+  /// before returning, at a random offset from now. See
+  /// [scheduleDeferredVacuum] to choose your own window and
+  /// [cancelDeferredVacuum] to take the job over.
   static Future<HvAsyncSpace> open({
     required String path,
     required Uint8List password,
     String? dylibPath,
+    DeferredVacuumWindow vacuumWindow = DeferredVacuumWindow.standard,
   }) async {
     final bootReply = ReceivePort();
     final boot = _BootstrapOpen(
@@ -393,7 +409,9 @@ class HvAsyncSpace {
       password: password,
       reply: bootReply.sendPort,
     );
-    return _spawn(boot, bootReply, dylibPath);
+    final space = await _spawn(boot, bootReply, dylibPath);
+    space.scheduleDeferredVacuum(window: vacuumWindow);
+    return space;
   }
 
   static Future<HvAsyncSpace> _spawn(
@@ -510,6 +528,48 @@ class HvAsyncSpace {
   Future<int> vacuumDataBatches() =>
       _call<int>((reply) => _VacuumDataBatchesRequest(reply: reply));
 
+  /// Run the post-open forward-secrecy scrub **now** (audit HV-01).
+  /// Returns the number of orphan index chunks reclaimed.
+  ///
+  /// Already armed on a random delay by [HvAsyncSpace.open] — this is the
+  /// escape hatch for a host that has a better moment of its own. Awaiting
+  /// it in the line after `open` re-creates the finding in the caller: the
+  /// scrub costs time and disk writes in proportion to the space's
+  /// history, only ever happens when the password was right, and an
+  /// observer who can see either at the moment of unlock learns that.
+  Future<int> vacuumAfterOpen() =>
+      _call<int>((reply) => _VacuumAfterOpenRequest(reply: reply));
+
+  /// Arm [vacuumAfterOpen] to run once, after a delay drawn uniformly at
+  /// random from [window]. Returns the delay chosen. Re-arming cancels
+  /// the pending one; [close] cancels it for good.
+  ///
+  /// The scrub runs on the worker isolate like every other call here, so
+  /// arming it costs the calling isolate nothing.
+  ///
+  /// Failures are swallowed — there is nobody to report them to from a
+  /// timer callback, and a scrub that could not run leaves the container
+  /// in the state it was already in.
+  Duration scheduleDeferredVacuum({
+    DeferredVacuumWindow window = DeferredVacuumWindow.standard,
+    Random? random,
+  }) {
+    return _deferredVacuum.arm(window, () {
+      if (_closed) return;
+      unawaited(vacuumAfterOpen().catchError((Object _) => 0));
+    }, random: random);
+  }
+
+  /// The delay the armed deferred scrub is waiting, or `null` if none is
+  /// armed.
+  Duration? get pendingVacuumDelay => _deferredVacuum.pendingDelay;
+
+  /// Disarm the deferred scrub without running it — for a host taking the
+  /// job over, not for skipping it. Until something runs it, the values a
+  /// previous session deleted stay recoverable by anyone who later obtains
+  /// the password and an old snapshot of the file.
+  void cancelDeferredVacuum() => _deferredVacuum.cancel();
+
   /// Walk every chunk owned by this space, AEAD-decrypting and
   /// re-checking Merkle nodes.
   Future<HvIntegrityResult> verifyIntegrity() => _call<HvIntegrityResult>(
@@ -520,6 +580,9 @@ class HvAsyncSpace {
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
+    // Before anything else: a timer that fires against a torn-down worker
+    // would send into a dead port.
+    _deferredVacuum.cancel();
     final reply = ReceivePort();
     try {
       _toWorker.send(_CloseRequest(reply: reply.sendPort));
