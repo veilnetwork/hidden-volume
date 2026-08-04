@@ -404,11 +404,11 @@ impl<'f> Space<'f> {
         self.collect_leaves_after_at(slot, namespace, after, limit, 0, &mut walk, out)
     }
 
-    // `limit` bounds `out`, not the number of chunks read: a subtree
-    // whose entries all fail the `after` filter contributes nothing to
-    // `out` and the walk keeps going. So the traversal guard is what
-    // actually bounds this walk on adversarial input — see
-    // [`super::walk`].
+    // `limit` bounds `out`, not the number of chunks read, so the
+    // traversal guard is what bounds this walk on adversarial input —
+    // see [`super::walk`]. On honest input `after` prunes it: audit
+    // HV-05 taught the internal branch to seek to the cursor's subtree
+    // rather than descend from child 0 and filter in the leaf.
     #[allow(clippy::too_many_arguments)]
     fn collect_leaves_after_at(
         &mut self,
@@ -447,7 +447,15 @@ impl<'f> Space<'f> {
                 Ok(())
             },
             IndexNode::Internal(i) => {
-                for c in i.children {
+                // Seek to the cursor (audit HV-05). Log keys are the
+                // 8-byte big-endian `log_id`, so byte order IS numeric
+                // order and the same `first_key` bound the KV walker
+                // uses applies here: siblings before
+                // `child_index_for(after)` end at a `log_id` below the
+                // cursor and contribute nothing.
+                let after_key = after.map(log::log_id_key);
+                let first = after_key.map_or(0, |k| i.child_index_for(&k));
+                for c in i.children.into_iter().skip(first) {
                     if out.len() >= limit {
                         break;
                     }
@@ -484,7 +492,10 @@ impl<'f> Space<'f> {
     }
 
     // Guarded for the same reason as [`Self::collect_leaves_after_at`]:
-    // `limit` bounds the output, not the chunk reads.
+    // `limit` bounds the output, not the chunk reads. And pruned the
+    // mirror-image way (audit HV-05) — this one walks down from
+    // `before`, so it is the siblings AFTER the cursor's child that
+    // cannot contribute.
     #[allow(clippy::too_many_arguments)]
     fn collect_leaves_before_at(
         &mut self,
@@ -523,7 +534,16 @@ impl<'f> Space<'f> {
                 Ok(())
             },
             IndexNode::Internal(i) => {
-                for c in i.children.into_iter().rev() {
+                // Descending twin of the `after` seek. Siblings past
+                // `child_index_for(before)` start at a `log_id` at or
+                // above the cursor, so nothing in them satisfies
+                // `log_id < before`; `take(last + 1)` drops them before
+                // the reverse iteration begins.
+                let before_key = before.map(log::log_id_key);
+                let last = before_key.map_or(i.children.len().saturating_sub(1), |k| {
+                    i.child_index_for(&k)
+                });
+                for c in i.children.into_iter().take(last + 1).rev() {
                     if out.len() >= limit {
                         break;
                     }
@@ -611,7 +631,16 @@ impl<'f> Space<'f> {
                 Ok(out.len() >= limit)
             },
             IndexNode::Internal(i) => {
-                for c in i.children {
+                // The upper bound already stops this walk early (the
+                // leaf branch returns `true` on the first entry at or
+                // past `end`). The LOWER bound did nothing until audit
+                // HV-05 — and it is the one the app moves, one page per
+                // scrollback step, so every page re-read the whole
+                // history below `start`. Same seek as the `after`
+                // walker.
+                let start_key = start.map(log::log_id_key);
+                let first = start_key.map_or(0, |k| i.child_index_for(&k));
+                for c in i.children.into_iter().skip(first) {
                     let stop = self.collect_leaves_in_range_at(
                         c.child_slot,
                         namespace,
