@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-03T22:09:55Z
+# Captured: 2026-08-04T10:47:38Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -258,11 +258,11 @@ space/mod.rs:  570:    pub fn begin_tx<'s>(&'s mut self) -> Tx<'s, 'f> {
 space/mod.rs:  583:    pub fn get(&mut self, namespace: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>> {
 space/mod.rs:  619:    pub fn list(&mut self, namespace: Namespace) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
 space/mod.rs:  645:    pub fn list_keys(&mut self, namespace: Namespace) -> Result<Vec<Vec<u8>>> {
-space/mod.rs:  665:    pub fn list_keys_after(
-space/mod.rs:  691:    pub fn count(&mut self, namespace: Namespace) -> Result<usize> {
-space/mod.rs:  744:    pub fn erase_namespace(&mut self, namespace: Namespace) -> Result<usize> {
-space/mod.rs:  775:    pub fn list_namespaces(&mut self) -> Result<Vec<Namespace>> {
-space/mod.rs:  787:    pub fn list_namespaces_with_kind(
+space/mod.rs:  671:    pub fn list_keys_after(
+space/mod.rs:  697:    pub fn count(&mut self, namespace: Namespace) -> Result<usize> {
+space/mod.rs:  750:    pub fn erase_namespace(&mut self, namespace: Namespace) -> Result<usize> {
+space/mod.rs:  781:    pub fn list_namespaces(&mut self) -> Result<Vec<Namespace>> {
+space/mod.rs:  793:    pub fn list_namespaces_with_kind(
 space/superblock.rs:  30:pub const NO_RECORD: u64 = u64::MAX;
 space/superblock.rs:  37:pub struct Superblock {
 space/superblock.rs:  72:    pub const ENCODED_LEN: usize = 8 + 8 + 32;

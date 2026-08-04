@@ -655,13 +655,19 @@ impl<'f> Space<'f> {
     /// the same walk keyed on `log_id` instead.
     ///
     /// Memory bound: `limit` keys plus one decoded node, independent of
-    /// the namespace's total size. As with `iter_log_after`, `limit`
-    /// bounds the OUTPUT and not the chunk reads — a subtree whose keys
-    /// all fail the `after` filter contributes nothing and the walk
-    /// keeps going, so paging all the way through an N-key namespace
-    /// still reads O(N) chunks per page. What it does not do is hold
-    /// O(N) bytes at once, which is the property a memory-constrained
-    /// host needs.
+    /// the namespace's total size.
+    ///
+    /// Read bound: the descent to `after` plus the leaves the page
+    /// actually consumes. The walk seeks — at every internal node it
+    /// starts at [`child_index_for(after)`][index::InternalNode::child_index_for]
+    /// instead of at child 0, because every earlier sibling's subtree
+    /// ends below `after` and cannot hold a key the filter would keep.
+    ///
+    /// Until audit HV-05 it did start at 0 and filtered in the leaf, so
+    /// each page re-read the whole prefix it had already returned and
+    /// paging through an N-key namespace was O(N) chunk reads *per
+    /// page*. The keys came back correct either way — this is a cost
+    /// fix, and the test that pins it counts chunk reads.
     pub fn list_keys_after(
         &mut self,
         namespace: Namespace,
@@ -868,6 +874,8 @@ impl<'f> Space<'f> {
     /// Guarded like every other walker: `limit` bounds `out`, not the
     /// number of chunks read, so on adversarial input it is the
     /// traversal guard that terminates this — see [`super::walk`].
+    /// `after` prunes it in the honest case (audit HV-05), which is a
+    /// different property and does not replace the guard.
     #[allow(clippy::too_many_arguments)]
     fn collect_leaf_keys_after_at(
         &mut self,
@@ -903,7 +911,15 @@ impl<'f> Space<'f> {
                 Ok(())
             },
             IndexNode::Internal(i) => {
-                for c in i.children {
+                // Seek instead of scan (audit HV-05). Children are
+                // sorted and `first_key` is the low bound of a child's
+                // subtree, so every sibling before
+                // `child_index_for(after)` ends strictly below `after`
+                // and holds nothing this page would keep. The child AT
+                // that index straddles the cursor and must still be
+                // descended into.
+                let first = after.map_or(0, |a| i.child_index_for(a));
+                for c in i.children.into_iter().skip(first) {
                     if out.len() >= limit {
                         break;
                     }
@@ -1150,5 +1166,196 @@ impl<'f> Space<'f> {
         // scrubbing the heap region.
         let pt_bytes = aead.open(&nonce, ct, aad)?;
         Plaintext::decode(&pt_bytes)
+    }
+}
+
+/// What a page of pagination costs, in chunk reads (audit HV-05).
+///
+/// These live in-crate for the same reason the HV-16 commit-cost tests
+/// do: the number is not observable through the public API, and wall
+/// time would make the assertion a stopwatch race. And it has to be the
+/// *number of reads* — every one of these walkers returned the correct
+/// keys before the fix too, so a test that only checks the page content
+/// passes against the defect.
+#[cfg(test)]
+mod pagination_cost_tests {
+    use super::*;
+    use crate::Container;
+    use crate::container::ContainerOptions;
+    use crate::crypto::kdf::Argon2Params;
+    use crate::padding::PaddingPolicy;
+
+    /// Big enough that the tree has interior levels to prune. Small
+    /// enough that seeding it stays under a second in debug.
+    const N: u64 = 20_000;
+    /// One page, as a chat screen would ask for it.
+    const PAGE: usize = 50;
+
+    fn kv_key(i: u64) -> Vec<u8> {
+        format!("k{i:08}").into_bytes()
+    }
+
+    fn scratch() -> std::path::PathBuf {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let p = tmp.path().to_owned();
+        drop(tmp);
+        p
+    }
+
+    /// Chunk reads performed by `f`, plus whatever `f` returned.
+    fn reads<R>(f: impl FnOnce() -> R) -> (u64, R) {
+        CHUNK_READS.with(|r| r.set(0));
+        let out = f();
+        (CHUNK_READS.with(|r| r.get()), out)
+    }
+
+    /// A space holding `N` KV keys and `N` log entries, handed to `f`.
+    fn with_seeded_space<R>(f: impl FnOnce(&mut Space<'_>) -> R) -> R {
+        let path = scratch();
+        let out = {
+            let mut c = Container::create_with_options(
+                &path,
+                ContainerOptions {
+                    argon2: Argon2Params::MIN,
+                    initial_garbage_chunks: 0,
+                    padding_policy: PaddingPolicy::None,
+                    superblock_replicas: 1,
+                },
+            )
+            .unwrap();
+            let mut s = c.create_space(b"pw").unwrap();
+            for batch in 0..(N / 1_000) {
+                let mut tx = s.begin_tx();
+                for i in (batch * 1_000)..(batch * 1_000 + 1_000) {
+                    tx.put(Namespace::SETTINGS, &kv_key(i), b"v").unwrap();
+                    tx.append_log(Namespace::MESSAGE_LOG, i, b"m").unwrap();
+                }
+                tx.commit().unwrap();
+            }
+            f(&mut s)
+        };
+        let _ = std::fs::remove_file(&path);
+        out
+    }
+
+    /// What a seeking page may cost over the cheapest possible page.
+    ///
+    /// Measured, it is currently **zero** — a page from the tail reads
+    /// exactly what a page from the head reads. Two is headroom for one
+    /// extra descent, not a licence to scan: at N = 20 000 the unpruned
+    /// walkers cost 94 (KV) and 130 (log) reads against 4 and 5, so
+    /// every probe that half-disables a seek lands far outside this.
+    const SLACK: u64 = 2;
+
+    #[test]
+    fn a_kv_page_far_from_the_start_costs_what_the_first_page_costs() {
+        with_seeded_space(|s| {
+            let (first_reads, first) =
+                reads(|| s.list_keys_after(Namespace::SETTINGS, None, PAGE).unwrap());
+            assert_eq!(first.len(), PAGE, "fixture must fill a page");
+            assert_eq!(first[0], kv_key(0));
+
+            let cursor = kv_key(N - PAGE as u64 - 1);
+            let (far_reads, far) = reads(|| {
+                s.list_keys_after(Namespace::SETTINGS, Some(&cursor), PAGE)
+                    .unwrap()
+            });
+            assert_eq!(far.len(), PAGE, "the tail page must be full too");
+            assert_eq!(
+                far[0],
+                kv_key(N - PAGE as u64),
+                "and start after the cursor"
+            );
+
+            assert!(
+                far_reads <= first_reads + SLACK,
+                "list_keys_after re-read the prefix it had already returned: \
+                 first page {first_reads} chunks, page at key {} {far_reads} chunks",
+                N - PAGE as u64
+            );
+        });
+    }
+
+    #[test]
+    fn a_log_page_far_from_the_start_costs_what_the_first_page_costs() {
+        with_seeded_space(|s| {
+            let (first_reads, first) = reads(|| {
+                s.iter_log_after(Namespace::MESSAGE_LOG, None, PAGE)
+                    .unwrap()
+            });
+            assert_eq!(first.len(), PAGE, "fixture must fill a page");
+            assert_eq!(first[0].0, 0);
+
+            let cursor = N - PAGE as u64 - 1;
+            let (far_reads, far) = reads(|| {
+                s.iter_log_after(Namespace::MESSAGE_LOG, Some(cursor), PAGE)
+                    .unwrap()
+            });
+            assert_eq!(far.len(), PAGE, "the tail page must be full too");
+            assert_eq!(far[0].0, cursor + 1, "and start after the cursor");
+
+            assert!(
+                far_reads <= first_reads + SLACK,
+                "iter_log_after re-read the whole history below the cursor: \
+                 first page {first_reads} chunks, page after {cursor} {far_reads} chunks"
+            );
+        });
+    }
+
+    #[test]
+    fn a_backwards_log_page_near_the_start_costs_what_the_last_page_costs() {
+        with_seeded_space(|s| {
+            let (last_reads, last) = reads(|| {
+                s.iter_log_before(Namespace::MESSAGE_LOG, None, PAGE)
+                    .unwrap()
+            });
+            assert_eq!(last.len(), PAGE, "fixture must fill a page");
+            assert_eq!(last[0].0, N - 1, "descending from the newest entry");
+
+            // Mirror image of the forward case: walking backwards, it is
+            // the entries ABOVE the cursor that must not be read.
+            let cursor = PAGE as u64 + 1;
+            let (near_reads, near) = reads(|| {
+                s.iter_log_before(Namespace::MESSAGE_LOG, Some(cursor), PAGE)
+                    .unwrap()
+            });
+            assert_eq!(near.len(), PAGE, "the head page must be full too");
+            assert_eq!(near[0].0, cursor - 1, "and start below the cursor");
+
+            assert!(
+                near_reads <= last_reads + SLACK,
+                "iter_log_before re-read the whole history above the cursor: \
+                 last page {last_reads} chunks, page before {cursor} {near_reads} chunks"
+            );
+        });
+    }
+
+    /// The one the app actually calls for chat scrollback — and the one
+    /// the audit report did not name. It stopped early on the upper
+    /// bound and scanned from the root on the lower one.
+    #[test]
+    fn a_ranged_log_page_far_from_the_start_costs_what_the_first_page_costs() {
+        with_seeded_space(|s| {
+            let (first_reads, first) = reads(|| {
+                s.iter_log_range(Namespace::MESSAGE_LOG, None, None, PAGE)
+                    .unwrap()
+            });
+            assert_eq!(first.len(), PAGE, "fixture must fill a page");
+            assert_eq!(first[0].0, 0);
+
+            let start = N - PAGE as u64;
+            let (far_reads, far) = reads(|| {
+                s.iter_log_range(Namespace::MESSAGE_LOG, Some(start), None, PAGE)
+                    .unwrap()
+            });
+            assert_eq!(far.len(), PAGE, "the tail page must be full too");
+            assert_eq!(far[0].0, start, "and start at the lower bound");
+
+            assert!(
+                far_reads <= first_reads + SLACK,
+                "iter_log_range ignored its lower bound while descending: \
+                 first page {first_reads} chunks, page from {start} {far_reads} chunks"
+            );
+        });
     }
 }
