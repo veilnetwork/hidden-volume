@@ -126,6 +126,53 @@ impl<'f> Space<'f> {
         Ok(scrubbed)
     }
 
+    /// Run the post-open scrub that a constant-time open deliberately
+    /// left undone. Returns the number of chunks scrubbed.
+    ///
+    /// [`Container::open_space_constant_time`][crate::Container::open_space_constant_time]
+    /// and its parallel / mmap companions equalize the discovery scan so
+    /// the unlock's duration cannot say whether a password matched — and
+    /// then used to vacuum inline, doing work whose duration and disk
+    /// writes scale with the space's history, on the success path only.
+    /// The measurement the equalized scan removes was handed back by the
+    /// maintenance that followed it (audit HV-01). This is that
+    /// maintenance, as its own operation.
+    ///
+    /// **When to call it.** Not immediately after the open: the same
+    /// milliseconds a few milliseconds later are still the unlock's
+    /// milliseconds, and an observer watching the process at the moment a
+    /// password is typed reads the same answer. Call it at a moment the
+    /// unlock did not cause — after a randomised delay, when the screen
+    /// goes off, or on the first user-initiated write.
+    ///
+    /// **The scrub is still owed until this runs.** Nothing else performs
+    /// it on the constant-time path, and until it does, the `IndexNode`
+    /// chunks holding previous versions of deleted or overwritten values
+    /// stay valid AEAD: whoever later obtains the password and an old
+    /// snapshot of the file can read them back. This is the honest cost of
+    /// the split, and the reason a host that opens constant-time must wire
+    /// this somewhere rather than treat it as optional.
+    ///
+    /// Idempotent and cheap when there is nothing to reclaim.
+    ///
+    /// On a read-only handle it returns `Ok(0)` having done nothing,
+    /// rather than the [`Error::ReadOnly`] that [`Self::vacuum_orphans`]
+    /// answers — the same choice
+    /// [`MultiSpace::vacuum_hosted`][crate::MultiSpace::vacuum_hosted]
+    /// makes, and for the same reason: a host calls this unconditionally
+    /// after every open, and failing on a container someone mounted
+    /// read-only would break that host for no gain. `Ok` here therefore
+    /// means "nothing is owed, or nothing could be done", not "the scrub
+    /// ran"; forward secrecy is, intentionally, a writer-only property.
+    /// Reach for [`Self::vacuum_orphans`] when the caller wants the strict
+    /// answer.
+    pub fn vacuum_after_open(&mut self) -> Result<usize> {
+        if !self.file.lock_mode.allows_writes() {
+            return Ok(0);
+        }
+        self.vacuum_orphans()
+    }
+
     /// Scrub `DataBatch` chunks owned by this space that are no longer
     /// referenced by any current namespace's KV index. Returns the
     /// number of chunks scrubbed.

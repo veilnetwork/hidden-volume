@@ -688,6 +688,32 @@ A complete closure would require also (a) running a dummy
 and (b) padding `owned_slots.push` cost — neither of which is
 shipped today. Tracked as v1.x carried-forward #7 follow-up.
 
+**The mitigation ends where the open returns (audit HV-01).** Until
+this pass, every constant-time open on a writable handle ran
+`vacuum_orphans` before returning — a tree walk, a read of every
+non-visible chunk among the reachable ones, an overwrite of each
+orphan, and an fsync. Milliseconds and disk writes, both proportional
+to the space's accumulated history, and reached **only on the success
+path**: a wrong password returns from the scan before that line. The
+equalizer's careful microseconds were therefore followed by a signal
+several orders of magnitude larger, and a process- or
+filesystem-level observer watching the moment a password is typed
+could read the answer off it directly.
+
+The constant-time entry points now perform no maintenance.
+[`Space::vacuum_after_open`](../../../crates/hidden-volume/src/space/vacuum.rs)
+is the same work as a separate operation, and
+`MultiSpace::vacuum_hosted` is its multi-space twin. **The scrub is
+deferred, not cancelled** — until a host runs it, prior versions of
+deleted or overwritten values remain recoverable by anyone who later
+obtains the password and an old snapshot of the file, so a host that
+opens constant-time must wire it somewhere. It must not wire it to the
+line after the open: the same duration a moment later is still the
+unlock's duration. The Flutter plugin arms it on a
+cryptographically-random delay drawn from a window
+(`DeferredVacuumWindow`, 30 s – 5 min by default) and cancels it on
+close.
+
 **What this means for a host-app's threat model.**
 
 | Threat model element | Sequential `open_space` | Sequential `open_space_constant_time` |

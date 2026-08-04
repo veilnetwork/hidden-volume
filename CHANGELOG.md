@@ -12,6 +12,55 @@ format.
 
 ## [Unreleased]
 
+### Security — report6 follow-through
+
+- **The constant-time open no longer performs maintenance (HV-01).**
+  `Container::open_space_constant_time` and its parallel / mmap companions
+  exist to make unlock latency independent of whether a password matched —
+  the F-TM1 mitigation for a coercion setting. Each of them then ran
+  `vacuum_orphans` before returning: a tree walk, a read of every
+  non-visible chunk among the reachable ones, an overwrite of each orphan
+  and an fsync. **Milliseconds and disk writes, both proportional to the
+  space's accumulated history, and reached only when the password was
+  right** — a wrong one returns from the scan before that line. The
+  equalizer's microseconds were followed by a signal orders of magnitude
+  larger, so the very measurement it removes was handed back by the
+  maintenance behind it.
+
+  Reachability was maximal and not opt-in: the FFI opens constant-time by
+  **default** (`SpaceHandle::open` / `open_with_keys`, sync and async), so
+  every app unlock went through it. `MultiSpace` had the same defect and
+  closed it one audit earlier; the container path had no test at all.
+
+  The three constant-time entry points now do no maintenance, and the new
+  `Space::vacuum_after_open` is that maintenance as its own operation —
+  read-only-tolerant (`Ok(0)`) the way `MultiSpace::vacuum_hosted` is,
+  because a host calls it unconditionally after every open. `SpaceHandle`
+  and `AsyncSpaceHandle` expose it across UniFFI.
+
+  **The scrub is deferred, not cancelled**, and simply deleting the call
+  would have quietly ended forward secrecy for every caller. So the Flutter
+  plugin runs it — and deliberately not on the heels of the unlock, which
+  would move the same duration a few milliseconds right and leave it
+  correlated with success. `HvSpace.open` / `openWithKeys` and
+  `HvAsyncSpace.open` arm it on a delay drawn with `Random.secure` from a
+  `DeferredVacuumWindow` (30 s – 5 min by default); `scheduleDeferredVacuum`
+  re-arms with another window, `cancelDeferredVacuum` hands the job to the
+  host, and `close` disarms. A host that knows a better moment — screen
+  off, app backgrounded, first user-initiated write — should call
+  `vacuumAfterOpen` there instead.
+
+  Honest cost of the split: the scrub is no longer guaranteed by the open.
+  If the process dies before the timer fires nothing is reclaimed and the
+  next session owes it again — against a pre-fix inline vacuum that always
+  ran, into the leak it always ran into. Both halves are pinned:
+  `tests/constant_time_defers_scrub.rs` asserts the open reclaims nothing
+  **and** that the explicit call does, plus the same for the keys variant,
+  the contrast that the ordinary open still scrubs inline, and the
+  read-only `Ok(0)`. `test/deferred_vacuum_test.dart` does the same across
+  the FFI and pins that the armed delay is drawn from the window rather
+  than being zero.
+
 ### Breaking — report6 follow-through
 
 - **Maintenance no longer re-parameterises the container it maintains

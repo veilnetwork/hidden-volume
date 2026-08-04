@@ -34,9 +34,13 @@
 /// for messenger integration patterns.
 library;
 
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'src/bindings.dart' as ffi;
+import 'src/deferred_vacuum.dart';
+
+export 'src/deferred_vacuum.dart' show DeferredVacuumWindow;
 
 // Re-export typed FFI types so callers don't import `src/`.
 export 'src/bindings.dart'
@@ -74,6 +78,7 @@ class HvSpace {
   HvSpace._(this._inner);
 
   final ffi.SpaceHandleBindings _inner;
+  final DeferredVacuum _deferredVacuum = DeferredVacuum();
 
   /// Create a fresh container at [path] and bootstrap a space inside it
   /// keyed by [password]. [argon] picks the KDF cost preset baked into
@@ -104,14 +109,23 @@ class HvSpace {
   /// [password]. Throws [HvException] with `kind == "AuthFailed"` if no
   /// space matches — deniability invariant: do NOT distinguish "wrong
   /// password" from "no such space" in your UI.
+  ///
+  /// The unlock takes the constant-time scan, which no longer scrubs
+  /// inline (audit HV-01) — so this arms the deferred scrub before
+  /// returning, at a random offset from now. See
+  /// [scheduleDeferredVacuum] to choose your own moment, and
+  /// [cancelDeferredVacuum] to take the job over entirely.
   factory HvSpace.open({
     required String path,
     required Uint8List password,
+    DeferredVacuumWindow vacuumWindow = DeferredVacuumWindow.standard,
   }) {
-    return HvSpace._(ffi.SpaceHandleBindings.open(
+    final s = HvSpace._(ffi.SpaceHandleBindings.open(
       path: path,
       password: password,
     ));
+    s.scheduleDeferredVacuum(window: vacuumWindow);
+    return s;
   }
 
   /// Add a **new parallel space** to an **existing** container at [path],
@@ -141,14 +155,20 @@ class HvSpace {
   /// Throws [HvException] with `kind == "Malformed"` if [keys] is not 64 bytes,
   /// `kind == "AuthFailed"` if the keys match no space here (same
   /// indistinguishable path as a wrong password).
+  ///
+  /// Constant-time like [HvSpace.open], and arms the deferred scrub the
+  /// same way.
   factory HvSpace.openWithKeys({
     required String path,
     required Uint8List keys,
+    DeferredVacuumWindow vacuumWindow = DeferredVacuumWindow.standard,
   }) {
-    return HvSpace._(ffi.SpaceHandleBindings.openWithKeys(
+    final s = HvSpace._(ffi.SpaceHandleBindings.openWithKeys(
       path: path,
       keys: keys,
     ));
+    s.scheduleDeferredVacuum(window: vacuumWindow);
+    return s;
   }
 
   /// Apply a batch of writes atomically as one commit. Returns the new
@@ -223,6 +243,59 @@ class HvSpace {
   /// Returns the count of slots scrubbed.
   int vacuumDataBatches() => _inner.vacuumDataBatches();
 
+  /// Run the post-open forward-secrecy scrub **now**, synchronously.
+  /// Returns the number of orphan index chunks reclaimed (`0` if there
+  /// was nothing owed, or the container is read-only).
+  ///
+  /// Prefer [scheduleDeferredVacuum] unless you have a moment of your own
+  /// that the unlock did not cause — the screen going off, the app being
+  /// backgrounded, the first message the user sends. Calling this right
+  /// after [HvSpace.open] re-creates audit HV-01 in the caller: the scrub
+  /// costs time and disk writes in proportion to the space's history, it
+  /// only happens when the password was right, and an observer who can see
+  /// either at the moment of unlock learns that.
+  int vacuumAfterOpen() => _inner.vacuumAfterOpen();
+
+  /// Arm [vacuumAfterOpen] to run once, after a delay drawn uniformly at
+  /// random from [window]. Returns the delay chosen.
+  ///
+  /// Already armed by [HvSpace.open] / [HvSpace.openWithKeys]; call this
+  /// only to re-arm with a different window. Re-arming cancels the
+  /// pending one — there is never more than one in flight — and [close]
+  /// cancels it for good.
+  ///
+  /// The timer fires on the isolate that armed it and the scrub is a
+  /// blocking FFI call, like every other method on this class; run
+  /// [HvSpace] off the UI isolate, or use [HvAsyncSpace], which owns a
+  /// worker.
+  ///
+  /// Failures are swallowed. There is nobody to report them to from a
+  /// timer callback, and a scrub that could not run is the state the
+  /// container was already in — the next open owes it again.
+  Duration scheduleDeferredVacuum({
+    DeferredVacuumWindow window = DeferredVacuumWindow.standard,
+    Random? random,
+  }) {
+    return _deferredVacuum.arm(window, () {
+      try {
+        _inner.vacuumAfterOpen();
+      } catch (_) {
+        // Closed under us, read-only, I/O — see the doc comment.
+      }
+    }, random: random);
+  }
+
+  /// The delay the armed deferred scrub is waiting, or `null` if none is
+  /// armed.
+  Duration? get pendingVacuumDelay => _deferredVacuum.pendingDelay;
+
+  /// Disarm the deferred scrub without running it. Use when the host is
+  /// taking the job over and will call [vacuumAfterOpen] at its own
+  /// moment — **not** as a way to skip it, since until something runs it
+  /// the values a previous session deleted stay recoverable by anyone who
+  /// later obtains the password and an old snapshot of the file.
+  void cancelDeferredVacuum() => _deferredVacuum.cancel();
+
   /// Export this space's `SpaceKeys` as 64 opaque bytes, for a master roster to
   /// store and later reopen this space via [HvSpace.openWithKeys] without its
   /// password. **Sensitive** key material — keep only inside another deniable
@@ -235,7 +308,13 @@ class HvSpace {
   ffi.HvIntegrityResult verifyIntegrity() => _inner.verifyIntegrity();
 
   /// Release the file lock and Rust-side resources. Idempotent.
-  void close() => _inner.close();
+  ///
+  /// Cancels any pending deferred scrub first — a timer that fires
+  /// against a freed handle is a use-after-free at the FFI boundary.
+  void close() {
+    _deferredVacuum.cancel();
+    _inner.close();
+  }
 }
 
 /// Inspect the plaintext header (salt, Argon cost, file size).

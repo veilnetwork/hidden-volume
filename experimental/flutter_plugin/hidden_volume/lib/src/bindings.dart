@@ -205,8 +205,8 @@ const Map<String, int> _methodChecksums = <String, int>{
   'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_create': 32815,
   'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_open': 49007,
   'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_open_with_keys': 38449,
-  'uniffi_hidden_volume_ffi_checksum_func_change_passwords': 27192,
-  'uniffi_hidden_volume_ffi_checksum_func_compact_known': 53321,
+  'uniffi_hidden_volume_ffi_checksum_func_change_passwords': 12821,
+  'uniffi_hidden_volume_ffi_checksum_func_compact_known': 9495,
   'uniffi_hidden_volume_ffi_checksum_func_header_info': 40142,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_commit': 27479,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_commit_seq': 20495,
@@ -236,6 +236,7 @@ const Map<String, int> _methodChecksums = <String, int>{
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_set_padding_policy': 6532,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_space_keys': 38453,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_stats': 53120,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_vacuum_after_open': 23213,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_vacuum_data_batches': 48307,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_verify_integrity': 55085,
 };
@@ -1145,6 +1146,11 @@ final _spVacuumDataBatches = _dylib.lookupFunction<
         int Function(int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_spacehandle_vacuum_data_batches');
 
+final _spVacuumAfterOpen = _dylib.lookupFunction<
+        ffi.Uint64 Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
+        int Function(int, ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_method_spacehandle_vacuum_after_open');
+
 // (handle) -> Vec<u8> (the 64-byte SpaceKeys export). Same wire shape as
 // list_namespaces / commit_history (u64 -> RustBuffer).
 final _spSpaceKeys = _dylib.lookupFunction<
@@ -1414,6 +1420,22 @@ class SpaceHandleBindings {
     _ensureOpen();
     final h = _cloneHandle();
     return rustCall<int>((s) => _spVacuumDataBatches(h, s));
+  }
+
+  /// Run the post-open forward-secrecy scrub the constant-time [open]
+  /// deliberately left undone (audit HV-01). Returns the number of orphan
+  /// index chunks scrubbed; `0` on a read-only container.
+  ///
+  /// **Call it away from the unlock** — see `HvSpace.scheduleDeferredVacuum`
+  /// in `lib/hidden_volume.dart`, which is what a host should normally use.
+  /// Running it in the line after [open] moves the same history-proportional
+  /// milliseconds and disk writes a moment to the right and leaves them
+  /// correlated with the unlock having succeeded, which is the whole thing
+  /// the equalized scan removes.
+  int vacuumAfterOpen() {
+    _ensureOpen();
+    final h = _cloneHandle();
+    return rustCall<int>((s) => _spVacuumAfterOpen(h, s));
   }
 
   /// Export this space's `SpaceKeys` as 64 opaque bytes for a master roster.
