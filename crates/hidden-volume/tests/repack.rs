@@ -18,7 +18,7 @@ use common::{fast_params, scratch_path};
 
 fn fast_repack_options() -> RepackOptions {
     RepackOptions {
-        argon2: fast_params(),
+        argon2: Some(fast_params()),
         ..Default::default()
     }
 }
@@ -379,7 +379,7 @@ fn repack_with_param_rotation() {
         version: hidden_volume::crypto::kdf::PARAMS_VERSION as u32,
     };
     let options = RepackOptions {
-        argon2: new_params,
+        argon2: Some(new_params),
         ..Default::default()
     };
     Container::repack(&src, &dst, &[b"pw"], options).unwrap();

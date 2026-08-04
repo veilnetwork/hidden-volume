@@ -67,10 +67,30 @@ impl Default for ContainerOptions {
 
 /// Options for [`Container::repack`] / [`Container::compact_known`].
 ///
-/// The `argon2`, `initial_garbage_chunks`, and `padding_policy` fields
-/// are applied to the destination container — repack is a chance to
-/// "rotate" container parameters (e.g. up-tune Argon2 cost as a device
-/// gets faster, or change the decoy size).
+/// `initial_garbage_chunks` and `superblock_replicas` are applied to the
+/// destination as given. `argon2` and `padding_policy` are **`Option`al,
+/// and `None` means "keep what the source had"** — repack is still the
+/// chance to rotate container parameters (up-tune Argon2 cost as a device
+/// gets faster, change the decoy size), but it takes saying so.
+///
+/// ## Why those two preserve by default (audit HV-09)
+///
+/// They used to be plain fields whose `Default` was
+/// [`Argon2Params::DEFAULT`] and [`PaddingPolicy::None`] — and all three
+/// production callers (the FFI `compact_known` / `change_passwords`, the
+/// `hv repack` CLI) passed `RepackOptions::default()`. So a container
+/// created at 256 MiB / t4 / p4 came out of a password rotation at
+/// 64 MiB / t3 / p1: a factor of four off an offline brute force, written
+/// into the header for good, with nothing said to the user. The KDF half
+/// needed no user action at all — the host app calls compaction itself on
+/// a size threshold. Padding went the same way, from a persisted preset
+/// to none, un-masking per-commit growth for a multi-snapshot observer.
+///
+/// The two fields must travel together: [`Container::create_with_options`]
+/// re-derives the header's padding bits from `padding_policy`, so
+/// carrying the source's `Argon2Params` while defaulting the policy would
+/// write a header whose cost is preserved and whose padding index is
+/// zeroed.
 ///
 /// After audit pass 13 (R-NSKIND), repack routes namespaces by their
 /// persisted [`crate::tx::NamespaceKind`] byte read from the source's
@@ -82,25 +102,31 @@ impl Default for ContainerOptions {
 /// `#[non_exhaustive]`; field additions are a major bump after v1.0.
 #[derive(Debug, Clone)]
 pub struct RepackOptions {
-    /// Argon2id KDF parameters for the destination container (use
-    /// this to up-tune Argon2 cost during a repack).
-    pub argon2: Argon2Params,
+    /// Argon2id KDF parameters for the destination container. `None`
+    /// — keep the source's, which is what maintenance wants; `Some(p)`
+    /// — rotate to `p`, which is a deliberate re-parameterisation.
+    pub argon2: Option<Argon2Params>,
     /// Decoy initial garbage chunks for the destination — same role
     /// as in [`ContainerOptions`].
     pub initial_garbage_chunks: u64,
-    /// Padding policy applied to the destination on each commit
-    /// during repack.
-    pub padding_policy: PaddingPolicy,
+    /// Padding policy applied to the destination on each commit during
+    /// repack, and persisted in its header. `None` — keep the source's
+    /// persisted policy.
+    pub padding_policy: Option<PaddingPolicy>,
     /// Superblock replica count for the destination's commits.
     pub superblock_replicas: u8,
 }
 
 impl Default for RepackOptions {
+    /// Preserve the source's security posture; change only what the
+    /// caller names. See the struct docs for why `argon2` and
+    /// `padding_policy` are not `Argon2Params::DEFAULT` /
+    /// `PaddingPolicy::None` here.
     fn default() -> Self {
         Self {
-            argon2: Argon2Params::DEFAULT,
+            argon2: None,
             initial_garbage_chunks: 0,
-            padding_policy: PaddingPolicy::None,
+            padding_policy: None,
             superblock_replicas: file::DEFAULT_SUPERBLOCK_REPLICAS,
         }
     }
@@ -828,8 +854,12 @@ impl Container {
     /// - The destination has fresh `salt` and `container_id` — even
     ///   the same password derives different per-chunk keys. Forensics
     ///   on a backup of `source` finds no help in `dest`.
-    /// - `dest` gets `options.argon2` / `initial_garbage_chunks` /
-    ///   `padding_policy` (parameter rotation opportunity).
+    /// - `dest` gets `options.initial_garbage_chunks` /
+    ///   `superblock_replicas`, and — where `options` names them —
+    ///   `argon2` / `padding_policy` (parameter rotation opportunity).
+    ///   Where it does not, those two are copied from `source`; see
+    ///   [`RepackOptions`] for why maintenance must not silently
+    ///   re-parameterise a container (audit HV-09).
     ///
     /// Errors:
     /// - [`Error::Internal`] if `source == dest` or any password fails
@@ -1021,10 +1051,23 @@ impl Container {
         // create_space(...) inside the per-password loop without
         // re-paying the LOCK_EX dance. (LOCK_EX is held on `dest`
         // for the duration of this whole function.)
+        // Audit HV-09: an unspecified field is the SOURCE's, not the
+        // library's default. `src` is held under an exclusive lock for
+        // this whole function, so reading its header here cannot race a
+        // writer; `padding_policy()` is the policy the open decoded out
+        // of that same header's bits 16..24.
+        //
+        // Both must be read, not just `argon2`: `create_with_options`
+        // re-derives the destination header's padding index from
+        // `padding_policy`, so preserving the Argon2 cost while letting
+        // the policy fall back to `None` would zero the index of a
+        // container whose cost it had just faithfully carried over.
         let dst_options = ContainerOptions {
-            argon2: options.argon2,
+            argon2: options.argon2.unwrap_or_else(|| src.params()),
             initial_garbage_chunks: options.initial_garbage_chunks,
-            padding_policy: options.padding_policy,
+            padding_policy: options
+                .padding_policy
+                .unwrap_or_else(|| src.padding_policy()),
             superblock_replicas: options.superblock_replicas,
         };
         let mut dst = Container::create_with_options(dest, dst_options)?;

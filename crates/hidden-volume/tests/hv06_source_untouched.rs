@@ -40,9 +40,9 @@ fn fast_container_options(initial_garbage_chunks: u64) -> ContainerOptions {
 
 fn fast_repack_options() -> RepackOptions {
     RepackOptions {
-        argon2: fast_params(),
+        argon2: Some(fast_params()),
         initial_garbage_chunks: 0,
-        padding_policy: hidden_volume::padding::PaddingPolicy::None,
+        padding_policy: Some(hidden_volume::padding::PaddingPolicy::None),
         superblock_replicas: 1,
     }
 }

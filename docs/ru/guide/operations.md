@@ -198,7 +198,11 @@ hidden_volume::Container::change_passwords(
     path,
     &[(password, password)],   // identity map = мигрируем только параметры
     RepackOptions {
-        argon2: Argon2Params::HEAVY,   // было DEFAULT
+        // `Some(..)` — смена параметров это ровно то, о чём
+        // обслуживающую перезапись нужно ПОПРОСИТЬ. `RepackOptions`
+        // по умолчанию переносит Argon2-стоимость и политику паддинга
+        // источника без изменений (аудит HV-09).
+        argon2: Some(Argon2Params::HEAVY),   // было DEFAULT
         ..Default::default()
     },
 )?;

@@ -36,7 +36,7 @@ fn fast_options() -> ContainerOptions {
 
 fn fast_repack_options() -> RepackOptions {
     RepackOptions {
-        argon2: Argon2Params::MIN,
+        argon2: Some(Argon2Params::MIN),
         ..Default::default()
     }
 }

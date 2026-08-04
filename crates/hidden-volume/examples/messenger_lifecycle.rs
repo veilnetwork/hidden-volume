@@ -145,9 +145,9 @@ fn main() -> hidden_volume::Result<()> {
 
     println!("== Step 7b: compact_known with BOTH passwords (full vacuum) ==");
     let opts = RepackOptions {
-        argon2: Argon2Params::MIN,
+        argon2: Some(Argon2Params::MIN),
         initial_garbage_chunks: 512,
-        padding_policy: PaddingPolicy::BucketGrowth { bucket_chunks: 256 },
+        padding_policy: Some(PaddingPolicy::BucketGrowth { bucket_chunks: 256 }),
         superblock_replicas: 3,
     };
     Container::compact_known(&path, &[main_password, hidden_password], opts)?;

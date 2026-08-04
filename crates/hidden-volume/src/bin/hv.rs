@@ -445,9 +445,10 @@ fn cmd_repack(source: PathBuf, dest: PathBuf) -> Result<()> {
         )));
     }
     let pw_refs: Vec<&[u8]> = passwords.iter().map(|p| p.as_slice()).collect();
-    // `RepackOptions::default()` already uses `Argon2Params::DEFAULT`
-    // for the destination. Audit F5 (2026-05-03) — drop the redundant
-    // explicit field.
+    // `RepackOptions::default()` carries the SOURCE's Argon2 cost and
+    // padding policy over to the destination (audit HV-09) — a repack
+    // from the CLI is maintenance, and this subcommand has no flag with
+    // which to ask for a re-parameterisation, so it must not perform one.
     Container::repack(&source, &dest, &pw_refs, RepackOptions::default())?;
     println!("repacked: {} → {}", source.display(), dest.display());
     Ok(())

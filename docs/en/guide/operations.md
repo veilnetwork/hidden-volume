@@ -192,7 +192,11 @@ hidden_volume::Container::change_passwords(
     path,
     &[(password, password)],   // identity map = migrate params only
     RepackOptions {
-        argon2: Argon2Params::HEAVY,   // was DEFAULT
+        // `Some(..)` — a re-parameterisation is the one thing a
+        // maintenance rewrite must be ASKED to do. A default
+        // `RepackOptions` carries the source's Argon2 cost and padding
+        // policy over unchanged (audit HV-09).
+        argon2: Some(Argon2Params::HEAVY),   // was DEFAULT
         ..Default::default()
     },
 )?;
