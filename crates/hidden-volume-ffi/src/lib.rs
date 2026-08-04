@@ -414,6 +414,16 @@ impl std::fmt::Debug for PasswordRotation {
 /// rewrite (Phase 1 read + Phase 2 write + atomic rename). Returns
 /// [`HvError::Busy`] if any other process / handle has the file
 /// open.
+///
+/// **The container's security posture is preserved** — the compacted
+/// file keeps the source's Argon2 cost and its persisted padding
+/// policy. This surface has no way to ask for anything else, and the
+/// default it passes used to mean `Argon2Params::DEFAULT` +
+/// `PaddingPolicy::None`: a container created HEAVY was silently
+/// rewritten at a quarter of the brute-force cost, by a call the host
+/// app makes on its own size threshold (audit HV-09). Callers that
+/// genuinely want to re-parameterise go through the Rust API's
+/// `RepackOptions`.
 #[uniffi::export]
 pub fn compact_known(path: String, passwords: Vec<Vec<u8>>) -> HvResult<()> {
     let p = PathBuf::from(path);
@@ -437,8 +447,10 @@ pub fn compact_known(path: String, passwords: Vec<Vec<u8>>) -> HvResult<()> {
 /// a hidden space, include it as a no-op `(p, p)` rotation.
 ///
 /// Audit pass 11 R-FFI-1. See [`compact_known`] for the locking
-/// model and the threat-model rationale for the destructive-drop
-/// semantics on unlisted spaces.
+/// model, the threat-model rationale for the destructive-drop
+/// semantics on unlisted spaces, and the preserved Argon2 / padding
+/// posture (audit HV-09) — a password change must not also be a
+/// downgrade of the KDF the new password is protected by.
 #[uniffi::export]
 pub fn change_passwords(path: String, rotations: Vec<PasswordRotation>) -> HvResult<()> {
     let p = PathBuf::from(path);

@@ -27,9 +27,9 @@ use common::{fast_params, scratch_path};
 
 fn fast_repack_options() -> RepackOptions {
     RepackOptions {
-        argon2: fast_params(),
+        argon2: Some(fast_params()),
         initial_garbage_chunks: 0,
-        padding_policy: PaddingPolicy::None,
+        padding_policy: Some(PaddingPolicy::None),
         superblock_replicas: 3,
     }
 }
