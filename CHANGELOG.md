@@ -12,6 +12,37 @@ format.
 
 ## [Unreleased]
 
+### Breaking — report6 follow-through
+
+- **Maintenance no longer re-parameterises the container it maintains
+  (HV-09).** `RepackOptions::default()` meant `Argon2Params::DEFAULT` and
+  `PaddingPolicy::None` for the destination, and all three production
+  callers passed exactly that — the FFI `compact_known` and
+  `change_passwords`, and the `hv repack` CLI. A container created at
+  256 MiB / t4 / p4 therefore came out of a password rotation at
+  64 MiB / t3 / p1: **four times cheaper to brute-force offline**, written
+  into the header permanently, with nothing said to the user. The KDF half
+  needed no user action at all, since a host app calls compaction itself on
+  a size threshold. Padding went the same way, from a persisted preset to
+  none, un-masking per-commit growth for a multi-snapshot observer.
+
+  Breaking, in the public Rust API: `RepackOptions::argon2` is
+  `Option<Argon2Params>` and `RepackOptions::padding_policy` is
+  `Option<PaddingPolicy>`. `None` — the new default for both — copies the
+  source's; `Some(..)` rotates, which is what a deliberate
+  re-parameterisation now has to say. The three production callers are
+  unchanged in code and now preserve; the FFI surface has no way to ask
+  for a rotation, which is the correct posture for it.
+
+  Both fields had to move together. `Container::create_with_options`
+  re-derives the destination header's padding bits from `padding_policy`,
+  so preserving `Argon2Params` alone would carry the cost across and zero
+  the padding index of the very header it had just copied.
+  `tests/repack_preserves_posture.rs` asserts the two halves separately
+  for `compact_known`, `change_passwords` and out-of-place `repack`, plus
+  a fourth test that an explicit `Some(..)` still reaches the destination
+  — preserving unconditionally would otherwise pass the first three.
+
 ### Performance — report6 follow-through
 
 - **A page of pagination costs the page, not the history (HV-05).** None of

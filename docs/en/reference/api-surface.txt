@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-04T10:47:38Z
+# Captured: 2026-08-04T10:56:32Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -74,44 +74,44 @@ container/mod.rs:  5:pub mod header;
 container/mod.rs:  9:pub use file::{ContainerFile, DEFAULT_SUPERBLOCK_REPLICAS};
 container/mod.rs:  10:pub use header::Header;
 container/mod.rs:  40:pub struct ContainerOptions {
-container/mod.rs:  84:pub struct RepackOptions {
-container/mod.rs:  128:pub struct Container {
-container/mod.rs:  137:    pub fn create<P: AsRef<Path>>(path: P, params: Argon2Params) -> Result<Self> {
-container/mod.rs:  157:    pub fn create_with_options<P: AsRef<Path>>(path: P, options: ContainerOptions) -> Result<Self> {
-container/mod.rs:  235:    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-container/mod.rs:  263:    pub fn open_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
-container/mod.rs:  303:    pub fn open_exclusive_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
-container/mod.rs:  318:    pub fn is_readonly(&self) -> bool {
-container/mod.rs:  325:    pub fn set_padding_policy(&mut self, policy: PaddingPolicy) -> Result<()> {
-container/mod.rs:  335:    pub fn padding_policy(&self) -> PaddingPolicy {
-container/mod.rs:  342:    pub fn set_superblock_replicas(&mut self, replicas: u8) -> Result<()> {
-container/mod.rs:  352:    pub fn superblock_replicas(&self) -> u8 {
-container/mod.rs:  360:    pub fn header(&self) -> &Header {
-container/mod.rs:  366:    pub fn params(&self) -> Argon2Params {
-container/mod.rs:  378:    pub fn create_space(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  407:    pub fn open_space(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  462:    pub fn open_space_verified(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  471:    pub fn open_space_with_keys_verified(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
-container/mod.rs:  515:    pub fn derive_space_keys(&self, password: &[u8]) -> Result<SpaceKeys> {
-container/mod.rs:  531:    pub fn open_space_with_keys(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
-container/mod.rs:  544:    pub fn open_space_cancellable(
-container/mod.rs:  558:    pub fn open_space_with_keys_cancellable(
-container/mod.rs:  632:    pub fn open_space_parallel(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  640:    pub fn open_space_with_keys_parallel(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
-container/mod.rs:  670:    pub fn open_space_mmap(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  678:    pub fn open_space_with_keys_mmap(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
-container/mod.rs:  726:    pub fn open_space_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  735:    pub fn open_space_with_keys_constant_time(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
-container/mod.rs:  760:    pub fn open_space_parallel_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  768:    pub fn open_space_with_keys_parallel_constant_time(
-container/mod.rs:  793:    pub fn open_space_mmap_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  801:    pub fn open_space_with_keys_mmap_constant_time(
-container/mod.rs:  879:    pub fn repack(
-container/mod.rs:  901:    pub fn repack_cancellable(
-container/mod.rs:  1126:    pub fn compact_known(
-container/mod.rs:  1137:    pub fn compact_known_cancellable(
-container/mod.rs:  1196:    pub fn change_passwords(
-container/mod.rs:  1207:    pub fn change_passwords_cancellable(
+container/mod.rs:  104:pub struct RepackOptions {
+container/mod.rs:  154:pub struct Container {
+container/mod.rs:  163:    pub fn create<P: AsRef<Path>>(path: P, params: Argon2Params) -> Result<Self> {
+container/mod.rs:  183:    pub fn create_with_options<P: AsRef<Path>>(path: P, options: ContainerOptions) -> Result<Self> {
+container/mod.rs:  261:    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+container/mod.rs:  289:    pub fn open_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
+container/mod.rs:  329:    pub fn open_exclusive_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
+container/mod.rs:  344:    pub fn is_readonly(&self) -> bool {
+container/mod.rs:  351:    pub fn set_padding_policy(&mut self, policy: PaddingPolicy) -> Result<()> {
+container/mod.rs:  361:    pub fn padding_policy(&self) -> PaddingPolicy {
+container/mod.rs:  368:    pub fn set_superblock_replicas(&mut self, replicas: u8) -> Result<()> {
+container/mod.rs:  378:    pub fn superblock_replicas(&self) -> u8 {
+container/mod.rs:  386:    pub fn header(&self) -> &Header {
+container/mod.rs:  392:    pub fn params(&self) -> Argon2Params {
+container/mod.rs:  404:    pub fn create_space(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  433:    pub fn open_space(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  488:    pub fn open_space_verified(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  497:    pub fn open_space_with_keys_verified(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
+container/mod.rs:  541:    pub fn derive_space_keys(&self, password: &[u8]) -> Result<SpaceKeys> {
+container/mod.rs:  557:    pub fn open_space_with_keys(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
+container/mod.rs:  570:    pub fn open_space_cancellable(
+container/mod.rs:  584:    pub fn open_space_with_keys_cancellable(
+container/mod.rs:  658:    pub fn open_space_parallel(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  666:    pub fn open_space_with_keys_parallel(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
+container/mod.rs:  696:    pub fn open_space_mmap(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  704:    pub fn open_space_with_keys_mmap(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
+container/mod.rs:  752:    pub fn open_space_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  761:    pub fn open_space_with_keys_constant_time(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
+container/mod.rs:  786:    pub fn open_space_parallel_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  794:    pub fn open_space_with_keys_parallel_constant_time(
+container/mod.rs:  819:    pub fn open_space_mmap_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  827:    pub fn open_space_with_keys_mmap_constant_time(
+container/mod.rs:  909:    pub fn repack(
+container/mod.rs:  931:    pub fn repack_cancellable(
+container/mod.rs:  1169:    pub fn compact_known(
+container/mod.rs:  1180:    pub fn compact_known_cancellable(
+container/mod.rs:  1239:    pub fn change_passwords(
+container/mod.rs:  1250:    pub fn change_passwords_cancellable(
 crypto/aead.rs:  21:pub struct ChunkAead {
 crypto/aead.rs:  36:    pub fn new(key: &[u8; 32]) -> Self {
 crypto/aead.rs:  46:    pub fn seal(&self, plaintext: &[u8], aad: [u8; AAD_LEN]) -> Result<([u8; NONCE_LEN], Vec<u8>)> {
@@ -357,73 +357,73 @@ lib.rs:  280:pub enum PaddingPreset {
 lib.rs:  317:pub struct HeaderInfo {
 lib.rs:  335:pub fn header_info(path: String) -> HvResult<HeaderInfo> {
 lib.rs:  382:pub struct PasswordRotation {
-lib.rs:  418:pub fn compact_known(path: String, passwords: Vec<Vec<u8>>) -> HvResult<()> {
-lib.rs:  443:pub fn change_passwords(path: String, rotations: Vec<PasswordRotation>) -> HvResult<()> {
-lib.rs:  483:pub enum WriteOp {
-lib.rs:  565:pub struct LogEntry {
-lib.rs:  587:pub struct StatsInfo {
-lib.rs:  620:    pub fn utilization_ratio(&self) -> f64 {
-lib.rs:  631:pub struct NamespaceCount {
-lib.rs:  646:pub enum OperationOutcome {
-lib.rs:  689:pub struct AbandonedOperation {
-lib.rs:  715:pub struct IntegrityResult {
-lib.rs:  741:pub struct SpaceHandle {
-lib.rs:  827:    pub fn create(
-lib.rs:  878:    pub fn add_space(path: String, password: Vec<u8>) -> HvResult<std::sync::Arc<Self>> {
-lib.rs:  907:    pub fn open_with_keys(path: String, keys: Vec<u8>) -> HvResult<std::sync::Arc<Self>> {
-lib.rs:  941:    pub fn space_keys(&self) -> HvResult<Vec<u8>> {
-lib.rs:  957:    pub fn open(path: String, password: Vec<u8>) -> HvResult<std::sync::Arc<Self>> {
-lib.rs:  972:    pub fn commit_seq(&self) -> HvResult<u64> {
-lib.rs:  979:    pub fn commit_history(&self) -> HvResult<Vec<u64>> {
-lib.rs:  994:    pub fn set_padding_policy(&self, preset: PaddingPreset) -> HvResult<()> {
-lib.rs:  1002:    pub fn list_namespaces(&self) -> HvResult<Vec<u8>> {
-lib.rs:  1009:    pub fn count(&self, namespace: u8) -> HvResult<u64> {
-lib.rs:  1036:    pub fn kv_keys(&self, namespace: u8) -> HvResult<Vec<u8>> {
-lib.rs:  1057:    pub fn kv_keys_page(
-lib.rs:  1072:    pub fn get(&self, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
-lib.rs:  1079:    pub fn read_log(&self, namespace: u8, log_id: u64) -> HvResult<Option<Vec<u8>>> {
-lib.rs:  1088:    pub fn iter_log_range(
-lib.rs:  1108:    pub fn commit(&self, ops: Vec<WriteOp>) -> HvResult<u64> {
-lib.rs:  1146:    pub fn stats(&self) -> HvResult<StatsInfo> {
-lib.rs:  1169:    pub fn verify_integrity(&self) -> HvResult<IntegrityResult> {
-lib.rs:  1196:    pub fn vacuum_data_batches(&self) -> HvResult<u64> {
-lib.rs:  1218:    pub fn erase_namespace(&self, namespace: u8) -> HvResult<u64> {
-lib.rs:  1298:pub struct AsyncSpaceHandle {
-lib.rs:  1370:    pub async fn create(
-lib.rs:  1403:    pub async fn open(path: String, password: Vec<u8>) -> HvResult<Arc<Self>> {
-lib.rs:  1420:    pub async fn add_space(path: String, password: Vec<u8>) -> HvResult<Arc<Self>> {
-lib.rs:  1437:    pub async fn open_with_keys(path: String, keys: Vec<u8>) -> HvResult<Arc<Self>> {
-lib.rs:  1455:    pub async fn space_keys(&self) -> HvResult<Vec<u8>> {
-lib.rs:  1467:    pub async fn commit_seq(&self) -> HvResult<u64> {
-lib.rs:  1473:    pub async fn commit_history(&self) -> HvResult<Vec<u64>> {
-lib.rs:  1481:    pub async fn set_padding_policy(&self, preset: PaddingPreset) -> HvResult<()> {
-lib.rs:  1490:    pub async fn list_namespaces(&self) -> HvResult<Vec<u8>> {
-lib.rs:  1499:    pub async fn count(&self, namespace: u8) -> HvResult<u64> {
-lib.rs:  1509:    pub async fn get(&self, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
-lib.rs:  1518:    pub async fn read_log(&self, namespace: u8, log_id: u64) -> HvResult<Option<Vec<u8>>> {
-lib.rs:  1527:    pub async fn iter_log_range(
-lib.rs:  1546:    pub async fn commit(&self, ops: Vec<WriteOp>) -> HvResult<u64> {
-lib.rs:  1595:    pub async fn stats(&self) -> HvResult<StatsInfo> {
-lib.rs:  1619:    pub async fn verify_integrity(&self) -> HvResult<IntegrityResult> {
-lib.rs:  1634:    pub async fn vacuum_data_batches(&self) -> HvResult<u64> {
-lib.rs:  1644:    pub async fn erase_namespace(&self, namespace: u8) -> HvResult<u64> {
-lib.rs:  1674:    pub fn abandoned_operations(&self) -> Vec<AbandonedOperation> {
-lib.rs:  1684:    pub fn clear_settled_operations(&self) {
-lib.rs:  1691:    pub fn forgotten_abandonments(&self) -> u64 {
-lib.rs:  1751:pub struct MultiSpaceHandle {
-lib.rs:  1760:    pub fn open(path: String) -> HvResult<std::sync::Arc<Self>> {
-lib.rs:  1771:    pub fn open_space(&self, keys: Vec<u8>) -> HvResult<u32> {
-lib.rs:  1790:    pub fn vacuum_space(&self, id: u32) -> HvResult<()> {
-lib.rs:  1796:    pub fn space_count(&self) -> HvResult<u32> {
-lib.rs:  1803:    pub fn set_padding_policy(&self, preset: PaddingPreset) -> HvResult<()> {
-lib.rs:  1810:    pub fn space_keys(&self, id: u32) -> HvResult<Vec<u8>> {
-lib.rs:  1821:    pub fn commit(&self, id: u32, ops: Vec<WriteOp>) -> HvResult<u64> {
-lib.rs:  1851:    pub fn get(&self, id: u32, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
-lib.rs:  1858:    pub fn read_log(&self, id: u32, namespace: u8, log_id: u64) -> HvResult<Option<Vec<u8>>> {
-lib.rs:  1866:    pub fn iter_log_range(
-lib.rs:  1885:    pub fn count(&self, id: u32, namespace: u8) -> HvResult<u64> {
-lib.rs:  1897:    pub fn kv_keys(&self, id: u32, namespace: u8) -> HvResult<Vec<u8>> {
-lib.rs:  1907:    pub fn kv_keys_page(
-lib.rs:  1923:    pub fn commit_seq(&self, id: u32) -> HvResult<u64> {
-lib.rs:  1930:    pub fn vacuum_data_batches(&self, id: u32) -> HvResult<u64> {
+lib.rs:  428:pub fn compact_known(path: String, passwords: Vec<Vec<u8>>) -> HvResult<()> {
+lib.rs:  455:pub fn change_passwords(path: String, rotations: Vec<PasswordRotation>) -> HvResult<()> {
+lib.rs:  495:pub enum WriteOp {
+lib.rs:  577:pub struct LogEntry {
+lib.rs:  599:pub struct StatsInfo {
+lib.rs:  632:    pub fn utilization_ratio(&self) -> f64 {
+lib.rs:  643:pub struct NamespaceCount {
+lib.rs:  658:pub enum OperationOutcome {
+lib.rs:  701:pub struct AbandonedOperation {
+lib.rs:  727:pub struct IntegrityResult {
+lib.rs:  753:pub struct SpaceHandle {
+lib.rs:  839:    pub fn create(
+lib.rs:  890:    pub fn add_space(path: String, password: Vec<u8>) -> HvResult<std::sync::Arc<Self>> {
+lib.rs:  919:    pub fn open_with_keys(path: String, keys: Vec<u8>) -> HvResult<std::sync::Arc<Self>> {
+lib.rs:  953:    pub fn space_keys(&self) -> HvResult<Vec<u8>> {
+lib.rs:  969:    pub fn open(path: String, password: Vec<u8>) -> HvResult<std::sync::Arc<Self>> {
+lib.rs:  984:    pub fn commit_seq(&self) -> HvResult<u64> {
+lib.rs:  991:    pub fn commit_history(&self) -> HvResult<Vec<u64>> {
+lib.rs:  1006:    pub fn set_padding_policy(&self, preset: PaddingPreset) -> HvResult<()> {
+lib.rs:  1014:    pub fn list_namespaces(&self) -> HvResult<Vec<u8>> {
+lib.rs:  1021:    pub fn count(&self, namespace: u8) -> HvResult<u64> {
+lib.rs:  1048:    pub fn kv_keys(&self, namespace: u8) -> HvResult<Vec<u8>> {
+lib.rs:  1069:    pub fn kv_keys_page(
+lib.rs:  1084:    pub fn get(&self, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
+lib.rs:  1091:    pub fn read_log(&self, namespace: u8, log_id: u64) -> HvResult<Option<Vec<u8>>> {
+lib.rs:  1100:    pub fn iter_log_range(
+lib.rs:  1120:    pub fn commit(&self, ops: Vec<WriteOp>) -> HvResult<u64> {
+lib.rs:  1158:    pub fn stats(&self) -> HvResult<StatsInfo> {
+lib.rs:  1181:    pub fn verify_integrity(&self) -> HvResult<IntegrityResult> {
+lib.rs:  1208:    pub fn vacuum_data_batches(&self) -> HvResult<u64> {
+lib.rs:  1230:    pub fn erase_namespace(&self, namespace: u8) -> HvResult<u64> {
+lib.rs:  1310:pub struct AsyncSpaceHandle {
+lib.rs:  1382:    pub async fn create(
+lib.rs:  1415:    pub async fn open(path: String, password: Vec<u8>) -> HvResult<Arc<Self>> {
+lib.rs:  1432:    pub async fn add_space(path: String, password: Vec<u8>) -> HvResult<Arc<Self>> {
+lib.rs:  1449:    pub async fn open_with_keys(path: String, keys: Vec<u8>) -> HvResult<Arc<Self>> {
+lib.rs:  1467:    pub async fn space_keys(&self) -> HvResult<Vec<u8>> {
+lib.rs:  1479:    pub async fn commit_seq(&self) -> HvResult<u64> {
+lib.rs:  1485:    pub async fn commit_history(&self) -> HvResult<Vec<u64>> {
+lib.rs:  1493:    pub async fn set_padding_policy(&self, preset: PaddingPreset) -> HvResult<()> {
+lib.rs:  1502:    pub async fn list_namespaces(&self) -> HvResult<Vec<u8>> {
+lib.rs:  1511:    pub async fn count(&self, namespace: u8) -> HvResult<u64> {
+lib.rs:  1521:    pub async fn get(&self, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
+lib.rs:  1530:    pub async fn read_log(&self, namespace: u8, log_id: u64) -> HvResult<Option<Vec<u8>>> {
+lib.rs:  1539:    pub async fn iter_log_range(
+lib.rs:  1558:    pub async fn commit(&self, ops: Vec<WriteOp>) -> HvResult<u64> {
+lib.rs:  1607:    pub async fn stats(&self) -> HvResult<StatsInfo> {
+lib.rs:  1631:    pub async fn verify_integrity(&self) -> HvResult<IntegrityResult> {
+lib.rs:  1646:    pub async fn vacuum_data_batches(&self) -> HvResult<u64> {
+lib.rs:  1656:    pub async fn erase_namespace(&self, namespace: u8) -> HvResult<u64> {
+lib.rs:  1686:    pub fn abandoned_operations(&self) -> Vec<AbandonedOperation> {
+lib.rs:  1696:    pub fn clear_settled_operations(&self) {
+lib.rs:  1703:    pub fn forgotten_abandonments(&self) -> u64 {
+lib.rs:  1763:pub struct MultiSpaceHandle {
+lib.rs:  1772:    pub fn open(path: String) -> HvResult<std::sync::Arc<Self>> {
+lib.rs:  1783:    pub fn open_space(&self, keys: Vec<u8>) -> HvResult<u32> {
+lib.rs:  1802:    pub fn vacuum_space(&self, id: u32) -> HvResult<()> {
+lib.rs:  1808:    pub fn space_count(&self) -> HvResult<u32> {
+lib.rs:  1815:    pub fn set_padding_policy(&self, preset: PaddingPreset) -> HvResult<()> {
+lib.rs:  1822:    pub fn space_keys(&self, id: u32) -> HvResult<Vec<u8>> {
+lib.rs:  1833:    pub fn commit(&self, id: u32, ops: Vec<WriteOp>) -> HvResult<u64> {
+lib.rs:  1863:    pub fn get(&self, id: u32, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
+lib.rs:  1870:    pub fn read_log(&self, id: u32, namespace: u8, log_id: u64) -> HvResult<Option<Vec<u8>>> {
+lib.rs:  1878:    pub fn iter_log_range(
+lib.rs:  1897:    pub fn count(&self, id: u32, namespace: u8) -> HvResult<u64> {
+lib.rs:  1909:    pub fn kv_keys(&self, id: u32, namespace: u8) -> HvResult<Vec<u8>> {
+lib.rs:  1919:    pub fn kv_keys_page(
+lib.rs:  1935:    pub fn commit_seq(&self, id: u32) -> HvResult<u64> {
+lib.rs:  1942:    pub fn vacuum_data_batches(&self, id: u32) -> HvResult<u64> {
 

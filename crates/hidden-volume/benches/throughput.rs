@@ -303,7 +303,7 @@ fn bench_repack_1000(c: &mut Criterion) {
             |(src, dst)| {
                 use hidden_volume::container::RepackOptions;
                 let opts = RepackOptions {
-                    argon2: Argon2Params::MIN,
+                    argon2: Some(Argon2Params::MIN),
                     ..Default::default()
                 };
                 Container::repack(&src, &dst, &[b"pw"], opts).unwrap();
