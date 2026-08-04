@@ -12,6 +12,31 @@ format.
 
 ## [Unreleased]
 
+### Performance — report6 follow-through
+
+- **A page of pagination costs the page, not the history (HV-05).** None of
+  the four paged walkers pruned by the separating key: each one descended
+  from child 0 and filtered in the leaf, so every page re-read the entire
+  prefix it had already returned. At N = 20 000, one page from the tail
+  cost **94** chunk reads for `list_keys_after` and **130** for each of
+  `iter_log_after` / `iter_log_before` / `iter_log_range`, against **4**
+  and **5** for the first page — and paging all the way through was
+  therefore O(N) per page, O(N²) overall. It is now **4 and 5 at both ends**:
+  every internal node starts its loop at `InternalNode::child_index_for`
+  (the binary search point-reads already used) instead of at zero.
+
+  The audit named the KV walker and the forward log walker. The other two
+  were found by reading the file: `iter_log_before` had the mirror-image
+  defect, and `iter_log_range` — the one an app actually calls for chat
+  scrollback — stopped early on its UPPER bound and ignored its lower one
+  entirely, which is the worst combination, since scrollback is exactly the
+  caller that moves the lower bound one page at a time.
+
+  Correct results were never in question: the leaf filter was right before
+  and is right now. So the regression test is `space::pagination_cost_tests`,
+  which counts chunk reads through the `CHUNK_READS` probe — a test that
+  only checked the page contents passes against the defect.
+
 ### Breaking — audit follow-through
 
 - **`Debug` printed decrypted keys, values and log payloads (HV-01,
