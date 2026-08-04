@@ -1211,6 +1211,32 @@ impl SpaceHandle {
         Ok(n as u64)
     }
 
+    /// Run the post-open forward-secrecy scrub that this handle's open
+    /// deliberately did not (audit HV-01). Returns the number of orphan
+    /// `IndexNode` chunks scrubbed; `0` on a read-only container.
+    ///
+    /// [`Self::open`] and [`Self::open_with_keys`] take the constant-time
+    /// path, because this surface is the deniability app's. That path
+    /// equalizes the scan so unlock latency cannot say whether a password
+    /// matched — and it used to vacuum inline right afterwards, which
+    /// spent milliseconds and disk writes proportional to the space's
+    /// history, on the success path only, and handed the answer straight
+    /// back to whoever was watching the process while the password was
+    /// being typed.
+    ///
+    /// **Call it away from the unlock.** Not in the line after `open`:
+    /// the same work a moment later is still the unlock's work. A
+    /// randomised delay, the screen going off, or the first user-initiated
+    /// write are all moments the unlock did not cause. Until something
+    /// calls this, previous versions of deleted or overwritten values stay
+    /// recoverable by anyone who later gets the password and an old
+    /// snapshot of the file — the scrub is deferred, not cancelled.
+    pub fn vacuum_after_open(&self) -> HvResult<u64> {
+        let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
+        let n = g.with_space_mut(|s| s.vacuum_after_open())?;
+        Ok(n as u64)
+    }
+
     /// Erase every entry in `namespace` via a single Tx of
     /// `Delete { key }` ops. Returns the number of entries erased.
     /// Idempotent: erasing an already-empty namespace is a no-op
@@ -1646,6 +1672,19 @@ impl AsyncSpaceHandle {
     pub async fn vacuum_data_batches(&self) -> HvResult<u64> {
         self.run_op(move |s, _cancel| -> HvResult<u64> {
             let n = s.vacuum_data_batches()?;
+            Ok(n as u64)
+        })
+        .await
+    }
+
+    /// Async equivalent of [`SpaceHandle::vacuum_after_open`] — the
+    /// post-open scrub the constant-time open leaves undone (audit
+    /// HV-01). Read that method for when to call it, which is the whole
+    /// point of it existing separately: **not** on the heels of the
+    /// `open` it belongs to.
+    pub async fn vacuum_after_open(&self) -> HvResult<u64> {
+        self.run_op(move |s, _cancel| -> HvResult<u64> {
+            let n = s.vacuum_after_open()?;
             Ok(n as u64)
         })
         .await

@@ -749,6 +749,39 @@ impl Container {
     ///
     /// **Read-only safe.** Like every other open variant, works on
     /// a `LOCK_SH` handle returned by [`Self::open_readonly`].
+    ///
+    /// ## ⚠️ This open does NOT vacuum. [`Space::vacuum_after_open`] does
+    ///
+    /// Every other writable `open_space*` scrubs orphan `IndexNode`
+    /// chunks before it returns. This one deliberately does not, and the
+    /// caller owes that scrub (audit HV-01).
+    ///
+    /// It used to. The equalizer above spends microseconds per chunk to
+    /// make the scan's duration independent of whether anything matched;
+    /// the scrub that followed it walked the tree, read every non-visible
+    /// chunk among the reachable ones, overwrote the orphans and fsynced.
+    /// Milliseconds and disk writes, both proportional to how much history
+    /// the space has — and reached only when the password was right, since
+    /// a wrong one returns before this line. So the wall-clock difference
+    /// the equalizer removes was handed straight back, and an observer
+    /// watching the process or the filesystem at the moment a password is
+    /// typed could read the answer off it. That is exactly the coercion
+    /// setting this entry point exists for.
+    ///
+    /// [`MultiSpace::open_space_constant_time`][crate::MultiSpace::open_space_constant_time]
+    /// splits it the same way, with
+    /// [`MultiSpace::vacuum_hosted`][crate::MultiSpace::vacuum_hosted]
+    /// as the separate step.
+    ///
+    /// **Honest cost of the split.** Forward secrecy after a
+    /// constant-time open is now the caller's to complete rather than a
+    /// property of the open. Call [`Space::vacuum_after_open`] — but *not*
+    /// on the heels of the unlock, or the same duration simply moves a few
+    /// milliseconds to the right and stays correlated with success. Pick a
+    /// moment the unlock did not cause: a randomised delay, the screen
+    /// going off, the first user-initiated write. The Flutter plugin arms
+    /// a randomised delay for its callers; see
+    /// `experimental/flutter_plugin/hidden_volume`.
     pub fn open_space_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
         let keys = self.derive_keys(password)?;
         self.open_space_with_keys_constant_time(keys)
@@ -758,13 +791,12 @@ impl Container {
     /// Use when the host-app has cached the derived keys (skips
     /// Argon2id re-derivation); the constant-time-scan property is
     /// preserved.
+    ///
+    /// ⚠️ **No maintenance here** — see the note on
+    /// [`Self::open_space_constant_time`] and call
+    /// [`Space::vacuum_after_open`] later (audit HV-01).
     pub fn open_space_with_keys_constant_time(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
-        let is_ro = self.is_readonly();
-        let mut space = Space::open_constant_time(&mut self.file, keys)?;
-        if !is_ro {
-            space.vacuum_orphans()?;
-        }
-        Ok(space)
+        Space::open_constant_time(&mut self.file, keys)
     }
 
     /// Parallel-scan **constant-time** companion. Shipped in v1.0
@@ -789,18 +821,15 @@ impl Container {
     }
 
     /// `SpaceKeys`-driven companion to
-    /// [`Self::open_space_parallel_constant_time`].
+    /// [`Self::open_space_parallel_constant_time`]. Performs no
+    /// maintenance — [`Space::vacuum_after_open`] is owed afterwards
+    /// (audit HV-01).
     #[cfg(all(feature = "parallel-scan", unix))]
     pub fn open_space_with_keys_parallel_constant_time(
         &mut self,
         keys: SpaceKeys,
     ) -> Result<Space<'_>> {
-        let is_ro = self.is_readonly();
-        let mut space = Space::open_parallel_constant_time(&mut self.file, keys)?;
-        if !is_ro {
-            space.vacuum_orphans()?;
-        }
-        Ok(space)
+        Space::open_parallel_constant_time(&mut self.file, keys)
     }
 
     /// mmap-scan **constant-time** companion. Shipped in v1.0
@@ -822,18 +851,15 @@ impl Container {
     }
 
     /// `SpaceKeys`-driven companion to
-    /// [`Self::open_space_mmap_constant_time`].
+    /// [`Self::open_space_mmap_constant_time`]. Performs no
+    /// maintenance — [`Space::vacuum_after_open`] is owed afterwards
+    /// (audit HV-01).
     #[cfg(all(feature = "mmap", unix))]
     pub fn open_space_with_keys_mmap_constant_time(
         &mut self,
         keys: SpaceKeys,
     ) -> Result<Space<'_>> {
-        let is_ro = self.is_readonly();
-        let mut space = Space::open_mmap_constant_time(&mut self.file, keys)?;
-        if !is_ro {
-            space.vacuum_orphans()?;
-        }
-        Ok(space)
+        Space::open_mmap_constant_time(&mut self.file, keys)
     }
 
     fn derive_keys(&self, password: &[u8]) -> Result<SpaceKeys> {
