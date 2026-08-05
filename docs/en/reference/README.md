@@ -8,8 +8,9 @@ you need byte-level detail or stability guarantees.
 ## Documents
 
 - **[format.md](format.md)** — canonical byte-level wire format
-  spec for v1. Headers, chunk layout, AEAD framing, AAD
-  composition. The single source of truth for on-disk bytes.
+  spec for the current generation, **v3**. Headers, chunk layout,
+  AEAD framing, AAD composition. The single source of truth for
+  on-disk bytes.
 - **[api-surface.txt](api-surface.txt)** — frozen snapshot of every
   `pub` item at v1.0. Used by CI to detect accidental API drift.
 - **[semver.md](semver.md)** — semver policy. What constitutes a

@@ -50,20 +50,21 @@ ambiguous with theirs). We document significant new impls in
 The wire format (specified in `docs/en/reference/format.md`) is **frozen at
 v1.0**. After that:
 
-- `1.x.y` libraries MUST read v1 containers correctly.
+- `1.x.y` libraries MUST read **v3** containers correctly — v3 is the
+  generation `1.0.0` shipped, and the one frozen at that release.
 - Adding a new `ChunkKind` value, new `Namespace` constant, or
-  new feature behind a reservation byte (§8 of `FORMAT_v1.md`) is
+  new feature behind a reservation byte (§8 of `format.md`) is
   a minor bump if it's read-tolerant by older `1.x.y` libraries
   (i.e. they reject the new feature with a documented error
   rather than silently corrupting).
 - Adding a feature that older `1.x.y` libraries CAN'T tolerate
-  (would silently misparse) is a v2 generation — see
+  (would silently misparse) is a NEW format generation (v4) — see
   `docs/en/guide/migration.md`.
 - Strengthening Argon2 parameters (raising `Argon2Params::MIN`)
   would prevent older containers from opening; it's also a major
   bump / v2.
 
-The bias is heavy: prefer v2 over a v1.x extension that risks
+The bias is heavy: prefer a new generation over a `1.x` extension that risks
 downstream silent breakage.
 
 ### 1.2.1 `#[non_exhaustive]` policy
@@ -84,7 +85,7 @@ The following pub items are deliberately NOT `#[non_exhaustive]`:
 |---|---|---|
 | `ContainerOptions` | struct | Construction via struct-expression is the natural API (`ContainerOptions { argon2: …, … }`). `#[non_exhaustive]` would force a builder pattern; we accept that adding a field here is a major bump after v1.0. |
 | `RepackOptions` | struct | Same as `ContainerOptions`. |
-| `Argon2Params` | struct | Frozen at format level — adding fields is a v2 generation, not a v1.x extension. |
+| `Argon2Params` | struct | Frozen at format level — adding fields is a new format generation, not a `1.x` extension. |
 | `Namespace` | newtype | `Namespace(pub u8)` — pattern-matched as `Namespace(byte)`; non_exhaustive would silently break that. |
 | Format-internal types (`Header`, `Plaintext`, `Superblock`, `LeafNode`, `InternalNode`, `IndexNode`, `IndexRoot`, `CommitPayload`) | mixed | Construction is part of the test / parser_fuzz surface; adding `#[non_exhaustive]` would force test churn for no security benefit. The format spec in `docs/en/reference/format.md` is what locks these — the *bytes* are frozen, not the in-memory struct shape. |
 
@@ -143,7 +144,7 @@ These things may change between any patch versions without notice:
 Pre-v1.0:
 
 - `0.x` libraries write the format documented in
-  `DESIGN.md` / `FORMAT_v1.md`. Pre-1.0 format is **not** stable
+  `DESIGN.md` / `docs/en/reference/format.md`. Pre-1.0 format is **not** stable
   between 0.x.y bumps; do not deploy without a clear migration
   plan (per `README.md` Status section).
 
@@ -151,13 +152,14 @@ Post-v1.0:
 
 | Library version | Format generation | Notes |
 |---|---|---|
-| `1.x.y` | v1 (frozen) | Backwards compatible reads + writes within `1.*`. |
-| `2.x.y` (hypothetical) | v1 read + v2 write | One-way migration; see `docs/en/guide/migration.md`. |
-| `3.x.y` (hypothetical) | v2 only | v1 read drops; users must migrate via 2.x first. |
+| `1.x.y` | v3 (frozen) | Backwards compatible reads + writes within `1.*`. |
+| `2.x.y` (hypothetical) | v3 read + v4 write | One-way migration; see `docs/en/guide/migration.md`. |
+| `3.x.y` (hypothetical) | v4 only | v3 read drops; users must migrate via 2.x first. |
 
 The exact deprecation cadence (how many minor versions before a
 read-drop) is one major version cycle = at minimum one calendar
-year between v2 introduction and v1 read removal.
+year between the new generation's introduction and the previous one's
+read removal.
 
 ## 4. Yank policy
 
@@ -199,7 +201,7 @@ The v1.0 release itself follows this sequence (planned):
 
 Beyond semver, we commit to:
 
-- **Format stability.** A v1 container created by `1.0.0` MUST
+- **Format stability.** A v3 container created by `1.0.0` MUST
   open identically on `1.x.y` for any `x`, `y`.
 - **Test coverage.** `cargo test --workspace --all-features` MUST
   pass on the announced MSRV at every release.
@@ -213,8 +215,9 @@ Beyond semver, we commit to:
 ## 7. Cross-references
 
 - `docs/en/reference/format.md` — frozen wire format spec.
-- `docs/en/guide/migration.md` — v1 → v2 migration plan (empty shell
-  until v2 lands).
+- `docs/en/guide/migration.md` — cross-generation migration policy.
+  Pre-1.0 the format bumped twice (v1 → v2 → v3) with no in-place
+  tool; post-1.0 a new generation requires one.
 - `docs/en/security/threat-model.md` — invariants the format and APIs
   preserve.
 - `CHANGELOG.md` — keep-a-changelog-style release notes.
