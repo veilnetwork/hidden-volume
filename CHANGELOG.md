@@ -52,6 +52,23 @@ format.
   commit, which is the best evidence available that the mistake is an
   easy one to make.
 
+### Removed — report6 follow-through
+
+- **`crates/hidden-volume-ffi/build.rs` and its build-dependency.** The
+  script did nothing but print two `rerun-if-changed` lines, and its own
+  comment justified its existence falsely: it claimed
+  `uniffi::setup_scaffolding!` needs "a build-script marker", which is a
+  UDL-mode requirement — proc-macro mode, which this crate uses and
+  which `docs/{en,ru}/reference/ffi.md` §"Decision 2" names as the
+  reason there is no `build.rs`, has no such dependency. The
+  `[build-dependencies] uniffi` entry it implied was likewise unused,
+  and building it on every host is the only thing it cost.
+
+  Verified by the `ffi_smoke` test, which dlopens the built cdylib and
+  resolves the uniffi contract-version and per-method checksum symbols
+  the foreign bindings depend on — 242 exported symbols before and
+  after.
+
 ### Added — report6 follow-through
 
 - **`HvAsyncSpace` answers what became of an operation you stopped
