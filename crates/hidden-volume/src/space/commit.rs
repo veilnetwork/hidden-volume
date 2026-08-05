@@ -44,6 +44,15 @@ impl<'f> Space<'f> {
     /// commit-fail to close the forward-secrecy gap (audit pass 7
     /// D1).
     ///
+    /// **Which failure it was matters (report8 H-09).** Everything up to and
+    /// including the Commit chunk's fsync is invisible to a reader, so those
+    /// failures keep their own error and the caller may retry. From the
+    /// superblock publish onwards the answer is
+    /// [`Error::PublishUncertain`]: the seq is burnt, a replica may already be
+    /// on the disk, and this handle may be an era behind the file. Retrying is
+    /// then the wrong move and vacuuming is a destructive one — reopen instead.
+    /// The underlying cause is kept on [`Space::last_publish_error`].
+    ///
     /// **Padding-step failure (audit M1, 2026-05-10).** Once the
     /// superblock fsync (the durable-publish moment) succeeds, this
     /// function returns `Ok(seq)` regardless of whether the
@@ -366,15 +375,12 @@ impl<'f> Space<'f> {
             // first self-heal writes a checkpoint.
             checkpoint_slot: self.state.superblock.checkpoint_slot,
         };
-        let replicas = self.file.superblock_replicas.max(1);
-        // Burn the number BEFORE the first replica can reach the disk: if one
-        // lands and a later replica (or the fsync) fails, this seq must never
-        // be handed out again.
-        self.state.attempted_seq = new_seq;
-        for _ in 0..replicas {
-            self.append_superblock(&new_sb)?;
-        }
-        self.file.fsync()?;
+        // Everything above this line is BEFORE the publish: a failure there has
+        // put orphan chunks on the disk but nothing a reader can reach, so it
+        // keeps its own error. From here the seq is burnt and a replica may
+        // land, so every failure is `PublishUncertain` — the caller's remedy
+        // stops being "retry" and becomes "reopen" (report8 H-09).
+        self.publish_superblock(&new_sb, "committing")?;
 
         self.state.superblock = new_sb;
         // The prior commit era's cached roots payload is now stale — drop it so
@@ -424,6 +430,185 @@ impl<'f> Space<'f> {
         self.state.last_padding_error = padding_outcome.err();
 
         Ok(new_seq)
+    }
+}
+
+#[cfg(test)]
+mod publish_uncertainty_tests {
+    use crate::chunk::ChunkKind;
+    use crate::container::Container;
+    use crate::crypto::kdf::Argon2Params;
+    use crate::space::ForcedAppendFailure;
+    use crate::space::index::Namespace;
+
+    fn scratch() -> std::path::PathBuf {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let p = tmp.path().to_owned();
+        drop(tmp);
+        p
+    }
+
+    /// A commit that fails once a replica may be on the disk must say
+    /// **reopen**, not "the write failed" (report8 H-09).
+    ///
+    /// The fault is armed on the SECOND superblock append, so the first replica
+    /// genuinely lands: the file then holds seq N+1 while this handle's
+    /// `superblock.seq` still says N. That is not a write that did nothing — it
+    /// is a handle that is now behind the file, and the reopen below proves it
+    /// by reading the value the "failed" commit wrote. Answering `Io` there
+    /// described the syscall and told the caller the opposite of the truth.
+    #[test]
+    fn a_commit_that_fails_after_a_replica_lands_says_reopen() {
+        let path = scratch();
+        let durable;
+        {
+            let mut c = Container::create(&path, Argon2Params::MIN).unwrap();
+            c.set_superblock_replicas(3).unwrap();
+            let mut s = c.create_space(b"pw").unwrap();
+            let mut tx = s.begin_tx();
+            tx.put(Namespace::SETTINGS, b"k", b"v1").unwrap();
+            tx.commit().unwrap();
+            durable = s.commit_seq();
+
+            let mut tx = s.begin_tx();
+            tx.put(Namespace::SETTINGS, b"k", b"v2").unwrap();
+            let armed = ForcedAppendFailure::arm(ChunkKind::Superblock, 2);
+            let err = tx
+                .commit()
+                .expect_err("the second replica was made to fail");
+            drop(armed);
+
+            assert!(
+                matches!(err, crate::Error::PublishUncertain(_)),
+                "a publish that may have landed must name its remedy, not the \
+                 syscall that broke: got {err:?}"
+            );
+
+            // The cause is kept for whoever has to diagnose the device.
+            assert!(
+                matches!(s.last_publish_error(), Some(crate::Error::Io(_))),
+                "the original failure was dropped on the floor: {:?}",
+                s.last_publish_error()
+            );
+
+            // The seq is burnt, so the destructive path is refused — the gate
+            // this error exists to arm (audit HV-01).
+            assert!(
+                matches!(s.vacuum_orphans(), Err(crate::Error::PublishUncertain(_))),
+                "the burnt seq did not arm the vacuum refusal"
+            );
+
+            // ...and committing is NOT blocked (audit HV-01): the next seq is
+            // derived from the burn mark, so it skips the number instead of
+            // publishing a second payload under it.
+            let mut tx = s.begin_tx();
+            tx.put(Namespace::SETTINGS, b"k", b"v3").unwrap();
+            let seq = tx.commit().expect("a burnt publish must not brick writes");
+            assert!(
+                seq > durable + 1,
+                "the next commit re-used the burnt seq {}: got {seq}",
+                durable + 1
+            );
+        }
+
+        // The replica really did land: the era the caller was told about as a
+        // failure is the one on the disk.
+        let mut c = Container::open(&path).unwrap();
+        let mut s = c.open_space(b"pw").unwrap();
+        assert_eq!(
+            s.get(Namespace::SETTINGS, b"k").unwrap().as_deref(),
+            Some(&b"v3"[..])
+        );
+        assert!(
+            s.commit_seq() > durable,
+            "nothing was published at all — the fault fired too early for this \
+             test to be about uncertainty"
+        );
+        drop(s);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// CONTROL: a failure BEFORE the publish window keeps its own error.
+    ///
+    /// Nothing is visible to a reader until a superblock names it, so a Commit
+    /// chunk that never got written is a plain failed write with a plain
+    /// remedy. Widening `PublishUncertain` to cover it would tell every caller
+    /// to reopen after any full disk, and would make the distinction the
+    /// variant exists to draw meaningless.
+    #[test]
+    fn a_failure_before_the_publish_window_is_not_uncertain() {
+        let path = scratch();
+        {
+            let mut c = Container::create(&path, Argon2Params::MIN).unwrap();
+            c.set_superblock_replicas(3).unwrap();
+            let mut s = c.create_space(b"pw").unwrap();
+            let mut tx = s.begin_tx();
+            tx.put(Namespace::SETTINGS, b"k", b"v1").unwrap();
+            tx.commit().unwrap();
+            let durable = s.commit_seq();
+
+            let mut tx = s.begin_tx();
+            tx.put(Namespace::SETTINGS, b"k", b"v2").unwrap();
+            let armed = ForcedAppendFailure::arm(ChunkKind::Commit, 1);
+            let err = tx.commit().expect_err("the Commit chunk was made to fail");
+            drop(armed);
+
+            assert!(
+                matches!(err, crate::Error::Io(_)),
+                "a pre-publish failure published nothing, so it must not send \
+                 the caller off to reopen: got {err:?}"
+            );
+            assert_eq!(
+                s.state.attempted_seq, durable,
+                "nothing was published, so no seq should have been burnt"
+            );
+            assert!(s.last_publish_error().is_none());
+            // And the destructive path stays available, because this handle is
+            // not behind anything.
+            s.vacuum_orphans()
+                .expect("a pre-publish failure must not arm the reopen gate");
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The checkpoint self-heal publishes a superblock too, so it owes the
+    /// caller the same answer. It is documented as "an optimisation hint", and
+    /// that is true of the chain it writes — but publishing one bumps the
+    /// superblock seq, and that half is an era transition like any other.
+    #[test]
+    fn a_checkpoint_publish_that_fails_says_reopen_too() {
+        let path = scratch();
+        {
+            let mut c = Container::create(&path, Argon2Params::MIN).unwrap();
+            c.set_superblock_replicas(3).unwrap();
+            let mut s = c.create_space(b"pw").unwrap();
+            let mut tx = s.begin_tx();
+            tx.put(Namespace::SETTINGS, b"k", b"v1").unwrap();
+            tx.commit().unwrap();
+            let durable = s.commit_seq();
+
+            let armed = ForcedAppendFailure::arm(ChunkKind::Superblock, 2);
+            let err = s
+                .write_self_heal_checkpoint()
+                .expect_err("the second replica was made to fail");
+            drop(armed);
+
+            assert!(
+                matches!(err, crate::Error::PublishUncertain(_)),
+                "the checkpoint publish burnt a seq and may have landed a \
+                 replica, yet reported a plain write failure: {err:?}"
+            );
+            assert!(
+                matches!(s.last_publish_error(), Some(crate::Error::Io(_))),
+                "the original failure was dropped on the floor: {:?}",
+                s.last_publish_error()
+            );
+            assert!(
+                s.state.attempted_seq > durable,
+                "the checkpoint seq was not burnt"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
     }
 }
 

@@ -108,11 +108,21 @@ pub enum Error {
     #[error("rename is visible but the file at that path is not the one written: {0}")]
     RenameVisibleContentUnverified(&'static str),
 
-    /// A previous publish got at least one Superblock replica onto the disk
-    /// and then failed, so this handle's view of the tree may be one era
-    /// behind what a reopen would select.
+    /// A publish got at least one Superblock replica onto the disk and then
+    /// failed, so this handle's view of the tree may be one era behind what a
+    /// reopen would select.
     ///
-    /// Refused for the DESTRUCTIVE operations only. A vacuum walks the tree
+    /// **Raised by the publish itself** (report8 H-09). `commit_tx` and the
+    /// checkpoint self-heal burn the seq one instruction before the first
+    /// replica can reach the disk and adopt the new superblock only after the
+    /// final `fsync`; any failure in between used to surface as the raw
+    /// [`Self::Io`] of whichever syscall broke. That named the syscall and
+    /// misnamed the situation — an I/O error reads as "the write did not
+    /// happen", and a caller who believes that retries the same Tx or vacuums
+    /// on a root the file has already moved past. The cause is not discarded:
+    /// it is parked on [`crate::Space::last_publish_error`].
+    ///
+    /// Also refused for the DESTRUCTIVE operations. A vacuum walks the tree
     /// this handle believes in and erases everything else — including the
     /// chunks of the era it does not know was published. A later reopen picks
     /// the newer Superblock by seq, and it now points at erased chunks: the

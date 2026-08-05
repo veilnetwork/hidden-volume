@@ -47,6 +47,61 @@ thread_local! {
     /// tests run concurrently in one process, and a shared `AtomicU64`
     /// would have each of them measuring the others' work.
     pub(crate) static CHUNK_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+
+    /// Test-only write fault: `Some((kind, n))` fails the `n`-th
+    /// [`Space::append_chunk`] of `kind` counted from the moment it was armed.
+    ///
+    /// The superblock-publish window cannot be entered from outside. It opens
+    /// on a file the crate has just written to successfully and closes an
+    /// `fsync` later, so the only way to fail it — a full disk, a failing
+    /// device — is to inject the failure. `n > 1` is the interesting setting:
+    /// it lets the FIRST replica land on the disk before the next append
+    /// fails, which is the state the whole uncertainty is about.
+    ///
+    /// Thread-local, not a `static AtomicU64`: `cargo test` runs a binary's
+    /// tests on parallel threads, and a process-wide fault would fire inside
+    /// whatever unrelated commit happened to be in flight (the lesson the
+    /// `CREATE_FSYNC_FAILS` hook in `container/file.rs` records).
+    static FORCED_APPEND_FAILURE: std::cell::Cell<Option<(ChunkKind, u32)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Arm [`FORCED_APPEND_FAILURE`] on this thread; restores on drop so a panicking
+/// test cannot leak the fault into whatever runs next in the same thread.
+#[cfg(test)]
+pub(crate) struct ForcedAppendFailure;
+
+#[cfg(test)]
+impl ForcedAppendFailure {
+    /// Fail the `nth` (1-based) append of `kind` from now.
+    pub(crate) fn arm(kind: ChunkKind, nth: u32) -> Self {
+        assert!(nth >= 1, "nth is 1-based");
+        FORCED_APPEND_FAILURE.with(|c| c.set(Some((kind, nth))));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for ForcedAppendFailure {
+    fn drop(&mut self) {
+        FORCED_APPEND_FAILURE.with(|c| c.set(None));
+    }
+}
+
+/// Countdown + verdict for the armed fault, if it names `kind`.
+#[cfg(test)]
+fn forced_append_failure(kind: ChunkKind) -> bool {
+    FORCED_APPEND_FAILURE.with(|c| match c.get() {
+        Some((armed, 1)) if armed == kind => {
+            c.set(None);
+            true
+        },
+        Some((armed, n)) if armed == kind => {
+            c.set(Some((armed, n - 1)));
+            false
+        },
+        _ => false,
+    })
 }
 
 /// Aggregate statistics for a [`Space`] — the structured form host-apps
@@ -190,6 +245,21 @@ pub(crate) struct SpaceState {
     /// host-apps can surface a privacy-hardening warning without
     /// confusing it with a commit failure.
     pub last_padding_error: Option<crate::Error>,
+    /// Why the last superblock publish failed, if one did (report8 H-09).
+    ///
+    /// [`Space::publish_superblock`] answers [`Error::PublishUncertain`] for
+    /// every failure inside its window, because that is the only thing the
+    /// caller can act on: the seq is burnt, a replica may be on the disk, and
+    /// the remedy is a reopen no matter which step broke. That answer is
+    /// deliberately uniform, so the underlying cause — ENOSPC, EIO, a revoked
+    /// device — would otherwise be discarded at exactly the moment an operator
+    /// wants it. Parked here instead, the same way `last_padding_error` parks
+    /// the cause of a skipped padding round. Cleared by the next successful
+    /// publish.
+    ///
+    /// Diagnostic only. It says nothing about whether the era landed — nothing
+    /// on this side of a reopen can.
+    pub last_publish_error: Option<crate::Error>,
     /// Per-`seq` cache of the decrypted `Commit`-chunk payload bytes (the
     /// `CommitPayload` wire bytes living at `superblock.root_slot`), so the
     /// read-hot [`Space::load_prior_roots`] does not re-read + re-AEAD-decrypt
@@ -255,6 +325,7 @@ redacted_debug!(SpaceState {
     superblock,
     commit_history,
     last_padding_error,
+    last_publish_error,
     roots_payload_cache,
     attempted_seq,
     unreadable_newer_superblock
@@ -277,6 +348,7 @@ impl SpaceState {
             owned_slots: Vec::new(),
             commit_history: Vec::new(),
             last_padding_error: None,
+            last_publish_error: None,
             roots_payload_cache: None,
             attempted_seq: 0,
         }
@@ -526,6 +598,21 @@ impl<'f> Space<'f> {
     #[must_use]
     pub fn last_padding_error(&self) -> Option<&crate::Error> {
         self.state.last_padding_error.as_ref()
+    }
+
+    /// Why the last superblock publish failed, if one did (report8 H-09).
+    ///
+    /// A failed publish answers [`Error::PublishUncertain`], which names the
+    /// remedy (reopen) rather than the cause, because the remedy is the same
+    /// whichever step broke. The cause is kept here for logs and bug reports:
+    /// a device that is out of space and one that is failing want different
+    /// things from an operator, and `PublishUncertain` alone cannot tell them
+    /// apart. Cleared on the next successful publish.
+    ///
+    /// Diagnostic only — it does NOT say whether the era reached the disk.
+    #[must_use]
+    pub fn last_publish_error(&self) -> Option<&crate::Error> {
+        self.state.last_publish_error.as_ref()
     }
 
     /// Number of chunks owned by this space — chunks that AEAD-decrypt
@@ -1206,6 +1293,55 @@ impl<'f> Space<'f> {
         self.append_chunk(ChunkKind::Superblock, sb.seq, &sb.encode())
     }
 
+    /// Publish `sb`: burn its seq, append every replica, make them durable.
+    ///
+    /// The single writer of a new era. Both publishers — `commit_tx` and
+    /// `write_self_heal_checkpoint` — go through here so the window below has
+    /// one definition instead of two copies that drift.
+    ///
+    /// **Every failure from here is [`Error::PublishUncertain`]** (report8
+    /// H-09). The window opens when the seq is burnt, one instruction before
+    /// the first replica can reach the disk, and closes when the final `fsync`
+    /// returns. Inside it a replica of `sb.seq` may already be on the disk
+    /// while `state.superblock` still names the previous era — which is not a
+    /// write that failed but a handle that is now behind the file, and the only
+    /// thing that settles which era landed is the open scan. Reporting the raw
+    /// `Io` error described the syscall and misdescribed the situation: it
+    /// reads as "nothing happened", and a caller who believes that will retry
+    /// or vacuum on a stale root. The cause is not lost — it is parked on
+    /// [`SpaceState::last_publish_error`].
+    ///
+    /// `what` names what the caller must reopen before doing; it renders as
+    /// "reopen before {what}".
+    ///
+    /// **Committing is NOT blocked afterwards** (audit HV-01): the next seq is
+    /// derived from `attempted_seq`, so a later commit skips the burnt number
+    /// rather than publishing a second payload under it. What IS refused is the
+    /// destructive maintenance that would act on the stale root — see
+    /// `vacuum_orphans`.
+    ///
+    /// On success the caller still owns the `state.superblock = sb` swap: only
+    /// it knows what else belongs in the same era transition.
+    pub(super) fn publish_superblock(&mut self, sb: &Superblock, what: &'static str) -> Result<()> {
+        let replicas = self.file.superblock_replicas.max(1);
+        // Burn the number BEFORE the first replica can reach the disk: if one
+        // lands and a later replica (or the fsync) fails, this seq must never
+        // be handed out again.
+        self.state.attempted_seq = sb.seq;
+        let outcome = (|| -> Result<()> {
+            for _ in 0..replicas {
+                self.append_superblock(sb)?;
+            }
+            self.file.fsync()
+        })();
+        if let Err(cause) = outcome {
+            self.state.last_publish_error = Some(cause);
+            return Err(Error::PublishUncertain(what));
+        }
+        self.state.last_publish_error = None;
+        Ok(())
+    }
+
     /// AEAD-seal `payload` at the next free slot with the given kind
     /// and seq, append the ciphertext chunk, and record the slot in
     /// `state.owned_slots`. Returns the new slot index.
@@ -1224,6 +1360,12 @@ impl<'f> Space<'f> {
         seq: u64,
         payload: &[u8],
     ) -> Result<u64> {
+        #[cfg(test)]
+        if forced_append_failure(kind) {
+            return Err(Error::Io(std::io::Error::other(
+                "test hook: forced chunk append failure",
+            )));
+        }
         let slot = self.file.slot_count();
         let key = derive_chunk_key(
             &self.state.keys.aead_root,
