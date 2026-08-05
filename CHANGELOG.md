@@ -12,6 +12,50 @@ format.
 
 ## [Unreleased]
 
+### Fixed — report7 P1
+
+- **Four typed errors were erased at the FFI boundary.** The core has
+  twenty variants; `From<hidden_volume::Error> for HvError` had sixteen
+  arms. `UnreadableNewerState`, `PublishUncertain`,
+  `RenameVisibleDurabilityUncertain` and `RenameVisibleContentUnverified`
+  all fell through to `Internal("unknown error variant")` — an error
+  whose own doc comment says it indicates a bug in the library. The last
+  of them was added to the core by `df50507`, which touched the core and
+  not the boundary, so it was born already erased.
+
+  **Reachable from the main path, not from a fault-injection harness.**
+  Orphan cleanup raises `PublishUncertain` and `UnreadableNewerState`,
+  and the Dart plugin arms deferred cleanup on **every open**. So a
+  container that lost a publish answered "library bug" on every single
+  open, and the one thing that fixes it — *reopen the container* — never
+  reached the host at all. The two rename cases come from the rewrite
+  under source lock, which the exported compaction and password-change
+  entry points both reach; there, "the rename applied and your old
+  password is dead" arrived as "internal error", which a caller
+  reasonably reads as *nothing happened* and acts on by retrying with a
+  password that no longer opens the file.
+
+  All four now have their own `HvError` variant, carrying the remedy in
+  the rustdoc. They are **appended** to the enum, not inserted: uniffi
+  transports a `flat_error` as its ordinal and the hand-written Dart
+  bindings decode it positionally, so a middle insert would silently
+  rename every error after it on the Dart side. `_hvErrorKinds` gains
+  the four names, and both sides now say in a comment that they are
+  append-only.
+
+  The catch-all's comment claimed `from_maps_*` unit tests guarded the
+  actionable variants. No such test existed — there was one, on
+  `ContainerTooLarge`, under a different name — and the four had
+  collected behind that claim. The false reference is replaced by the
+  test it promised: `every_core_variant_maps_to_something_other_than_unknown`
+  names all twenty core variants and fails on any that reaches the
+  catch-all, plus one test per rescued variant asserting on `HvError`,
+  the type a foreign caller actually receives.
+
+  `docs/{en,ru}/reference/ffi.md` said "14 variants" and called the
+  mapping a 1:1 mirror; both are corrected, and the ordinal coupling is
+  now written down.
+
 ### Documentation — report7 P0
 
 - **The Argon2 ceiling values in the docs had not moved with the

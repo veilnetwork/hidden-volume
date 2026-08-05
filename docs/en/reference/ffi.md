@@ -162,7 +162,7 @@ unchanged `commit_seq`).
 
 ## Decision 5 — flat error enum
 
-Rust's `Error` is a typed enum with 14 variants. uniffi supports
+Rust's `Error` is a typed enum with 20 variants. uniffi supports
 mapping this to typed exceptions on the foreign side, but each variant
 needs to be FFI-friendly (no `&'static str`, no opaque data).
 
@@ -193,6 +193,26 @@ public enum HvError: Error {
 The mapping preserves the **deniability invariant**: `AuthFailed`
 fires for both wrong-password AND no-such-space; foreign callers
 cannot distinguish (and MUST NOT branch on the difference).
+
+**"1:1" is load-bearing, and was not true until report7 P1.** The
+`From` impl must end in a catch-all, because `hidden_volume::Error` is
+`#[non_exhaustive]`, and that catch-all answers
+`Internal("unknown error variant")` — an error whose own documentation
+says it indicates a bug in the library. Four variants had collected
+there: `UnreadableNewerState`, `PublishUncertain`, and the two
+`RenameVisible*` cases. Each is a normal outcome carrying a remedy the
+host cannot guess — *reopen the container*, or *the rewrite applied, do
+not retry with the old password* — and each arrived instead as "this
+library is broken". Two of them are raised by orphan cleanup, which the
+Flutter plugin arms on **every open**, so the loss was not theoretical.
+`every_core_variant_maps_to_something_other_than_unknown` in the FFI
+crate now fails if any named core variant reaches the catch-all again.
+
+**`HvError` is append-only.** A `flat_error` crosses the boundary as
+its **ordinal**, and the hand-written Dart bindings map that ordinal
+back to a name positionally (`_hvErrorKinds`). A variant inserted in
+the middle silently renames every error after it on the Dart side.
+Add at the end, and extend that list in the same commit.
 
 ## Decision 6 — both sync and async API surfaces (v0.8.1+)
 
