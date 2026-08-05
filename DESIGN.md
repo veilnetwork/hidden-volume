@@ -411,17 +411,22 @@ new_file` — open each space with the corresponding password, copy its
 live chunks (per chunk map) into a new container, treat everything else
 (what none of the passed keys could decrypt) as deletable.
 
-Audit pass 16 (R-STREAMING-REPACK) made `repack` memory-bounded: log
-namespaces are walked one paginated page at a time via
-`iter_log_after(ns, cursor, log_page_size)` with per-page `Tx::commit`
-on the destination, so the working set is ≈ 4 MiB per page regardless
-of total log volume. KV namespaces still collect once per namespace,
-which used to be bounded structurally by the two-level B+ tree cap of
-≈ 5–10 K entries — audit HV-15 removed that cap (the index now grows
-levels on demand), so this working set is now bounded by the namespace
-itself. That is a `repack`-only cost since audit HV-16: an ordinary
-`Tx::commit` no longer materialises a namespace, it descends to the
-affected leaf and rewrites the path above it (`space::tree`). See
+`repack` is memory-bounded on both legs. Log namespaces are walked one
+paginated page at a time via `iter_log_after(ns, cursor,
+log_page_size)` (audit pass 16, R-STREAMING-REPACK) and KV namespaces
+via `list_after(ns, cursor, kv_page_size)` (audit HV-02), each page
+committed to the destination before the next is read — ≈ 4 MiB per log
+page, ≈ 1 MiB per KV page, regardless of namespace size.
+
+The KV leg collected a whole namespace until HV-02, and then handed
+every pair to `Tx::put`, which copies it, so its peak was twice that
+namespace's plaintext. It was written under the two-level B+ tree cap
+of ≈ 5–10 K entries; audit HV-15 removed the cap (the index grows
+levels on demand) and left the only remaining ceiling at the
+container's own. Splitting one namespace's copy across several
+destination transactions is sound here because the destination is a
+file the call created — a failure between pages leaves a partial
+`dest` that the caller discards. See
 `docs/en/contributing/benchmarks.md`.
 The previous implementation kept every live entry in memory across
 both phases (Phase 1: read all, Phase 2: write all) — multi-GiB log

@@ -222,15 +222,18 @@ race, который библиотека чинит внутри — source-loc
 
 Те же anchor / verify оговорки, что и в §2.
 
-**Memory footprint.** Audit pass 16 (R-STREAMING-REPACK) сделал
-`Container::repack` memory-bounded: log-namespaces проходятся
-постранично, с per-page `Tx::commit`, working-set ≈ 4 МиБ на
-страницу независимо от общего объёма лога. Multi-GiB
-log-namespaces больше не требуют мониторинга RSS хоста во время
-repack; KV-namespaces всё ещё собираются целиком на namespace. Раньше
-их ограничивал 2-уровневый B+ tree cap; аудит HV-15 его снял, поэтому
-теперь этот working-set равен размеру namespace — крупные KV-namespace
-стоит разбивать (см. `docs/ru/contributing/benchmarks.md`).
+**Memory footprint.** `Container::repack` memory-bounded на обеих
+ногах: log-namespaces проходятся постранично (audit pass 16,
+R-STREAMING-REPACK), KV-namespaces — тоже (аудит HV-02); каждая
+страница коммитится до чтения следующей. Working-set ≈ 4 МиБ на
+log-страницу и ≈ 1 МиБ на KV-страницу, независимо от размера
+namespace — ни multi-GiB log-namespaces, ни крупные KV-namespaces
+больше не требуют мониторинга RSS хоста во время repack.
+
+KV-нога раньше собиралась целиком — на основании 2-уровневого B+ tree
+cap'а, который аудит HV-15 к тому моменту уже снял. На сборках до
+HV-02 крупные KV-namespace стоит разбивать (см.
+`docs/ru/contributing/benchmarks.md`).
 
 **File-size cap.** Рост destination в repack ограничен
 `MAX_OPEN_SCAN_CHUNKS = 16M` чанков ≈ 64 ГиБ (audit pass 17 B);

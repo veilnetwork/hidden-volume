@@ -922,16 +922,23 @@ impl Container {
     /// which additionally rename `dest` over `source` while still
     /// holding the source lock (audit pass 11 M1).
     ///
-    /// **Memory footprint of `repack`.** Audit pass 16
-    /// (R-STREAMING-REPACK) made the log-namespace path streaming:
-    /// log entries are paged in via `iter_log_after(ns, cursor,
-    /// PAGE_SIZE)` and committed to `dest` per page, so the working
-    /// set is bounded by **one page (~4 MiB) regardless of total log
-    /// size**. KV namespaces still collect once per namespace because
-    /// the source-side iterator has no pagination, but their working
-    /// set is structurally bounded by the 2-level B+ tree cap (≤ ~10K
-    /// entries × `MAX_VALUE_LEN` per namespace). Multi-GiB log
-    /// namespaces no longer OOM the host.
+    /// **Memory footprint of `repack`.** Both legs stream. Log entries
+    /// are paged in via `iter_log_after(ns, cursor, PAGE_SIZE)` (audit
+    /// pass 16, R-STREAMING-REPACK) and KV entries via
+    /// `list_after(ns, cursor, PAGE_SIZE)` (audit HV-02), each page
+    /// committed to `dest` before the next is read. The working set is
+    /// **one page regardless of namespace size** — ~4 MiB for a log
+    /// page, ~1 MiB for a KV page.
+    ///
+    /// The KV leg used to `list` a whole namespace and then hand every
+    /// pair to `Tx::put`, which copies it, so the peak was twice that
+    /// namespace's plaintext. It was written that way under a bound
+    /// that no longer exists: the index was two levels deep and capped
+    /// at roughly 10 K entries per namespace, and audit HV-15 removed
+    /// the cap (the tree grows a level whenever the level below
+    /// outgrows one chunk) without revisiting the callers that had been
+    /// relying on it. The only ceiling left is the container's own,
+    /// [`crate::MAX_OPEN_SCAN_CHUNKS`].
     pub fn repack(
         source: &std::path::Path,
         dest: &std::path::Path,
@@ -1046,28 +1053,35 @@ impl Container {
             if let Some(t) = c { t.check() } else { Ok(()) }
         };
 
-        // R-STREAMING-REPACK (audit pass 16): pre-pass-16 the flow
-        // collected EVERY live KV entry and EVERY live log record
-        // for EVERY source space into in-memory `Vec`s before
+        // R-STREAMING-REPACK (audit pass 16) + audit HV-02: pre-pass-16
+        // the flow collected EVERY live KV entry and EVERY live log
+        // record for EVERY source space into in-memory `Vec`s before
         // writing the destination — O(total plaintext) RAM, which
-        // OOM'd on multi-GiB log namespaces. The streaming flow
-        // below interleaves source-read and dest-write per
-        // namespace:
+        // OOM'd on multi-GiB log namespaces. Pass 16 fixed the log leg;
+        // HV-02 fixed the KV leg, which had been left collecting a
+        // whole namespace on the strength of a two-level index cap of
+        // ~10 K entries that audit HV-15 had already removed. Both legs
+        // now interleave source-read and dest-write per namespace:
         //
-        // - **KV namespaces** are bounded by the 2-level B+ tree
-        //   cap (≤ ~5-10 K entries × MAX_VALUE_LEN bytes per
-        //   namespace). We still collect them once via
-        //   `space.list(ns)` because there's no streaming
-        //   alternative on the source side, but the working set
-        //   is bounded.
-        // - **Log namespaces** can hold ~10K-20K unique log_id
-        //   pointers and the underlying `DataBatch` chunks can
-        //   total many MiB. We page through them via
-        //   `space.iter_log_after(ns, cursor, PAGE_SIZE)` and
-        //   commit each page directly to the destination's Tx.
-        //   Working set per page: ≤ `PAGE_SIZE × MAX_LOG_PAYLOAD_LEN`
-        //   = `512 × 8 KiB` = 4 MiB, **independent of total log
-        //   size**.
+        // - **KV namespaces** page through
+        //   `space.list_after(ns, cursor, KV_PAGE_SIZE)` and commit
+        //   each page to the destination's Tx. Working set per page:
+        //   ≤ `KV_PAGE_SIZE × (MAX_KEY_LEN + MAX_VALUE_LEN)`
+        //   = `512 × 2304 B` ≈ 1.1 MiB, independent of namespace size.
+        // - **Log namespaces** page through
+        //   `space.iter_log_after(ns, cursor, LOG_PAGE_SIZE)` the same
+        //   way. Working set per page:
+        //   ≤ `LOG_PAGE_SIZE × MAX_LOG_PAYLOAD_LEN` = `512 × 8 KiB`
+        //   = 4 MiB.
+        //
+        // Splitting one namespace's copy across several destination
+        // transactions is sound HERE specifically because the
+        // destination is a file this call created: a failure between
+        // pages leaves a partially-populated `dest` that the caller
+        // discards along with the temp (the in-place flows in
+        // `atomic_rewrite_under_source_lock` only rename it over the
+        // source once the whole repack returned Ok). This is not a
+        // general licence to split transactions.
         //
         // Source and destination are different Container instances
         // each holding its own `LOCK_EX` flock, so interleaving
@@ -1102,6 +1116,11 @@ impl Container {
         // each Tx commits one DataBatch chunk worst-case (no
         // auto-split fanout overhead).
         let log_page_size = MAX_RECORDS_PER_BATCH / 2;
+        // Page size for KV streaming (audit HV-02). Same count as the
+        // log page, which at the KV per-entry worst case
+        // (`MAX_KEY_LEN + MAX_VALUE_LEN` = 2304 B) is ≈ 1.1 MiB read
+        // plus the same again copied into the Tx.
+        let kv_page_size = MAX_RECORDS_PER_BATCH / 2;
 
         for (open_with, write_as) in password_map {
             check(cancel)?;
@@ -1131,16 +1150,33 @@ impl Container {
                 check(cancel)?;
                 match kind {
                     crate::tx::NamespaceKind::Kv => {
-                        // KV: bounded; one-shot list + one-shot Tx.
-                        let entries = src_space.list(ns)?;
-                        if entries.is_empty() {
-                            continue;
+                        // KV: stream one page at a time, cursor on the
+                        // last key of the previous page (audit HV-02).
+                        // Each page is its own Tx, so the pairs a page
+                        // read are dropped before the next page is.
+                        let mut cursor: Option<Vec<u8>> = None;
+                        loop {
+                            check(cancel)?;
+                            let mut page =
+                                src_space.list_after(ns, cursor.as_deref(), kv_page_size)?;
+                            if page.is_empty() {
+                                break;
+                            }
+                            // Advance the cursor BEFORE the Tx — the
+                            // page's entries are drained below.
+                            cursor = Some(page.last().expect("non-empty by check above").0.clone());
+                            let mut tx = dst_space.begin_tx();
+                            // `drain`, not `&page`: `Tx::put` copies, so
+                            // iterating by reference would hold the page
+                            // and the Tx's copy of it at the same time.
+                            // Draining frees each entry as the Tx takes
+                            // it, and the peak stays one page rather
+                            // than two.
+                            for (key, value) in page.drain(..) {
+                                tx.put(ns, &key, &value)?;
+                            }
+                            tx.commit()?;
                         }
-                        let mut tx = dst_space.begin_tx();
-                        for (key, value) in &entries {
-                            tx.put(ns, key, value)?;
-                        }
-                        tx.commit()?;
                     },
                     crate::tx::NamespaceKind::Log => {
                         // Log: stream one page at a time. Each
