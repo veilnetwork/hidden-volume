@@ -52,6 +52,44 @@ format.
   commit, which is the best evidence available that the mistake is an
   easy one to make.
 
+### Added — report6 follow-through
+
+- **`HvAsyncSpace` answers what became of an operation you stopped
+  waiting for (HV-07).** A Dart `Future` cannot be cancelled, so
+  `space.commit(ops).timeout(...)` stops the caller waiting and nothing
+  else: the worker isolate finishes the call and answers into a reply
+  port nobody reads. The answer was dropped, leaving a host that timed
+  out unable to tell a landed commit from a lost one — on a deniable
+  store, where the alternative to knowing is to guess and possibly
+  apply the write twice.
+
+  The Rust FFI has a ledger for exactly this
+  (`AsyncSpaceHandle::abandoned_operations`), but it hangs off the
+  **async** handle while the hand-written Dart bindings bind only the
+  sync symbols — the worker holds a `SpaceHandleBindings` — so it was
+  unreachable from Dart. Nothing needed porting: the worker already
+  serialises calls, which is the hard half.
+
+  New: `HvOperation<T>` (a monotonic `id` plus the same future), the
+  `commitOperation` / `eraseNamespaceOperation` /
+  `setPaddingPolicyOperation` / `vacuumDataBatchesOperation` /
+  `vacuumAfterOpenOperation` submit twins, and
+  `HvAsyncSpace.outcomeOf(id)` returning
+  `HvOpPending` / `HvOpSucceeded` / `HvOpFailed` / `HvOpUnknown`. The id
+  is issued and filed as pending **before** the send, and the outcome is
+  recorded by the call itself rather than by whoever awaits it, so a
+  caller who walks away still leaves a record. `HvOpUnknown` is kept
+  distinct from `HvOpPending` on purpose — collapsing "I do not know"
+  into "not finished yet" would reintroduce the guesswork.
+
+  Additive: the existing `Future`-returning methods keep their
+  signatures and semantics (including rejecting rather than throwing
+  synchronously on a closed handle) and delegate to the new twins.
+  Outcomes are bounded to the last 128 operations per handle.
+
+  **Latent, not live**: no mutating call in the app carries a timeout
+  today, and all four write operations are idempotent by key.
+
 ### Performance — report6 follow-through
 
 - **The constant-time scan's timing equalizer reuses its scratch buffer
