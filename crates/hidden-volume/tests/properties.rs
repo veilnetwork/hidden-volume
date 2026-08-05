@@ -44,13 +44,56 @@ impl Drop for ScratchFile {
 
 // ---------- P1 ----------
 
+/// Every chunk kind the format defines.
+///
+/// `Checkpoint` was missing from the strategy below for as long as it
+/// has existed (report6 P2): the list was written out variant by
+/// variant, a fifth kind was added to the format, and nothing connected
+/// the two. So the property tests exercised four of five kinds and
+/// nobody could tell from reading either file.
+///
+/// The strategy is now built from this list, and
+/// `p1_strategy_covers_every_chunk_kind` checks the list against what
+/// `ChunkKind::from_u8` actually accepts — so a kind added to the
+/// format cannot quietly drop out again. (An exhaustive `match` would
+/// be the stronger check, but `ChunkKind` is `#[non_exhaustive]` and
+/// this is an integration test, so a wildcard arm is mandatory here and
+/// would defeat the point.)
+const ALL_CHUNK_KINDS: &[ChunkKind] = &[
+    ChunkKind::Superblock,
+    ChunkKind::IndexNode,
+    ChunkKind::Commit,
+    ChunkKind::DataBatch,
+    ChunkKind::Checkpoint,
+];
+
 fn arbitrary_chunk_kind() -> impl Strategy<Value = ChunkKind> {
-    prop_oneof![
-        Just(ChunkKind::Superblock),
-        Just(ChunkKind::IndexNode),
-        Just(ChunkKind::Commit),
-        Just(ChunkKind::DataBatch),
-    ]
+    proptest::sample::select(ALL_CHUNK_KINDS.to_vec())
+}
+
+/// The list above must be exactly the set of kinds the decoder accepts.
+///
+/// Sweeping all 256 bytes rather than naming the valid ones again:
+/// re-listing them here would be the same mistake in a second place.
+#[test]
+fn p1_strategy_covers_every_chunk_kind() {
+    let accepted: Vec<ChunkKind> = (0u8..=255)
+        .filter_map(|b| ChunkKind::from_u8(b).ok())
+        .collect();
+
+    for kind in &accepted {
+        assert!(
+            ALL_CHUNK_KINDS.contains(kind),
+            "{kind:?} is a valid chunk kind that the property tests never generate"
+        );
+    }
+    assert_eq!(
+        accepted.len(),
+        ALL_CHUNK_KINDS.len(),
+        "ALL_CHUNK_KINDS lists {} kinds but the decoder accepts {}",
+        ALL_CHUNK_KINDS.len(),
+        accepted.len()
+    );
 }
 
 proptest! {

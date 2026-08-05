@@ -102,6 +102,19 @@ format.
   it is already in the tree on every Unix via getrandom / zstd /
   memmap2 / rayon.
 
+### Testing — report6 P2
+
+- **`Checkpoint` was the chunk kind the property tests skipped.**
+  `tests/properties.rs` built its generator by naming variants one by
+  one; a fifth kind was added to the format and nothing connected the
+  two, so `p1_chunk_plaintext_roundtrip` exercised four of five and
+  neither file said so.
+
+  The generator is now built from one list, and a new test sweeps all
+  256 bytes through `ChunkKind::from_u8` to assert that list is exactly
+  the set the decoder accepts — so a kind added to the format fails the
+  suite instead of quietly dropping out again.
+
 ### Documentation — report6 follow-through
 
 - **An interrupted `create_space` leaves a complete, empty space, and
