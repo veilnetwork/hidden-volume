@@ -54,6 +54,26 @@ format.
 
 ### Performance — report6 follow-through
 
+- **The constant-time scan's timing equalizer reuses its scratch buffer
+  (HV-12).** `equalize_timing_via_chacha20` ran `vec![0u8; body_len]` on
+  every chunk whose tag did not verify, and its one call site passes the
+  compile-time constant `PLAINTEXT_LEN` — so every rejected chunk
+  allocated and freed the same ~4 KiB. Near the format's 16 M-chunk
+  ceiling that is tens of GB of allocator traffic for a single unlock,
+  on the path the FFI takes by default. The buffer is now thread-local
+  and grown once (thread-local rather than shared: the parallel scan
+  runs this on every rayon worker, and a lock would serialise the scan
+  and add contention timing of its own).
+
+  **Reclassified from side channel to cost.** The audit filed it as the
+  former; it is not. `body_len` is constant at the only call site, so
+  the allocation's size — and therefore its cost — carries nothing about
+  the chunk, the key, or whether the tag matched. The reuse is if
+  anything *better* for the property the equalizer protects: it removes
+  the allocator, whose timing depends on heap state, and leaves the
+  ChaCha20 pass, which is constant-time by construction and one to two
+  orders of magnitude larger.
+
 - **Maintenance stops materialising whole namespaces (HV-02, HV-03).**
   Three paths held plaintext, or slot bookkeeping, proportional to the
   container rather than to the work in front of them. All three were
