@@ -52,6 +52,27 @@ format.
   commit, which is the best evidence available that the mistake is an
   easy one to make.
 
+### Fixed — report6 follow-through
+
+- **The post-rename inode check reported a post-rename failure as an
+  internal bug (P2).** `compact_known` / `change_passwords` pin the temp
+  file's inode, `rename(2)` it over the target, then re-read the path's
+  inode to catch a substitution. On mismatch that check returned
+  `Error::Internal` — documented as a crate bug, which a caller reads as
+  "nothing was done" — while the rename had already happened and the
+  previous inode was already unlinked. Same shape audit HV-03 fixed one
+  branch below it for the parent-directory fsync, left unfixed here.
+
+  New `Error::RenameVisibleContentUnverified`, sibling of
+  `RenameVisibleDurabilityUncertain`, and reported ahead of it: "the file
+  at this path is not the one we wrote" is worse news than "it is, and
+  might not survive a crash".
+
+  The `compact_known` / `change_passwords` contract said "on any failure
+  `path` is left BYTE-IDENTICAL", which the two post-rename outcomes
+  contradict. It now says "on any failure **before the rename**" and
+  names both, in the rustdoc and in `docs/{en,ru}/guide/operations.md`.
+
 ### Removed — report6 follow-through
 
 - **`crates/hidden-volume-ffi/build.rs` and its build-dependency.** The

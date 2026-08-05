@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-05T05:26:47Z
+# Captured: 2026-08-05T06:04:10Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -108,10 +108,10 @@ container/mod.rs:  848:    pub fn open_space_mmap_constant_time(&mut self, passw
 container/mod.rs:  858:    pub fn open_space_with_keys_mmap_constant_time(
 container/mod.rs:  942:    pub fn repack(
 container/mod.rs:  964:    pub fn repack_cancellable(
-container/mod.rs:  1231:    pub fn compact_known(
-container/mod.rs:  1242:    pub fn compact_known_cancellable(
-container/mod.rs:  1301:    pub fn change_passwords(
-container/mod.rs:  1312:    pub fn change_passwords_cancellable(
+container/mod.rs:  1241:    pub fn compact_known(
+container/mod.rs:  1252:    pub fn compact_known_cancellable(
+container/mod.rs:  1313:    pub fn change_passwords(
+container/mod.rs:  1324:    pub fn change_passwords_cancellable(
 crypto/aead.rs:  21:pub struct ChunkAead {
 crypto/aead.rs:  36:    pub fn new(key: &[u8; 32]) -> Self {
 crypto/aead.rs:  46:    pub fn seal(&self, plaintext: &[u8], aad: [u8; AAD_LEN]) -> Result<([u8; NONCE_LEN], Vec<u8>)> {
