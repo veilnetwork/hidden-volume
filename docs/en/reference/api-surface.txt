@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-05T09:41:20Z
+# Captured: 2026-08-05T14:34:54Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -241,29 +241,30 @@ space/log_iter.rs:  344:    pub fn read_log(&mut self, namespace: Namespace, log
 space/mod.rs:  3:pub mod index;
 space/mod.rs:  4:pub mod log;
 space/mod.rs:  5:pub mod superblock;
-space/mod.rs:  65:pub struct SpaceStats {
-space/mod.rs:  97:    pub fn total_entries(&self) -> usize {
-space/mod.rs:  121:    pub fn utilization_ratio(&self) -> f64 {
-space/mod.rs:  143:pub struct IntegrityReport {
-space/mod.rs:  293:pub struct Space<'f> {
-space/mod.rs:  430:    pub fn commit_seq(&self) -> u64 {
-space/mod.rs:  446:    pub fn space_keys(&self) -> SpaceKeys {
-space/mod.rs:  484:    pub fn commit_history(&self) -> &[u64] {
-space/mod.rs:  504:    pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
-space/mod.rs:  515:    pub fn padding_policy(&self) -> crate::padding::PaddingPolicy {
-space/mod.rs:  527:    pub fn last_padding_error(&self) -> Option<&crate::Error> {
-space/mod.rs:  536:    pub fn audit_owned_chunk_count(&self) -> usize {
-space/mod.rs:  552:    pub fn stats(&mut self) -> Result<SpaceStats> {
-space/mod.rs:  570:    pub fn begin_tx<'s>(&'s mut self) -> Tx<'s, 'f> {
-space/mod.rs:  583:    pub fn get(&mut self, namespace: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>> {
-space/mod.rs:  625:    pub fn list(&mut self, namespace: Namespace) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-space/mod.rs:  651:    pub fn list_keys(&mut self, namespace: Namespace) -> Result<Vec<Vec<u8>>> {
-space/mod.rs:  677:    pub fn list_keys_after(
-space/mod.rs:  722:    pub fn list_after(
-space/mod.rs:  749:    pub fn count(&mut self, namespace: Namespace) -> Result<usize> {
-space/mod.rs:  802:    pub fn erase_namespace(&mut self, namespace: Namespace) -> Result<usize> {
-space/mod.rs:  839:    pub fn list_namespaces(&mut self) -> Result<Vec<Namespace>> {
-space/mod.rs:  851:    pub fn list_namespaces_with_kind(
+space/mod.rs:  120:pub struct SpaceStats {
+space/mod.rs:  152:    pub fn total_entries(&self) -> usize {
+space/mod.rs:  176:    pub fn utilization_ratio(&self) -> f64 {
+space/mod.rs:  198:pub struct IntegrityReport {
+space/mod.rs:  365:pub struct Space<'f> {
+space/mod.rs:  502:    pub fn commit_seq(&self) -> u64 {
+space/mod.rs:  518:    pub fn space_keys(&self) -> SpaceKeys {
+space/mod.rs:  556:    pub fn commit_history(&self) -> &[u64] {
+space/mod.rs:  576:    pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
+space/mod.rs:  587:    pub fn padding_policy(&self) -> crate::padding::PaddingPolicy {
+space/mod.rs:  599:    pub fn last_padding_error(&self) -> Option<&crate::Error> {
+space/mod.rs:  614:    pub fn last_publish_error(&self) -> Option<&crate::Error> {
+space/mod.rs:  623:    pub fn audit_owned_chunk_count(&self) -> usize {
+space/mod.rs:  639:    pub fn stats(&mut self) -> Result<SpaceStats> {
+space/mod.rs:  657:    pub fn begin_tx<'s>(&'s mut self) -> Tx<'s, 'f> {
+space/mod.rs:  670:    pub fn get(&mut self, namespace: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>> {
+space/mod.rs:  712:    pub fn list(&mut self, namespace: Namespace) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+space/mod.rs:  738:    pub fn list_keys(&mut self, namespace: Namespace) -> Result<Vec<Vec<u8>>> {
+space/mod.rs:  764:    pub fn list_keys_after(
+space/mod.rs:  809:    pub fn list_after(
+space/mod.rs:  836:    pub fn count(&mut self, namespace: Namespace) -> Result<usize> {
+space/mod.rs:  889:    pub fn erase_namespace(&mut self, namespace: Namespace) -> Result<usize> {
+space/mod.rs:  926:    pub fn list_namespaces(&mut self) -> Result<Vec<Namespace>> {
+space/mod.rs:  938:    pub fn list_namespaces_with_kind(
 space/superblock.rs:  30:pub const NO_RECORD: u64 = u64::MAX;
 space/superblock.rs:  37:pub struct Superblock {
 space/superblock.rs:  72:    pub const ENCODED_LEN: usize = 8 + 8 + 32;

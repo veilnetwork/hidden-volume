@@ -12,6 +12,52 @@ format.
 
 ## [Unreleased]
 
+### Breaking — report8 H-09
+
+- **A publish that may have landed answers `PublishUncertain`, not `Io`.**
+  Both publishers — `commit_tx` and the checkpoint self-heal — burn the
+  new `seq` one instruction before the first Superblock replica can
+  reach the disk, and adopt the new superblock only after the final
+  `fsync`. Any failure in between left the disk holding a `seq` HIGHER
+  than the one in memory, and the caller was handed the raw
+  `Error::Io(_)` of whichever syscall broke.
+
+  That named the syscall and misnamed the situation. An I/O error reads
+  as "the write did not happen", and a caller who believes it retries
+  the same Tx or runs maintenance on a root the file has already moved
+  past — the exact HV-01 sequence where a vacuum erases an era that was
+  already visible. The remedy is neither retry nor abort: it is to
+  **reopen**, because only the open scan can settle which era landed.
+  `Error::PublishUncertain` has said precisely that since HV-01, was
+  already carried across the FFI, and was already raised by the vacuum
+  gate; the publishers themselves simply never raised it. The comment
+  above the burn already claimed this semantics ("if one lands and a
+  later replica (or the fsync) fails") — the code did not.
+
+  The window is exactly the burn-to-`fsync` span, and its lower edge is
+  load-bearing: the Commit chunk and its fsync sit ABOVE it and keep
+  their own error, because nothing they write is reachable until a
+  superblock names it. Widening the variant to cover them would tell
+  every caller to reopen after any full disk.
+
+  Both publishers now route through one `Space::publish_superblock`,
+  so the window has a single definition rather than two copies to
+  drift apart.
+
+- **New: `Space::last_publish_error()`.** `PublishUncertain` names the
+  remedy, not the cause, and deliberately so — the remedy is the same
+  whichever step broke. The cause is parked here instead of discarded,
+  the same way `last_padding_error` parks a skipped padding round: a
+  device that is out of space and one that is failing want different
+  things from an operator. Diagnostic only; it says nothing about
+  whether the era reached the disk, and nothing on this side of a
+  reopen can. Cleared by the next successful publish.
+
+- **Unchanged, on purpose: committing is not blocked afterwards.**
+  `commit_tx` derives the next `seq` from `attempted_seq`, so it skips
+  the burnt number instead of publishing a second payload under it
+  (audit HV-01). Only the destructive maintenance is refused.
+
 ### Breaking — report7 P2 (Dart)
 
 - **A worker that died under a call is `HvOpIndeterminate`, not
