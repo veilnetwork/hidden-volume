@@ -58,7 +58,12 @@ export 'src/bindings.dart'
         HvWriteOpDelete,
         HvWriteOpAppendLog,
         HvWriteOpDeleteLog,
-        PaddingPreset;
+        PaddingPreset,
+        // Test seams for the `mayHaveApplied` drift check (report8 H-09):
+        // a kind that matches nothing makes the predicate silently
+        // always-false, and only the ordinal table can say what can arrive.
+        debugKnownErrorKinds,
+        debugKindsThatMayHaveApplied;
 
 // Async wrapper + Future-returning top-level helpers.
 export 'src/async_bindings.dart'

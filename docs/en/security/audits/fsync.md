@@ -170,11 +170,28 @@ Crash mid-vacuum:
 
 ### `sync_all()` errors
 Every `fsync()` call propagates errors via `?`. If `sync_all()` returns
-`Err`, the Tx aborts. Caller sees `Error::Io(_)`. The on-disk state may
-be: any prefix of the writes durable, with the post-error writes
-volatile in OS buffers — same crash-safety analysis as above. Caller
-should NOT retry the same Tx without first re-opening the container
-to re-derive state.
+`Err`, the Tx aborts. The on-disk state may be: any prefix of the
+writes durable, with the post-error writes volatile in OS buffers —
+same crash-safety analysis as above. Caller should NOT retry the same
+Tx without first re-opening the container to re-derive state.
+
+**Which error the caller sees depends on where it broke** (report8
+H-09). Up to and including Barrier 2 (the Commit chunk's fsync) nothing
+written is reachable by a reader, so those failures surface as
+`Error::Io(_)` and describe themselves accurately. Barrier 3 — the
+Superblock publish — is different: `commit_tx` burns the new `seq`
+before the first replica can reach the disk, so a failure there can
+leave the file holding a HIGHER seq than the handle's `superblock.seq`.
+Every failure in that window is therefore `Error::PublishUncertain(_)`,
+whose whole message is the "re-open first" sentence above. It used to
+be `Error::Io(_)` there too, which reads as "the write did not happen"
+and contradicted this section's own advice. The underlying cause is
+kept on `Space::last_publish_error()`.
+
+The checkpoint self-heal publishes a Superblock the same way and
+answers the same variant. Committing is NOT blocked afterwards: the
+next `seq` is derived from the burn mark, so it skips the burnt number
+rather than publishing a second payload under it (audit HV-01).
 
 ### macOS `F_FULLFSYNC`
 On macOS, `fsync(2)` flushes the filesystem buffer cache to the disk's

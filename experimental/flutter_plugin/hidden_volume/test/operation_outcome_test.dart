@@ -185,6 +185,95 @@ void main() {
         reason: 'a worker that answered is not a worker that vanished');
   });
 
+  test('a refusal that MAY have applied does not claim it did not', () {
+    // report8 H-09. `HvOpFailed` used to promise, of every kind, that
+    // "nothing was committed, so the operation is safe to retry" — while
+    // `docs/{en,ru}/security/audits/fsync.md` said a caller "should NOT
+    // retry the same Tx without first re-opening the container". The core
+    // settles it: a commit whose Superblock publish fails answers
+    // `PublishUncertain`, which exists to say a replica may already be on
+    // the disk. That arrives as an error reply from a LIVE worker, so it
+    // is an `HvOpFailed` — the one variant that promised the opposite.
+    final publishUncertain = HvOpFailed(
+      HvException('PublishUncertain', 'reopen before committing'),
+    );
+    expect(publishUncertain.mayHaveApplied, isTrue,
+        reason: 'a burnt seq with a replica possibly on disk was reported '
+            'as "nothing was committed"');
+
+    // The rewrite kinds are the other half: the rename HAPPENED, so the
+    // new passwords are already in effect and retrying with the old one
+    // is wrong.
+    for (final kind in const [
+      'RenameVisibleDurabilityUncertain',
+      'RenameVisibleContentUnverified',
+    ]) {
+      expect(HvOpFailed(HvException(kind, '')).mayHaveApplied, isTrue,
+          reason: '$kind means the rewrite applied');
+    }
+
+    // ...and the split has to stay a split. If every refusal answered
+    // "may have applied", the flag would be a constant and every
+    // ordinary rejection would lose the guarantee it really does carry.
+    for (final kind in const [
+      'WrongNamespaceKind',
+      'AuthFailed',
+      'ReadOnly',
+      'PayloadTooLarge',
+      'UnreadableNewerState',
+    ]) {
+      expect(HvOpFailed(HvException(kind, '')).mayHaveApplied, isFalse,
+          reason: '$kind is refused before a byte is written');
+    }
+  });
+
+  test('every kind that may have applied is a kind that can actually arrive',
+      () {
+    // The predicate matches on a STRING. A kind that is misspelled, or
+    // one the Rust side renamed, makes `mayHaveApplied` silently
+    // always-false for it — the flag is still there, still read, and
+    // never true again. Pin it against the ordinal table the lifter
+    // actually produces names from.
+    //
+    // Read the REAL set, not a list of the same names written out here.
+    // The first draft of this test did the latter and a deliberately
+    // misspelled entry sailed through it: all that proved was that the
+    // test's own copy was spelled correctly.
+    final unliftable =
+        debugKindsThatMayHaveApplied().difference(debugKnownErrorKinds());
+    expect(unliftable, isEmpty,
+        reason: 'no error can ever be lifted with these kinds, so naming '
+            'them is dead code that reads as a live guarantee: $unliftable');
+    // And the set is not empty, or the check above passes vacuously.
+    expect(debugKindsThatMayHaveApplied(), contains('PublishUncertain'));
+  });
+
+  test('a live refusal from the core is answerable through mayHaveApplied',
+      () async {
+    // The decision at the CALL SITE, not the predicate next to it: an
+    // outcome taken off a real worker, through the real reply path, must
+    // carry the flag — a getter that only works on hand-built values is
+    // a getter no caller can use.
+    final space = await makeSpace();
+    addTearDown(space.close);
+
+    // Namespace 0 is reserved; the core refuses before writing anything.
+    final op = space.commitOperation([
+      HvWriteOpPut(
+        namespace: 0,
+        key: Uint8List.fromList('k'.codeUnits),
+        value: Uint8List.fromList('v'.codeUnits),
+      ),
+    ]);
+    await expectLater(op.result, throwsA(isA<HvException>()));
+
+    final outcome = space.outcomeOf(op.id);
+    expect(outcome, isA<HvOpFailed>());
+    expect((outcome as HvOpFailed).mayHaveApplied, isFalse,
+        reason: 'a pre-write rejection really did nothing, and saying '
+            'otherwise would make the flag useless in the other direction');
+  });
+
   test('ids are monotonic and an unissued id is unknown, not pending',
       () async {
     final space = await makeSpace();

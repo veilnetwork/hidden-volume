@@ -58,6 +58,34 @@ format.
   the burnt number instead of publishing a second payload under it
   (audit HV-01). Only the destructive maintenance is refused.
 
+### Breaking — report8 H-09 (Dart)
+
+- **`HvOpFailed` no longer promises that nothing happened.** Its doc
+  said, of every kind, "**Nothing was committed**, so the operation is
+  safe to retry" — while `docs/{en,ru}/security/audits/fsync.md` said in
+  the same repository that a caller "should NOT retry the same Tx
+  without first re-opening the container". Two documents, opposite
+  advice, and `docs/{en,ru}/guide/flutter.md` had copied the wrong one
+  into its worked example.
+
+  The core is the arbiter and it sides with the audit doc: a commit
+  whose Superblock publish fails answers `PublishUncertain`, and that
+  arrives from a **live** worker as an error reply — i.e. as an
+  `HvOpFailed`, the one outcome that promised the opposite. The two
+  `RenameVisible*` kinds are the same shape: the rewrite applied.
+
+- **New: `HvException.mayHaveApplied` / `HvOpFailed.mayHaveApplied`.**
+  The distinction now lives where it can be acted on instead of in a
+  paragraph. `true` for `PublishUncertain` and the two `RenameVisible*`
+  kinds — reopen and look; `false` for refusals raised before a byte was
+  written. `false` is not "retry away": `UnreadableNewerState` and
+  `Busy` are effect-free and still want a reopen or a wait. The getter
+  answers what happened, not what to do next.
+
+  The names are checked against the `_hvErrorKinds` ordinal table by a
+  test, because a misspelled kind makes the predicate silently
+  always-`false` for it — a guarantee that reads live and is dead.
+
 ### Breaking — report7 P2 (Dart)
 
 - **A worker that died under a call is `HvOpIndeterminate`, not

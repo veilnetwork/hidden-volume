@@ -237,8 +237,7 @@ class HvOpSucceeded extends HvOpOutcome {
   String toString() => 'HvOpSucceeded($value)';
 }
 
-/// The worker answered, and the answer was a refusal. **Nothing was
-/// committed**, so the operation is safe to retry.
+/// The worker answered, and the answer was a refusal by the core.
 ///
 /// This is a claim about the CORE's answer, and it is only sound because
 /// there is one: the worker was alive, it ran the call, and the call
@@ -246,9 +245,29 @@ class HvOpSucceeded extends HvOpOutcome {
 /// [HvOpIndeterminate] instead — it used to answer this, which said
 /// "nothing happened" about an operation nobody watched finish
 /// (report7 P2).
+///
+/// **A refusal is not by itself a proof that nothing happened**
+/// (report8 H-09). This variant used to say "nothing was committed, so
+/// the operation is safe to retry" flatly, of every kind — and
+/// `docs/en/security/audits/fsync.md` said the opposite in the same
+/// breath, that a caller "should NOT retry the same Tx without first
+/// re-opening the container". The core is the arbiter and the core sides
+/// with the audit doc: a commit whose Superblock publish fails answers
+/// `PublishUncertain`, which exists precisely to say a replica may
+/// already be on the disk.
+///
+/// Ask [error] rather than the variant: [HvException.mayHaveApplied] is
+/// `true` for `PublishUncertain` and the two `RenameVisible*` kinds, and
+/// `false` for the ordinary refusals that were rejected before anything
+/// was written. Reopen on the first group; the second is safe to retry.
 class HvOpFailed extends HvOpOutcome {
   const HvOpFailed(this.error);
   final HvException error;
+
+  /// Whether the refused operation may still have taken effect — see
+  /// [HvException.mayHaveApplied]. `true` means reopen and look; do not
+  /// retry.
+  bool get mayHaveApplied => error.mayHaveApplied;
 
   @override
   String toString() => 'HvOpFailed(${error.kind}: ${error.message})';

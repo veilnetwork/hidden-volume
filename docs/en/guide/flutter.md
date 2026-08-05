@@ -221,7 +221,10 @@ try {
   switch (space.outcomeOf(op.id)) {
     case HvOpPending():   /* still running */
     case HvOpSucceeded(): /* it landed; nothing to redo */
-    case HvOpFailed():    /* the worker answered and refused; safe to retry */
+    case HvOpFailed(:final mayHaveApplied):
+      // The worker answered and the core refused. Ask the KIND whether
+      // that refusal proves no effect: reopen if it does not.
+      if (mayHaveApplied) { /* reopen and look */ } else { /* safe to retry */ }
     case HvOpIndeterminate(): /* the worker DIED under it — reopen and look */
     case HvOpUnknown():   /* never issued, or aged out of history */
   }
@@ -230,11 +233,23 @@ try {
 
 **`HvOpFailed` and `HvOpIndeterminate` are not the same answer**, and
 the difference is the one that matters when it matters. `HvOpFailed`
-means the worker was alive, ran the call, and the core refused: nothing
-was committed, and a retry is safe. `HvOpIndeterminate` means the worker
-*died* under the call — and an isolate can die after the native commit
-has reached the disk and before its reply is sent, so whether the write
-landed is genuinely unknown from Dart. Reopen the container and look.
+means the worker was alive, ran the call, and the core refused.
+`HvOpIndeterminate` means the worker *died* under the call — and an
+isolate can die after the native commit has reached the disk and before
+its reply is sent, so whether the write landed is genuinely unknown from
+Dart. Reopen the container and look.
+
+**A refusal is not by itself a proof of no effect** (report8 H-09).
+This guide, and `HvOpFailed` itself, used to say "nothing was committed,
+and a retry is safe" of every refusal — while
+[`docs/en/security/audits/fsync.md`](../security/audits/fsync.md) said a
+caller "should NOT retry the same Tx without first re-opening the
+container". The core sides with the audit doc: a commit whose Superblock
+publish fails answers `PublishUncertain`, which exists to say a replica
+may already be on the disk. Read `HvOpFailed.mayHaveApplied` (i.e.
+`HvException.mayHaveApplied`), which is `true` for `PublishUncertain`
+and the two `RenameVisible*` kinds and `false` for the refusals that
+happen before anything is written.
 
 This mirrors the Rust core, which models a lost operation as one that
 **may have changed state**; only `Cancelled` there carries a proof of no
