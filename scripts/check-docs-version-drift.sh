@@ -155,6 +155,182 @@ if [ -f "$FFI_TOML" ]; then
     fi
 fi
 
+# Pattern 5: Argon2 cost ceilings. `MAX_M_COST_KIB` / `MAX_T_COST` /
+# `MAX_P_COST` live in `crypto/kdf.rs`; the narrative docs restate
+# their values in prose and in constant tables. Commit ff9ec00
+# tightened all three (1 GiB / 100 / 64 -> 512 MiB / 8 / 16) and
+# touched only the changelog, the source and the generated API
+# snapshot — EIGHT doc sites went on asserting the old numbers, and
+# this gate answered "docs are consistent", because patterns 1-4 know
+# about format versions, header size, and binding staleness, and
+# nothing at all about cost constants. That is what this pattern is
+# for: the next edit to these three values must not drift silently
+# the way the last one did.
+#
+# It reads the three values from the source and fails on any line in
+# `docs/` or the top-level narrative docs that states a DIFFERENT
+# value next to one of the ceiling names. Three doc idioms are
+# recognised, which is every idiom in use:
+#
+#   triple    `512 MiB / 8 / 16`            (format.md prose + table)
+#   claim     `MAX_T_COST` = 8 | 8 <= 8     (DESIGN.md, audit tables)
+#   interval  `t_cost ∈ [2, 8]`             (adversarial-stance)
+#
+# A line is only examined when it carries ceiling context — one of the
+# constant names, the word "ceiling"/"потолк", a `≤`, or an interval.
+# That is what keeps the `Argon2Params::MIN` rows sitting right above
+# the MAX rows in the audit tables from being read as ceiling claims.
+# Values may wrap onto the following line (markdown docs here are
+# hard-wrapped at ~68 columns), so each check reads a two-line window
+# but only fires when the claim STARTS on the current line — which
+# also dedupes a finding seen from both of its windows.
+#
+# `docs/en/reference/api-surface.txt` is excluded: it is generated
+# verbatim from the source by `scripts/dump-public-api.sh`, which has
+# its own `--check` mode in the same pre-tag gate.
+CEIL_SRC="$REPO_ROOT/crates/hidden-volume/src/crypto/kdf.rs"
+
+read_ceiling() {
+    # $1 = constant name. Accepts `N`, `N * M`, `N * M * K`.
+    grep -E "^[[:space:]]*pub const $1: u32 = [0-9 *]+;" "$CEIL_SRC" \
+        | head -n1 \
+        | sed -E "s/^[[:space:]]*pub const $1: u32 = ([0-9 *]+);.*/\1/" \
+        | tr -d ' ' \
+        | awk -F'*' '{v=1; for (i=1; i<=NF; i++) v*=$i; print v}'
+}
+
+CEIL_M=$(read_ceiling MAX_M_COST_KIB)
+CEIL_T=$(read_ceiling MAX_T_COST)
+CEIL_P=$(read_ceiling MAX_P_COST)
+
+if [ -z "$CEIL_M" ] || [ -z "$CEIL_T" ] || [ -z "$CEIL_P" ]; then
+    echo "error: Argon2 cost ceilings not parseable from $CEIL_SRC" >&2
+    exit 2
+fi
+
+echo "==> Argon2 ceilings from source: m_cost_kib <= $CEIL_M KiB, t_cost <= $CEIL_T, p_cost <= $CEIL_P"
+
+CEIL_REPORT=$(mktemp)
+trap 'rm -f "$REPORT" "$CEIL_REPORT"' EXIT
+
+CEIL_FILES=()
+while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$f" in
+        docs/en/reference/api-surface.txt) continue ;;
+    esac
+    CEIL_FILES+=("$f")
+done < <(
+    find docs -type f \( -name '*.md' -o -name '*.txt' \) 2>/dev/null || true
+    for f in "${TOP_LEVEL[@]}"; do [ -f "$f" ] && echo "$f"; done
+)
+
+for f in "${CEIL_FILES[@]}"; do
+    # Normalize the non-ASCII spellings to ASCII before awk sees them.
+    # The awk patterns below use bracket expressions, and a multi-byte
+    # character inside `[...]` is a set of its BYTES, not one
+    # character. Substitutions are one-line-in / one-line-out, so line
+    # numbers and the `length()`-based line boundary both still hold.
+    sed -e 's/≤/<=/g' -e 's/≥/>=/g' -e 's/ *∈ */ in /g' \
+        -e 's/ГиБ/GiB/g' -e 's/МиБ/MiB/g' -e 's/КиБ/KiB/g' "$f" \
+    | awk -v FNAME="$f" -v M="$CEIL_M" -v T="$CEIL_T" -v P="$CEIL_P" '
+        { line[NR] = $0 }
+
+        # Does this line make a claim about the CEILINGS, as opposed to
+        # the MIN floor, a preset, or the raw header field layout?
+        function ceiling_ctx(s) {
+            return index(s, "MAX_M_COST_KIB") || index(s, "MAX_T_COST") \
+                || index(s, "MAX_P_COST")    || index(s, "MAX.m_cost")  \
+                || index(s, "MAX.t_cost")    || index(s, "MAX.p_cost")  \
+                || index(s, "ceiling")       || index(s, "Ceiling")     \
+                || index(s, "потолк")        || index(s, "Потолк")      \
+                || index(s, "<=")            || index(s, " in [")
+        }
+
+        # `NAME` = V, or a table cell `| NAME | V |`. Returns the value
+        # in the constant own units, or -1 when the name carries no
+        # numeric claim here (`p_cost <= MAX_P_COST`, prose mentions).
+        # Sets ANCHOR to where the name was found.
+        function claim(s, anchor, is_mem,    rest, num) {
+            if (!match(s, anchor)) return -1
+            ANCHOR = RSTART
+            rest = substr(s, RSTART + RLENGTH)
+            # An assertion delimiter must come before any digit.
+            if (!match(rest, /^[^0-9|=<]*[|=<]+/)) return -1
+            rest = substr(rest, RSTART + RLENGTH)
+            if (!match(rest, /^[^0-9A-Za-z]*[0-9]+/)) return -1
+            num = substr(rest, RSTART, RLENGTH) + 0
+            rest = substr(rest, RSTART + RLENGTH)
+            if (is_mem && match(rest, /^[ ]*(KiB|MiB|GiB)/)) {
+                if (index(substr(rest, RSTART, RLENGTH), "MiB")) return num * 1024
+                if (index(substr(rest, RSTART, RLENGTH), "GiB")) return num * 1024 * 1024
+            }
+            return num
+        }
+
+        # `NAME ∈ [lo, hi]` — the upper end is the ceiling. `∈` has
+        # already been rewritten to ` in ` by the sed above.
+        function interval_hi(s, anchor,    rest) {
+            if (!match(s, anchor)) return -1
+            ANCHOR = RSTART
+            rest = substr(s, RSTART + RLENGTH)
+            if (!match(rest, /^[^0-9]*in[ ]*\[[ ]*[0-9]+[ ]*,[ ]*/)) return -1
+            rest = substr(rest, RSTART + RLENGTH)
+            if (!match(rest, /^[0-9]+/)) return -1
+            return substr(rest, RSTART, RLENGTH) + 0
+        }
+
+        function report(n, what) {
+            printf "  [STALE] %s:%d — %s\n", FNAME, n, what
+        }
+
+        function check(win, cut, i, anchor, is_mem, want, label,    v) {
+            v = interval_hi(win, anchor)
+            if (v < 0) v = claim(win, anchor, is_mem)
+            if (v < 0 || ANCHOR > cut || v == want) return
+            report(i, label " ceiling stated as " v ", source says " want)
+        }
+
+        END {
+            for (i = 1; i <= NR; i++) {
+                if (!ceiling_ctx(line[i])) continue
+                cut = length(line[i])
+                win = (i < NR) ? line[i] " " line[i + 1] : line[i]
+
+                # The `<mem> / <t> / <p>` triple states all three at
+                # once; where it appears it supersedes the per-name
+                # checks, whose delimiter scan cannot tell the three
+                # slash-separated values apart.
+                if (match(win, /[0-9]+[ ]*(KiB|MiB|GiB)[ ]*\/[ ]*[0-9]+[ ]*\/[ ]*[0-9]+/)) {
+                    if (RSTART > cut) continue
+                    trip = substr(win, RSTART, RLENGTH)
+                    split(trip, a, "/")
+                    mem = a[1] + 0
+                    if (index(a[1], "MiB")) mem *= 1024
+                    else if (index(a[1], "GiB")) mem *= 1024 * 1024
+                    if (mem != M || (a[2] + 0) != T || (a[3] + 0) != P)
+                        report(i, "ceiling triple \"" trip "\", source says " \
+                            (M / 1024) " MiB / " T " / " P)
+                    continue
+                }
+
+                # Anchors are passed as STRINGS, not `/…/` literals: a
+                # regex literal in an argument position is evaluated as
+                # `$0 ~ /…/` and reaches the callee as 0 or 1.
+                check(win, cut, i, "(MAX_M_COST_KIB|MAX\\.m_cost_kib|m_cost_kib)", 1, M, "m_cost_kib (KiB)")
+                check(win, cut, i, "(MAX_T_COST|MAX\\.t_cost|t_cost)",             0, T, "t_cost")
+                check(win, cut, i, "(MAX_P_COST|MAX\\.p_cost|p_cost)",             0, P, "p_cost")
+            }
+        }
+    ' >> "$CEIL_REPORT"
+done
+
+if [ -s "$CEIL_REPORT" ]; then
+    CEIL_FOUND=$(wc -l < "$CEIL_REPORT" | tr -d ' ')
+    FOUND=$((FOUND + CEIL_FOUND))
+    cat "$CEIL_REPORT" >> "$REPORT"
+fi
+
 if [ "$FOUND" -gt 0 ]; then
     echo
     echo "==> $FOUND stale doc reference(s) found:"

@@ -78,8 +78,8 @@ pass commit.
   Argon2Params (16)` (v3 layout; v2 had an additional 32-byte
   cleartext `container_id` at offset 32..64 — closed by v3 #10).
   Check whether the 16-byte `Argon2Params` block contains values
-  in the plausible range (`m_cost_kib ∈ [8192, 2²⁰]`,
-  `t_cost ∈ [2, 100]`, `p_cost ∈ [1, 64]`, `format_version == 3`,
+  in the plausible range (`m_cost_kib ∈ [8192, 524288]` KiB,
+  `t_cost ∈ [2, 8]`, `p_cost ∈ [1, 16]`, `format_version == 3`,
   padding-policy bits 16..24 ∈ {0, 1, 2, 3}, reserved bits
   24..32 == 0). If everything parses, with high probability this
   is a `hidden-volume` container.
@@ -528,9 +528,10 @@ pass commit.
 - **Method.** Tamper Argon2Params to extreme values (`m_cost_kib =
   u32::MAX`).
 - **Outcome.** `Argon2Params::validate` rejects with explicit caps
-  (`m_cost_kib ≤ 1 GiB`, `t_cost ≤ 100`, `p_cost ≤ 64`,
-  `format_version == 2`, reserved bits 24..32 == 0). Closed in
-  audit pass 1 (D1).
+  (`m_cost_kib ≤ 512 MiB`, `t_cost ≤ 8`, `p_cost ≤ 16`,
+  `format_version == 3`, reserved bits 24..32 == 0). Closed in
+  audit pass 1 (D1); the ceilings were tightened in report6 P2 so
+  that they bound the derivation's *time* as well as its memory.
 - **Verdict.** **Defended.**
 - **Severity.** INFO.
 
