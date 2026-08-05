@@ -503,6 +503,12 @@ pub enum WriteOp {
         value: Vec<u8>,
     },
     /// KV deletion. No-op if key absent.
+    ///
+    /// **Kv namespaces only.** Against a namespace holding log entries
+    /// the commit fails with `WrongNamespaceKind` — including when the
+    /// key is the eight big-endian bytes a `log_id` encodes to. Use
+    /// [`Self::DeleteLog`] for those. Until audit HV-04 this went
+    /// through and unlinked the record.
     Delete {
         /// Namespace tag.
         namespace: u8,
@@ -521,8 +527,14 @@ pub enum WriteOp {
     },
     /// Delete a log entry by logical id. No-op if absent. This removes the
     /// log-id index entry; replacing it with an empty payload does not.
+    ///
+    /// **Log namespaces only** (audit HV-04). Against a Kv namespace
+    /// the commit fails with `WrongNamespaceKind`; it used to succeed,
+    /// removing whatever KV entry happened to be keyed on those eight
+    /// bytes, because a log delete is stored as a KV delete and so met
+    /// neither side's kind check.
     DeleteLog {
-        /// Namespace tag (typically a Log-kind namespace).
+        /// Namespace tag; must be a Log-kind namespace.
         namespace: u8,
         /// Logical id to remove.
         log_id: u64,

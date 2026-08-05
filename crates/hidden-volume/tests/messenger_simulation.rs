@@ -19,7 +19,6 @@ use hidden_volume::container::{ContainerOptions, RepackOptions};
 use hidden_volume::crypto::kdf::Argon2Params;
 use hidden_volume::padding::PaddingPolicy;
 use hidden_volume::space::index::Namespace;
-use hidden_volume::space::log::log_id_key;
 use hidden_volume::{Container, Error};
 
 mod common;
@@ -258,9 +257,10 @@ fn delete_then_compact_eliminates_bytes() {
         tx.append_log(Namespace::MESSAGE_LOG, 2, b"keeper-msg")
             .unwrap();
         tx.commit().unwrap();
-        // Delete message 1 (the canary).
+        // Delete message 1 (the canary), by id — audit HV-04 (a log
+        // namespace no longer accepts a delete addressed by key).
         let mut tx = s.begin_tx();
-        tx.delete(Namespace::MESSAGE_LOG, &log_id_key(1)).unwrap();
+        tx.delete_log(Namespace::MESSAGE_LOG, 1).unwrap();
         tx.commit().unwrap();
     }
 
