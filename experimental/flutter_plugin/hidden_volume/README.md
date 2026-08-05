@@ -131,6 +131,15 @@ void main() async {
 }
 ```
 
+`close()` **throws when the container did not actually close** — `Busy` if
+the worker did not answer in time (it is still inside a native call, and
+the exclusive file lock is still held), `Internal` if it died on the way
+out. A worker that has not answered is deliberately NOT killed: an isolate
+kill cannot unwind an FFI frame, so killing it would strand the native
+handle and its flock for the life of the process. If you close one space
+and immediately open another, expect a possible `Busy` on the open and do
+not present it as a wrong password.
+
 For one-shot top-level operations (header inspection, password rotation,
 container compaction), use `headerInfoAsync` / `changePasswordsAsync` /
 `compactKnownAsync`.

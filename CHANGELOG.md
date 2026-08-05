@@ -58,6 +58,48 @@ format.
   the burnt number instead of publishing a second payload under it
   (audit HV-01). Only the destructive maintenance is refused.
 
+### Breaking — report8 (Dart worker lifecycle)
+
+- **`HvAsyncSpace.close` no longer kills a worker that has not
+  answered, and no longer reports a close that did not happen.** It
+  used to swallow both the timeout and the worker's death, kill the
+  isolate unconditionally in a `finally`, and return normally — so a
+  container that was still open reported a clean close.
+
+  The kill was the worse half. A worker that has not answered is
+  almost certainly parked inside a synchronous FFI call, and **an
+  isolate kill cannot interrupt or unwind an FFI frame**: the native
+  `Drop` never runs, the container's exclusive flock stays held by the
+  process, and every later open fails `Busy` until the app restarts —
+  the "correct password but won't unlock" trap. The worker is now left
+  running to finish releasing the container on its own terms; it kills
+  itself once it has served the close. Its answer is drained in the
+  background so the watcher and the reply port are released when it
+  lands rather than never.
+
+  Killing remains the last resort on the two paths where it is safe:
+  after the worker has answered (it is already tearing itself down) and
+  after it has died (there is no frame left to unwind).
+
+  `close()` now **throws** when the container did not close — `Busy`
+  past `closeTimeout` (5 s, settable for tests), `Internal` on a worker
+  that died mid-close. Both are teardown failures a caller can log and
+  carry on from, but a flow that closes one space and opens another
+  must expect `Busy` on the open and not present it as a wrong
+  password. `debugKillWorker()` therefore leaves a handle whose
+  `close()` throws — by design; nothing on that path can claim the
+  native handle was released.
+
+  This is the third of three worker lifecycles in the project to be
+  brought to the same contract; `WorkerKvLogStore` in the host app was
+  the one that already had it right.
+
+- `_WorkerDeath` → `HvWorkerDeath` (public), plus
+  `HvAsyncSpace.debugOverWorker` and `HvAsyncSpace.closeTimeout`. Test
+  seams: a real worker cannot be parked inside an FFI frame on demand,
+  and `close()` drains the in-flight call first, so the contract above
+  has no other way to be exercised.
+
 ### Breaking — report8 H-09 (Dart)
 
 - **`HvOpFailed` no longer promises that nothing happened.** Its doc
