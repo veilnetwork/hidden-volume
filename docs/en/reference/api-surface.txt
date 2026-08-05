@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-05T09:09:58Z
+# Captured: 2026-08-05T09:24:59Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -78,40 +78,40 @@ container/mod.rs:  104:pub struct RepackOptions {
 container/mod.rs:  154:pub struct Container {
 container/mod.rs:  163:    pub fn create<P: AsRef<Path>>(path: P, params: Argon2Params) -> Result<Self> {
 container/mod.rs:  183:    pub fn create_with_options<P: AsRef<Path>>(path: P, options: ContainerOptions) -> Result<Self> {
-container/mod.rs:  261:    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-container/mod.rs:  289:    pub fn open_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
-container/mod.rs:  329:    pub fn open_exclusive_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
-container/mod.rs:  344:    pub fn is_readonly(&self) -> bool {
-container/mod.rs:  351:    pub fn set_padding_policy(&mut self, policy: PaddingPolicy) -> Result<()> {
-container/mod.rs:  361:    pub fn padding_policy(&self) -> PaddingPolicy {
-container/mod.rs:  368:    pub fn set_superblock_replicas(&mut self, replicas: u8) -> Result<()> {
-container/mod.rs:  378:    pub fn superblock_replicas(&self) -> u8 {
-container/mod.rs:  386:    pub fn header(&self) -> &Header {
-container/mod.rs:  392:    pub fn params(&self) -> Argon2Params {
-container/mod.rs:  427:    pub fn create_space(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  456:    pub fn open_space(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  511:    pub fn open_space_verified(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  520:    pub fn open_space_with_keys_verified(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
-container/mod.rs:  564:    pub fn derive_space_keys(&self, password: &[u8]) -> Result<SpaceKeys> {
-container/mod.rs:  580:    pub fn open_space_with_keys(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
-container/mod.rs:  593:    pub fn open_space_cancellable(
-container/mod.rs:  607:    pub fn open_space_with_keys_cancellable(
-container/mod.rs:  681:    pub fn open_space_parallel(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  689:    pub fn open_space_with_keys_parallel(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
-container/mod.rs:  719:    pub fn open_space_mmap(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  727:    pub fn open_space_with_keys_mmap(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
-container/mod.rs:  808:    pub fn open_space_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  821:    pub fn open_space_with_keys_constant_time(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
-container/mod.rs:  841:    pub fn open_space_parallel_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  851:    pub fn open_space_with_keys_parallel_constant_time(
-container/mod.rs:  871:    pub fn open_space_mmap_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  881:    pub fn open_space_with_keys_mmap_constant_time(
-container/mod.rs:  965:    pub fn repack(
-container/mod.rs:  987:    pub fn repack_cancellable(
-container/mod.rs:  1264:    pub fn compact_known(
-container/mod.rs:  1275:    pub fn compact_known_cancellable(
-container/mod.rs:  1336:    pub fn change_passwords(
-container/mod.rs:  1347:    pub fn change_passwords_cancellable(
+container/mod.rs:  274:    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+container/mod.rs:  302:    pub fn open_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
+container/mod.rs:  342:    pub fn open_exclusive_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
+container/mod.rs:  357:    pub fn is_readonly(&self) -> bool {
+container/mod.rs:  364:    pub fn set_padding_policy(&mut self, policy: PaddingPolicy) -> Result<()> {
+container/mod.rs:  374:    pub fn padding_policy(&self) -> PaddingPolicy {
+container/mod.rs:  381:    pub fn set_superblock_replicas(&mut self, replicas: u8) -> Result<()> {
+container/mod.rs:  391:    pub fn superblock_replicas(&self) -> u8 {
+container/mod.rs:  399:    pub fn header(&self) -> &Header {
+container/mod.rs:  405:    pub fn params(&self) -> Argon2Params {
+container/mod.rs:  440:    pub fn create_space(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  469:    pub fn open_space(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  524:    pub fn open_space_verified(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  533:    pub fn open_space_with_keys_verified(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
+container/mod.rs:  577:    pub fn derive_space_keys(&self, password: &[u8]) -> Result<SpaceKeys> {
+container/mod.rs:  593:    pub fn open_space_with_keys(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
+container/mod.rs:  606:    pub fn open_space_cancellable(
+container/mod.rs:  620:    pub fn open_space_with_keys_cancellable(
+container/mod.rs:  694:    pub fn open_space_parallel(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  702:    pub fn open_space_with_keys_parallel(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
+container/mod.rs:  732:    pub fn open_space_mmap(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  740:    pub fn open_space_with_keys_mmap(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
+container/mod.rs:  821:    pub fn open_space_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  834:    pub fn open_space_with_keys_constant_time(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
+container/mod.rs:  854:    pub fn open_space_parallel_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  864:    pub fn open_space_with_keys_parallel_constant_time(
+container/mod.rs:  884:    pub fn open_space_mmap_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:  894:    pub fn open_space_with_keys_mmap_constant_time(
+container/mod.rs:  978:    pub fn repack(
+container/mod.rs:  1000:    pub fn repack_cancellable(
+container/mod.rs:  1277:    pub fn compact_known(
+container/mod.rs:  1288:    pub fn compact_known_cancellable(
+container/mod.rs:  1349:    pub fn change_passwords(
+container/mod.rs:  1360:    pub fn change_passwords_cancellable(
 crypto/aead.rs:  21:pub struct ChunkAead {
 crypto/aead.rs:  36:    pub fn new(key: &[u8; 32]) -> Self {
 crypto/aead.rs:  46:    pub fn seal(&self, plaintext: &[u8], aad: [u8; AAD_LEN]) -> Result<([u8; NONCE_LEN], Vec<u8>)> {

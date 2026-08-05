@@ -200,3 +200,79 @@ fn an_explicit_option_still_rotates_each_field() {
     assert_eq!(policy, PaddingPolicy::None);
     let _ = std::fs::remove_file(&path);
 }
+
+/// A policy with no persisted form. Neither a preset bucket size
+/// (64 / 256 / 4096) nor `None`, so `to_persisted_index()` answers
+/// `None` and the header has nothing it can record.
+const CUSTOM_POLICY: PaddingPolicy = PaddingPolicy::BucketGrowth { bucket_chunks: 100 };
+
+/// Asking a rewrite for a CUSTOM policy must not leave the source's
+/// preset index in the destination's header (report7 P2).
+///
+/// `create_with_options` derives the header's padding bits from the
+/// requested policy — except for a custom one, where it used to pass the
+/// caller's `Argon2Params` through untouched. That word carries the
+/// index in bits 16..24, so "untouched" means "keep whatever index the
+/// caller's params already held", and the caller here is `repack`, which
+/// builds the destination's params out of the SOURCE header. The source
+/// header carries the source's index.
+///
+/// So the new container claimed a preset nothing at runtime was
+/// applying, and the next open read that index back and applied a policy
+/// its owner had explicitly asked to replace. The comment at the site
+/// said the custom case is "runtime-only", which was true of the policy
+/// and false of the header.
+#[test]
+fn a_custom_policy_does_not_inherit_the_sources_padding_index() {
+    let source = scratch_path();
+    let dest = scratch_path();
+    // The source persists index 1, so "inherited" and "zeroed" are
+    // distinguishable — and so is "fell back to the DEFAULT preset".
+    build(&source, &[b"pw"]);
+    assert_eq!(
+        posture(&source).1,
+        DISTINCTIVE_POLICY.to_persisted_index().unwrap(),
+        "the source must carry a non-zero index or this test proves nothing"
+    );
+
+    Container::repack(
+        &source,
+        &dest,
+        &[b"pw"],
+        RepackOptions {
+            padding_policy: Some(CUSTOM_POLICY),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let (_, idx, decoded) = posture(&dest);
+    assert_eq!(
+        idx, 0,
+        "the destination's header persists padding index {idx}, inherited \
+         from the source — but the repack was asked for a custom policy, \
+         which has no persisted form. The next open of this container will \
+         apply preset {idx} instead of the policy that was requested"
+    );
+    assert_eq!(
+        decoded,
+        PaddingPolicy::None,
+        "the destination header decodes to {decoded:?}; a container whose \
+         policy is runtime-only must read back as None, so a host that \
+         forgets `set_padding_policy` gets no padding rather than the \
+         wrong padding"
+    );
+
+    // Not vacuous: the repack really happened and the data survived it.
+    let mut c = Container::open(&dest).unwrap();
+    let mut s = c.open_space(b"pw").unwrap();
+    assert_eq!(
+        s.get(Namespace::SETTINGS, b"k").unwrap().as_deref(),
+        Some(&b"pw"[..])
+    );
+    drop(s);
+    drop(c);
+
+    let _ = std::fs::remove_file(&source);
+    let _ = std::fs::remove_file(&dest);
+}
