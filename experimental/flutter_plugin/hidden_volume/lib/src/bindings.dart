@@ -910,12 +910,21 @@ Uint8List? _readOptByteVec(Uint8List bytes) {
 /// (one of "Io", "AuthFailed", "SpaceAlreadyExists", "Busy", "ReadOnly",
 /// "Malformed", "Kdf", "Internal", "PayloadTooLarge", "IndexFull",
 /// "Compression", "Cancelled", "WrongNamespaceKind", "TooManyNamespaces",
-/// "IntegrityFailure", "ContainerTooLarge", or "InternalPanic" for an
-/// unexpected Rust panic).
+/// "IntegrityFailure", "ContainerTooLarge", "UnreadableNewerState",
+/// "RenameVisibleDurabilityUncertain", "RenameVisibleContentUnverified",
+/// "PublishUncertain", or "InternalPanic" for an unexpected Rust panic).
 ///
 /// "ContainerTooLarge" now also covers OPENING a container past the
 /// open-scan budget; it used to arrive as "Malformed", which said the
 /// container was corrupt when it was merely large (audit HV-13).
+///
+/// The last four kinds used to arrive as "Internal" (report7 P1), which
+/// documents itself as a library bug. Each is a normal outcome:
+/// "UnreadableNewerState" and "PublishUncertain" both mean **reopen the
+/// container**, and both are raised by orphan cleanup — which this
+/// plugin arms on every open. The two rename kinds mean the rewrite
+/// **applied**: after a password change the new passwords are already in
+/// effect, so retrying with the old one is wrong.
 class HvException implements Exception {
   HvException(this.kind, this.message);
   final String kind;
@@ -925,6 +934,10 @@ class HvException implements Exception {
   String toString() => 'HvException.$kind: $message';
 }
 
+/// Positional map from the uniffi `flat_error` ordinal to a name. The
+/// order MUST match `enum HvError` in `crates/hidden-volume-ffi/src/lib.rs`
+/// exactly: a variant inserted in the middle there renames every kind
+/// after it here, silently and at runtime. Both sides are append-only.
 const _hvErrorKinds = <String>[
   '<reserved-zero>', // variant 0 unused; uniffi tags start at 1
   'Io',
@@ -943,6 +956,13 @@ const _hvErrorKinds = <String>[
   'TooManyNamespaces',
   'IntegrityFailure',
   'ContainerTooLarge',
+  // report7 P1 — four core outcomes that used to arrive as
+  // `Internal("unknown error variant")`, i.e. as "the library has a bug"
+  // when each is a normal outcome with its own remedy.
+  'UnreadableNewerState',
+  'RenameVisibleDurabilityUncertain',
+  'RenameVisibleContentUnverified',
+  'PublishUncertain',
 ];
 
 HvException _liftHvException(RustBuffer buf) {

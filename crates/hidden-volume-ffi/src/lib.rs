@@ -109,6 +109,14 @@ uniffi::setup_scaffolding!();
 /// FFI-friendly error. One variant per [`hidden_volume::Error`] case.
 /// `flat_error` makes uniffi treat this as a flat tagged-union — every
 /// variant becomes its own typed exception on the foreign side.
+///
+/// **This enum is append-only.** uniffi transports a `flat_error` as its
+/// ordinal, and the hand-written Dart bindings turn that ordinal back
+/// into a name through a positional list (`_hvErrorKinds` in
+/// `experimental/flutter_plugin/hidden_volume/lib/src/bindings.dart`).
+/// Inserting a variant in the middle renames every error after it on the
+/// Dart side, silently and at runtime. Add new variants at the END, and
+/// append the matching name to that list in the same commit.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 #[uniffi(flat_error)]
 #[non_exhaustive]
@@ -195,6 +203,67 @@ pub enum HvError {
         /// Hard cap (`MAX_OPEN_SCAN_CHUNKS`).
         cap: u64,
     },
+
+    // ---- report7 P1: four core variants that used to be erased here ----
+    //
+    // All four reached the catch-all and arrived on the foreign side as
+    // `Internal("unknown error variant")` — whose own doc comment says it
+    // indicates a bug in the library. Every one of them is instead a
+    // normal outcome with a specific remedy, and three of the four are
+    // reachable from the main path, not from a fault-injection harness.
+    /// The container holds state written by a NEWER format this build
+    /// cannot read. The space is **readable** — the open fell back to the
+    /// newest superblock it understands — but anything that would act on
+    /// that stale view is refused: `vacuum_orphans` and `commit_tx`.
+    ///
+    /// Reachable without any exotic setup: the Dart plugin arms deferred
+    /// orphan cleanup on **every open**, so a container touched by a
+    /// newer build raises this on each one. As `Internal` it told the
+    /// host its library was broken; the real remedy is to upgrade, or to
+    /// open the container with the version that wrote it.
+    ///
+    /// Not a deniability leak: reaching it requires the space key.
+    #[error("this container holds state written by a newer format this build cannot read")]
+    UnreadableNewerState,
+    /// An atomic rewrite's `rename` **succeeded and is visible**, but the
+    /// parent-directory `fsync` that makes the directory entry survive a
+    /// crash did not.
+    ///
+    /// **The operation applied.** After a password change this means the
+    /// NEW passwords are in effect and the old ones no longer open the
+    /// container. Do not retry with the old password and do not read this
+    /// as "the rotation failed" — which is exactly what `Internal` said.
+    /// What is unconfirmed is only whether the directory entry survives a
+    /// power loss.
+    ///
+    /// Remedy: fsync the containing directory by whatever means the
+    /// platform offers, or accept the window knowingly.
+    #[error("rename is visible but its durability is unconfirmed: {0}")]
+    RenameVisibleDurabilityUncertain(String),
+    /// An atomic rewrite's `rename` **succeeded**, and the file now at
+    /// that path is **not the one we wrote** — something renamed over it
+    /// in the window between pinning the temp inode and re-reading the
+    /// path's.
+    ///
+    /// **The old container is gone either way.** Not a failed operation
+    /// to retry: the rename happened and the previous inode is unlinked.
+    /// Remedy is to restore from backup and to treat the directory as
+    /// writable by someone else.
+    #[error("rename is visible but the file at that path is not the one written: {0}")]
+    RenameVisibleContentUnverified(String),
+    /// A previous publish got at least one Superblock replica onto the
+    /// disk and then failed, so this handle's view may be one era behind
+    /// what a reopen would select. Raised for the DESTRUCTIVE operations
+    /// only — a vacuum on this handle would erase chunks belonging to an
+    /// era that is already visible on disk.
+    ///
+    /// Reachable on the main path for the same reason as
+    /// [`Self::UnreadableNewerState`]: orphan cleanup raises it, and the
+    /// Dart plugin arms deferred cleanup on every open. **Remedy is to
+    /// reopen the container** — which, reported as `Internal`, never
+    /// reached the host at all. Committing is not blocked.
+    #[error("a previous publish may have reached the disk; reopen before {0}")]
+    PublishUncertain(String),
 }
 
 impl From<hidden_volume::Error> for HvError {
@@ -222,12 +291,26 @@ impl From<hidden_volume::Error> for HvError {
                 slot,
             },
             E::ContainerTooLarge { chunks, cap } => HvError::ContainerTooLarge { chunks, cap },
+            E::UnreadableNewerState => HvError::UnreadableNewerState,
+            E::RenameVisibleDurabilityUncertain(s) => {
+                HvError::RenameVisibleDurabilityUncertain(s.into())
+            },
+            E::RenameVisibleContentUnverified(s) => {
+                HvError::RenameVisibleContentUnverified(s.into())
+            },
+            E::PublishUncertain(s) => HvError::PublishUncertain(s.into()),
             // `hidden_volume::Error` is `#[non_exhaustive]`, so this
             // catch-all is mandatory. It is a deniability-safe default
             // for any variant added upstream but not yet mapped here —
             // NOT a dumping ground for known variants. When a new core
-            // variant is added, add an explicit arm above; the
-            // `from_maps_*` unit tests guard the actionable ones.
+            // variant is added, add an explicit arm above.
+            //
+            // `every_core_variant_maps_to_something_other_than_unknown`
+            // is what holds that line: it names every variant the core
+            // has and fails on any that lands here. It exists because
+            // this comment used to promise `from_maps_*` tests that were
+            // never written, and four variants sat in the catch-all
+            // behind that promise (report7 P1).
             _ => HvError::Internal("unknown error variant".into()),
         }
     }
@@ -2668,6 +2751,138 @@ mod tests {
                 assert_eq!(cap, 16_000_000);
             },
             other => panic!("expected typed ContainerTooLarge, got {other:?}"),
+        }
+    }
+
+    // ---- report7 P1: the four variants the boundary used to erase ----
+    //
+    // Each of these asserts on `HvError`, the type a foreign caller
+    // actually receives, and each fails if its variant slides back into
+    // the catch-all. They are written one-per-variant on purpose: a
+    // single table-driven test would report only the first regression,
+    // and these four were lost one at a time, over three separate
+    // commits, precisely because nothing named them individually.
+
+    #[test]
+    fn unreadable_newer_state_reaches_the_host_as_itself() {
+        // Reachable on the main path: orphan cleanup raises it, and the
+        // Dart plugin arms deferred cleanup on every open. As
+        // `Internal` the host was told its library had a bug on every
+        // single open of a container a newer build had touched, and the
+        // real answer — upgrade, or open it with the version that wrote
+        // it — never arrived.
+        match HvError::from(hidden_volume::Error::UnreadableNewerState) {
+            HvError::UnreadableNewerState => {},
+            HvError::Internal(m) => {
+                panic!("erased at the FFI boundary into Internal({m:?}) — the 'library bug' error")
+            },
+            other => panic!("expected UnreadableNewerState, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn publish_uncertain_reaches_the_host_as_itself() {
+        // Same reachability as above, and the remedy it carries is the
+        // one the host cannot guess: REOPEN the container. Reported as
+        // `Internal`, a container that lost a publish produced "library
+        // bug" on every open, forever.
+        match HvError::from(hidden_volume::Error::PublishUncertain("vacuum")) {
+            HvError::PublishUncertain(detail) => assert_eq!(detail, "vacuum"),
+            HvError::Internal(m) => {
+                panic!("erased at the FFI boundary into Internal({m:?}) — the 'library bug' error")
+            },
+            other => panic!("expected PublishUncertain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rename_durability_uncertain_reaches_the_host_as_itself() {
+        // Raised by the rewrite-under-source-lock path, which the
+        // EXPORTED compaction and password-change entry points both
+        // reach. The distinction it carries is the whole point: the
+        // rename APPLIED. After a password change the new passwords are
+        // in effect and the old ones are dead. `Internal` says "a bug,
+        // and by implication nothing happened" — the opposite, and the
+        // caller who believes it retries with a password that no longer
+        // opens the container.
+        match HvError::from(hidden_volume::Error::RenameVisibleDurabilityUncertain(
+            "dir fsync",
+        )) {
+            HvError::RenameVisibleDurabilityUncertain(detail) => assert_eq!(detail, "dir fsync"),
+            HvError::Internal(m) => {
+                panic!("erased at the FFI boundary into Internal({m:?}) — the 'library bug' error")
+            },
+            other => panic!("expected RenameVisibleDurabilityUncertain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rename_content_unverified_reaches_the_host_as_itself() {
+        // Added to the core in df50507, which touched the core and not
+        // this boundary — so the variant was born already erased. Like
+        // its sibling it means the rewrite applied and the OLD container
+        // is gone; unlike it, what sits at the path is attacker-chosen,
+        // and the remedy is to restore from backup.
+        match HvError::from(hidden_volume::Error::RenameVisibleContentUnverified(
+            "inode moved",
+        )) {
+            HvError::RenameVisibleContentUnverified(detail) => assert_eq!(detail, "inode moved"),
+            HvError::Internal(m) => {
+                panic!("erased at the FFI boundary into Internal({m:?}) — the 'library bug' error")
+            },
+            other => panic!("expected RenameVisibleContentUnverified, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_core_variant_maps_to_something_other_than_unknown() {
+        // The catch-all above used to cite `from_maps_*` unit tests as
+        // the thing that kept known variants out of it. No such test
+        // existed — there was one, on `ContainerTooLarge`, under another
+        // name — and four variants had quietly collected in the
+        // catch-all behind that claim.
+        //
+        // This is that test. `hidden_volume::Error` is `#[non_exhaustive]`
+        // so it cannot be enumerated by the compiler; the list is written
+        // out instead, and adding a core variant without an arm in
+        // `From` fails here with the variant named. Weaker than an
+        // exhaustive match and stronger than a comment.
+        let core: Vec<hidden_volume::Error> = vec![
+            hidden_volume::Error::Io(std::io::Error::other("x")),
+            hidden_volume::Error::AuthFailed,
+            hidden_volume::Error::UnreadableNewerState,
+            hidden_volume::Error::SpaceAlreadyExists,
+            hidden_volume::Error::Busy,
+            hidden_volume::Error::ReadOnly,
+            hidden_volume::Error::RenameVisibleDurabilityUncertain("d"),
+            hidden_volume::Error::RenameVisibleContentUnverified("c"),
+            hidden_volume::Error::PublishUncertain("p"),
+            hidden_volume::Error::Malformed("m"),
+            hidden_volume::Error::Kdf("k"),
+            hidden_volume::Error::Internal("i"),
+            hidden_volume::Error::PayloadTooLarge,
+            hidden_volume::Error::IndexFull,
+            hidden_volume::Error::Compression("z"),
+            hidden_volume::Error::Cancelled,
+            hidden_volume::Error::WrongNamespaceKind("w"),
+            hidden_volume::Error::TooManyNamespaces { limit: 16 },
+            hidden_volume::Error::ContainerTooLarge { chunks: 2, cap: 1 },
+            hidden_volume::Error::IntegrityFailure {
+                detail: "d",
+                slot: 7,
+            },
+        ];
+
+        // `Error::Internal` legitimately maps to `HvError::Internal`, so
+        // the catch-all is identified by its message, not by its kind.
+        for e in core {
+            let described = e.to_string();
+            if let HvError::Internal(msg) = HvError::from(e) {
+                assert_ne!(
+                    msg, "unknown error variant",
+                    "core error {described:?} is erased at the FFI boundary"
+                );
+            }
         }
     }
 
