@@ -294,12 +294,13 @@ impl<'f> Space<'f> {
             root_hash: self.state.superblock.root_hash,
             checkpoint_slot: head,
         };
-        let replicas = self.file.superblock_replicas.max(1);
-        self.state.attempted_seq = cp_seq;
-        for _ in 0..replicas {
-            self.append_superblock(&new_sb)?;
-        }
-        self.file.fsync()?;
+        // Same window as `commit_tx`, same answer: past this call the seq is
+        // burnt and a replica may be on the disk, so a failure is not "the
+        // checkpoint write failed, carry on" but "this handle may be behind the
+        // file, reopen" (report8 H-09). A checkpoint is an optimisation hint,
+        // but PUBLISHING one bumps the superblock seq, and that half is
+        // correctness state like any other era transition.
+        self.publish_superblock(&new_sb, "checkpointing")?;
         self.state.superblock = new_sb;
         // cp_seq is strictly greater than every prior entry (bumped from
         // the max), so push preserves sort + uniqueness.
