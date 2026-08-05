@@ -103,9 +103,10 @@ The `params_version` u32 is **packed** (audit pass 8 S1 full):
   layout in §4.3 (per-root `kind` byte, unchanged from v2).
 - `m_cost_kib`, `t_cost`, `p_cost` MUST be ≥ `Argon2Params::MIN`
   (m=8 MiB, t=2, p=1). The library refuses to open or create a
-  container with weaker parameters. Symmetric ceilings — 1 GiB / 100 /
-  64 — close the cleartext-header DoS where a tampered field would
-  force the next opener into a multi-TiB Argon2id allocation.
+  container with weaker parameters. Symmetric ceilings — 512 MiB / 8 / 16
+  — close the cleartext-header DoS where a tampered field would force
+  the next opener into a multi-TiB Argon2id allocation, and bound the
+  worst admissible derivation in *time* as well as in memory.
 - Older v1 (pre-pass-13) and v2 (post-pass-13) containers are
   REJECTED by v3 readers because `format_version != 3`. The reject
   is now **doubly bound**: by `Argon2Params::validate` policy AND by
@@ -658,7 +659,7 @@ See `docs/en/guide/migration.md` for the procedure.
 | `DEFAULT_SUPERBLOCK_REPLICAS` | 3 | SB replicas per commit. |
 | `params_version.format_version` | 3 | On-disk format generation; encoded as low 16 bits of the 4-byte `params.version` (§1.2). v3 readers refuse v1/v2 files, and v3 readers are refused by hypothetical v4 readers. |
 | `argon2_floor` (`Argon2Params::MIN`) | m=8 MiB, t=2, p=1 | Refuse-to-open threshold. |
-| `Argon2Params::MAX_M_COST_KIB` / `MAX_T_COST` / `MAX_P_COST` | 1 GiB / 100 / 64 | Refuse-to-open ceilings (audit pass 1 D1, header-tamper Argon2 OOM mitigation). |
+| `Argon2Params::MAX_M_COST_KIB` / `MAX_T_COST` / `MAX_P_COST` | 512 MiB / 8 / 16 | Refuse-to-open ceilings (audit pass 1 D1, header-tamper Argon2 OOM mitigation). Each is a small multiple of the heaviest shipped preset (`HEAVY`: m=256 MiB, t=4, p=4), which bounds what a tampered header can cost in *time* as well as in memory — the ceilings were tightened for exactly that reason (report6 P2; see CHANGELOG). |
 | `MAX_OPEN_SCAN_CHUNKS` | 16 × 1024 × 1024 (= 64 GiB at `CHUNK_SIZE`) | Hard cap on slot grid size. Both sides refuse with `Error::ContainerTooLarge { chunks, cap }` — open-side (audit pass 16 TM1 mitigation, HV-13 aligned the error), write-side (audit pass 17 B). `chunks` is the observed slot count on the read side and the count the refused write would have produced on the write side. Re-exported as `pub use hidden_volume::MAX_OPEN_SCAN_CHUNKS`. |
 | tree depth | derived from the chunk count, not a constant | There is no depth constant (audit HV-15 removed `MAX_TREE_DEPTH = 3`, which doubled as the namespace's capacity ceiling). The writer grows a level whenever the level below outgrows one chunk; every walker (Space::get, list, log_iter, integrity, vacuum) may descend as deep as the chunks the space owns could be arranged into, given that each level is at least `MIN_FULL_INTERNAL_FANOUT` (12) times wider than the one above. Deeper trips `Error::Malformed("tree deeper than this space's chunk count can hold")` / the `IntegrityFailure` equivalent. At `MAX_OPEN_SCAN_CHUNKS` that bound is 7 descents. |
 | `MIN_FULL_INTERNAL_FANOUT` | `(PAYLOAD_CAP - 4) / (2 + MAX_KEY_LEN + 8 + 32) - 1` = 12 | Children a *full* internal node is guaranteed to hold, given the largest possible child pointer. The writer packs greedily, so every node of a level but the last is full — which is what makes depth logarithmic in the chunk count and lets the readers derive their depth bound from it. |

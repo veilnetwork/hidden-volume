@@ -12,6 +12,48 @@ format.
 
 ## [Unreleased]
 
+### Documentation — report7 P0
+
+- **The Argon2 ceiling values in the docs had not moved with the
+  code, and the gate that exists to catch exactly that said they
+  had.** `ff9ec00` tightened `MAX_M_COST_KIB` / `MAX_T_COST` /
+  `MAX_P_COST` to 512 MiB / 8 / 16 and touched three files: the
+  changelog, the source, and the generated API snapshot. Twelve
+  claim sites across eight documents went on asserting 1 GiB / 100 /
+  64 — `format.md` (EN+RU, prose and constant table), the
+  `adversarial-stance` and `primitive-level` audit dossiers (EN+RU),
+  and `DESIGN.md` / `DESIGN.ru.md`. A reader checking what a
+  tampered header can cost would have read a number four to twelve
+  times too large in every document that answers the question.
+
+  All twelve are corrected. Three things were wrong beyond the
+  values themselves and are fixed with them: the `primitive-level`
+  tables cited `Argon2Params::MAX.m_cost_kib`, a **constant that
+  does not exist** (the real names are `MAX_M_COST_KIB` /
+  `MAX_T_COST` / `MAX_P_COST`); `adversarial-stance` F-A1 still
+  described the reject as `format_version == 2`, two generations
+  stale; and the ceilings are now stated as multiples of `HEAVY`,
+  which is the invariant the code's own test pins, rather than as
+  bare numbers with no stated relation to anything.
+
+- **`check-docs-version-drift.sh` gained the pattern that would have
+  caught it.** The gate knew four patterns — format generation,
+  header size, Dart binding staleness, uniffi version — and nothing
+  about cost constants, so it answered "docs are consistent" on a
+  tree where they were not. Pattern 5 reads the three ceilings from
+  `crypto/kdf.rs` and fails on any line in `docs/` or the top-level
+  narrative docs that states a different value next to one of the
+  names. It recognises all three idioms the docs use — the
+  `512 MiB / 8 / 16` triple, `NAME = V` / table-cell claims, and
+  `t_cost ∈ [2, 8]` intervals — over a two-line window, because
+  these files are hard-wrapped and a claim can straddle the wrap.
+
+  Values are compared as *numbers*, not as text: writing
+  `524288 KiB` where the table says `512 MiB` passes, and changing
+  the source constant lights up all twelve sites at once.
+  `api-surface.txt` is excluded — it is generated from the source
+  and gated by `dump-public-api.sh --check` in the same pre-tag run.
+
 ### Breaking — report6 follow-through
 
 - **A delete now has to be addressed the way its namespace is kept

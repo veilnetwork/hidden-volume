@@ -501,9 +501,13 @@ cap, документированный в threat-model'е как "out of scope"
    количестве пространств или содержимом. Library exposes presets
    (`Argon2Params::LIGHT/DEFAULT/HEAVY`) и floor (`Argon2Params::MIN`,
    ниже которого open/create отклоняется). Audit pass 1 D1 также добавил
-   верхний потолок (`MAX_M_COST_KIB` = 1 GiB, `MAX_T_COST` = 100,
-   `MAX_P_COST` = 64), чтобы закрыть OOM DoS, при котором tampered header
+   верхний потолок (`MAX_M_COST_KIB` = 512 MiB, `MAX_T_COST` = 8,
+   `MAX_P_COST` = 16), чтобы закрыть OOM DoS, при котором tampered header
    заставлял бы следующего opener'а уйти в 4 TiB Argon2-derivation.
+   Каждый потолок — небольшая кратность самого тяжёлого поставляемого
+   preset'а (`HEAVY`: m=256 MiB, t=4, p=4), поэтому худший заголовок,
+   который может написать противник, ограничен и по *времени*, а не
+   только по памяти.
 
 2. **Replay/rollback защита.** ✅ Вынесено в host-app. Snapshot adversary
    (T2) может откатить файл к старой версии — библиотека одна это не
