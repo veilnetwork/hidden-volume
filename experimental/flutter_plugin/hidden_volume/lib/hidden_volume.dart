@@ -76,6 +76,7 @@ export 'src/async_bindings.dart'
         HvOpFailed,
         HvOpIndeterminate,
         HvOpUnknown,
+        HvWorkerDeath,
         headerInfoAsync,
         changePasswordsAsync,
         compactKnownAsync;

@@ -344,8 +344,12 @@ class HvOperation<T> {
 /// `onExit` fires for any termination; `onError` fires first when the isolate
 /// died from an uncaught error and carries the message. Both are wired, so a
 /// silent exit is reported too and not only the errors Dart can describe.
-class _WorkerDeath {
-  _WorkerDeath() {
+///
+/// Public (rather than library-private) only so a test can watch a stub worker
+/// of its own — see [HvAsyncSpace.debugOverWorker]. Not part of the supported
+/// API.
+class HvWorkerDeath {
+  HvWorkerDeath() {
     errorPort.listen((message) {
       final detail =
           message is List && message.isNotEmpty ? '${message.first}' : '$message';
@@ -487,8 +491,31 @@ void _dispatch(SpaceHandleBindings space, _Request msg, ReceivePort rx) {
 ///
 /// One [HvAsyncSpace] == one worker isolate. Drop with [close] when
 /// done — that frees the Rust-side handle AND terminates the worker.
+/// [close] can throw; read its doc before ignoring the result.
 class HvAsyncSpace {
   HvAsyncSpace._(this._isolate, this._toWorker, this._death);
+
+  /// Assemble a handle over a worker that is ALREADY up.
+  ///
+  /// TEST SEAM ONLY. [close]'s contract turns on what happens when a worker
+  /// does NOT answer — which in production means it is parked inside a
+  /// synchronous FFI call, and there is no way to park a real worker there on
+  /// demand. A stub that simply declines to answer is the only way to exercise
+  /// it at all.
+  ///
+  /// Not part of the supported API. Production builds its worker through
+  /// [create] / [open].
+  static HvAsyncSpace debugOverWorker({
+    required Isolate isolate,
+    required SendPort toWorker,
+    required HvWorkerDeath watch,
+  }) =>
+      HvAsyncSpace._(isolate, toWorker, watch);
+
+  /// How long [close] waits for the worker before giving up on the wait.
+  /// Settable for TESTS ONLY — the wait is what is under test, and five real
+  /// seconds per case is not a thing to spend.
+  static Duration closeTimeout = const Duration(seconds: 5);
 
   final Isolate _isolate;
   final SendPort _toWorker;
@@ -496,7 +523,7 @@ class HvAsyncSpace {
   /// Completes with an error when the worker isolate dies. Every RPC races it
   /// so a dead worker surfaces as a failure rather than a future that never
   /// completes (audit HV-09).
-  final _WorkerDeath _death;
+  final HvWorkerDeath _death;
   bool _closed = false;
   final DeferredVacuum _deferredVacuum = DeferredVacuum();
 
@@ -598,7 +625,7 @@ class HvAsyncSpace {
     // Watch it BEFORE it can die (audit HV-09): a worker that fails while
     // opening the container fails FAST — usually on its very first FFI call —
     // and a watcher attached afterwards would miss exactly that case.
-    final death = _WorkerDeath();
+    final death = HvWorkerDeath();
     final isolate = await Isolate.spawn<_SpawnConfig>(
       _workerEntry,
       _SpawnConfig(dylibPath: dylibPath, bootstrap: boot),
@@ -843,7 +870,31 @@ class HvAsyncSpace {
   void debugKillWorker() => _isolate.kill(priority: Isolate.immediate);
 
   /// Release the Rust handle and terminate the worker isolate.
+  ///
   /// Idempotent; subsequent method calls throw [StateError].
+  ///
+  /// **Throws when the container was NOT closed** — `Busy` if the worker did
+  /// not answer within [closeTimeout], `Internal` if it died on the way out.
+  /// Both are teardown failures a caller can log and carry on from, but the
+  /// container's exclusive lock is still held when they are raised, so a flow
+  /// that closes one space and immediately opens another must expect `Busy`
+  /// on the open and not treat it as a wrong password.
+  ///
+  /// **A worker that has not answered is NOT killed** (report8). It used to
+  /// be: the wait swallowed both the timeout and the worker's death, killed
+  /// the isolate unconditionally and returned normally, i.e. reported a clean
+  /// close of a container that was still open. And the kill was the worse
+  /// half. A worker that has not answered is almost certainly parked inside a
+  /// synchronous FFI call, and **an isolate kill cannot interrupt or unwind an
+  /// FFI frame**: the native `Drop` never runs, the container's flock stays
+  /// held by THIS PROCESS, and every later open fails `Busy` until the app
+  /// restarts — the "correct password but won't unlock" trap. So the worker is
+  /// left running to finish releasing the container on its own terms; it kills
+  /// itself once it has served the close.
+  ///
+  /// Killing is still the last resort, on the two paths where it is safe:
+  /// after the worker has answered (it is already tearing itself down), and
+  /// after it has died (there is no frame left to unwind).
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
@@ -851,35 +902,55 @@ class HvAsyncSpace {
     // would send into a dead port.
     _deferredVacuum.cancel();
     final reply = ReceivePort();
+    // Single-subscription port: capture the one future it can hand out, so
+    // the background drain below can wait on the same reply this did.
+    final done = reply.first;
+    _toWorker.send(_CloseRequest(reply: reply.sendPort));
+    Object? r;
     try {
-      _toWorker.send(_CloseRequest(reply: reply.sendPort));
-      // Raced against the worker's death as well as the timeout: a worker
-      // that has already died will never answer, and waiting the full five
-      // seconds for a reply that cannot come is time the caller spends
-      // holding a container lock.
-      await Future.any<Object?>([reply.first, _death.future])
-          .timeout(const Duration(seconds: 5),
-              onTimeout: () => const _OkReply(null))
-          // The death future is an ERROR future; close is a teardown and has
-          // nothing to report it to.
-          .catchError((_) => const _OkReply(null));
-    } finally {
-      reply.close();
-      // Stop watching BEFORE the kill, or our own teardown reports the worker
-      // as having died on us.
-      _death.dispose();
-      // Worker exits itself in the close handler; this is a belt-and-
-      // suspenders kill in case the worker is wedged.
+      // Raced against the worker's death as well as the timeout: a worker that
+      // has already died will never answer, and `errorsAreFatal` makes it die
+      // QUIETLY, so watching the reply alone burns the whole timeout and then
+      // queues a drain for an answer that cannot come.
       //
-      // ⚠️ The kill is unconditional after the timeout, and that is a known
-      // sharp edge (audit HV-10): a worker still inside an FFI call is torn
-      // down without the native side finishing, so the Rust handle's Drop —
-      // and the container's file lock with it — is not guaranteed to run
-      // until the PROCESS exits. Five seconds is generous for a close, and
-      // hanging forever on a wedged worker is the worse failure, but this is
-      // a bound rather than a guarantee and the doc-comment now says so.
+      // The worker never replies a bare null (`_OkReply` / `_ErrorReply` are
+      // objects), so null unambiguously means the timeout fired.
+      r = await Future.any<Object?>([done, _death.future])
+          .timeout(closeTimeout, onTimeout: () => null);
+    } catch (e) {
+      // The worker died mid-close. Nothing is left to wait for, and whether
+      // the container handle was released with it is not something this is in
+      // a position to claim.
+      reply.close();
+      _death.dispose();
       _isolate.kill(priority: Isolate.immediate);
+      throw HvException(
+          'Internal', 'hidden-volume worker died during close: $e');
     }
+    if (r != null) {
+      reply.close();
+      // Stop watching BEFORE the kill: an expected shutdown is not a death to
+      // report, and leaving the watcher armed turns every clean close into an
+      // error future with nobody listening (audit HV-09).
+      _death.dispose();
+      _isolate.kill(priority: Isolate.immediate);
+      return;
+    }
+    // Timed out. Leave the worker alive (see the doc above) and drain its
+    // answer in the background, so the watcher and the port are released when
+    // it finally lands rather than never.
+    unawaited(done.catchError((Object _) => null).whenComplete(() {
+      reply.close();
+      // The worker is finally gone, on its own terms. Stop watching now rather
+      // than at the timeout: until this lands the isolate is still live and a
+      // real crash in the meantime is still worth reporting.
+      _death.dispose();
+    }));
+    throw HvException(
+        'Busy',
+        'hidden-volume worker did not close within '
+            '${closeTimeout.inMilliseconds}ms; the container lock is still '
+            'held');
   }
 }
 
