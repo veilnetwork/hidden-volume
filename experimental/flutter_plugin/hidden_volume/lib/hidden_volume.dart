@@ -62,7 +62,17 @@ export 'src/bindings.dart'
 
 // Async wrapper + Future-returning top-level helpers.
 export 'src/async_bindings.dart'
-    show HvAsyncSpace, headerInfoAsync, changePasswordsAsync, compactKnownAsync;
+    show
+        HvAsyncSpace,
+        HvOperation,
+        HvOpOutcome,
+        HvOpPending,
+        HvOpSucceeded,
+        HvOpFailed,
+        HvOpUnknown,
+        headerInfoAsync,
+        changePasswordsAsync,
+        compactKnownAsync;
 
 /// A handle to one open space inside a `hidden-volume` container file.
 ///

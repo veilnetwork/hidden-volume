@@ -200,6 +200,49 @@ Concurrent calls on the same handle serialize on an internal mutex
 Two `await space.get(...)` calls from different async functions will
 run sequentially under the hood.
 
+### Timeouts do not cancel (audit HV-07)
+
+A Dart `Future` cannot be cancelled. `await space.commit(ops)
+.timeout(...)` stops **you** waiting; it does not stop the worker
+isolate, which finishes the call and answers into a reply port
+nobody is reading. So a timeout leaves the caller not knowing
+whether the write landed — and on a deniable store, the alternative
+to knowing is to guess and possibly apply it twice.
+
+`HvAsyncSpace` therefore issues an id per operation and keeps the
+outcome:
+
+```dart
+final op = space.commitOperation(ops);   // id available immediately
+try {
+  await op.result.timeout(const Duration(seconds: 2));
+} on TimeoutException {
+  // Ask later — do NOT re-submit blindly.
+  switch (space.outcomeOf(op.id)) {
+    case HvOpPending():   /* still running */
+    case HvOpSucceeded(): /* it landed; nothing to redo */
+    case HvOpFailed():    /* nothing was committed; safe to retry */
+    case HvOpUnknown():   /* never issued, or aged out of history */
+  }
+}
+```
+
+Same for `eraseNamespaceOperation`, `setPaddingPolicyOperation`,
+`vacuumDataBatchesOperation` and `vacuumAfterOpenOperation`. The
+plain `commit` / `eraseNamespace` / … methods are unchanged and
+delegate to these.
+
+The Rust FFI has a ledger of its own for this
+(`AsyncSpaceHandle::abandoned_operations`), but it hangs off the
+**async** handle while the hand-written Dart bindings bind only the
+sync symbols — the worker holds a `SpaceHandleBindings` — so it is
+not reachable from Dart. `outcomeOf` is the Dart-side counterpart,
+not a binding of it.
+
+Outcomes are kept for the last 128 operations per handle; past that
+`outcomeOf` answers `HvOpUnknown`, which is deliberately distinct
+from `HvOpPending`.
+
 ## Storage budget on mobile
 
 A messenger user's container size scales with message history. From

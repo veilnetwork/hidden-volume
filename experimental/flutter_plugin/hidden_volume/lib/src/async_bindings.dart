@@ -193,6 +193,90 @@ class _ErrorReply extends _Reply {
   final String message;
 }
 
+// ------------------------------------------------------------------
+// Operation identity and outcomes (audit HV-07)
+// ------------------------------------------------------------------
+
+/// What became of an operation submitted to the worker.
+///
+/// A Dart `Future` cannot be cancelled. Wrapping one of the calls below
+/// in `.timeout(...)` therefore stops the CALLER waiting; it does not
+/// stop the worker, which finishes the call and answers into a reply
+/// port nobody reads. Before audit HV-07 that answer was simply lost,
+/// and a host whose commit timed out had no way to find out whether its
+/// write had landed — on a deniable store, where the alternative to
+/// knowing is to guess and possibly re-apply.
+///
+/// The Rust FFI does have a ledger for exactly this
+/// (`AsyncSpaceHandle::abandoned_operations`), but it hangs off the
+/// ASYNC handle, and the hand-written Dart bindings bind only the sync
+/// symbols — the worker isolate holds a `SpaceHandleBindings`. So the
+/// ledger was unreachable from Dart, and this is its Dart-side
+/// counterpart rather than a binding of it. Nothing needed porting: the
+/// worker already serialises calls, which is the hard half.
+sealed class HvOpOutcome {
+  const HvOpOutcome();
+}
+
+/// The worker has not answered yet. A caller that timed out may still
+/// see this — the operation is genuinely still running.
+class HvOpPending extends HvOpOutcome {
+  const HvOpPending();
+
+  @override
+  String toString() => 'HvOpPending()';
+}
+
+/// The worker completed the operation. [value] is what the matching
+/// method would have returned.
+class HvOpSucceeded extends HvOpOutcome {
+  const HvOpSucceeded(this.value);
+  final Object? value;
+
+  @override
+  String toString() => 'HvOpSucceeded($value)';
+}
+
+/// The worker rejected the operation, or the worker died under it.
+/// Nothing was committed.
+class HvOpFailed extends HvOpOutcome {
+  const HvOpFailed(this.error);
+  final HvException error;
+
+  @override
+  String toString() => 'HvOpFailed(${error.kind}: ${error.message})';
+}
+
+/// No such id was ever issued by this handle, or its record has aged
+/// out of the bounded history.
+///
+/// Distinct from [HvOpPending] on purpose: "I do not know" and "not
+/// finished yet" call for different things from a caller, and
+/// collapsing them would make the getter a source of the same guesswork
+/// it exists to remove.
+class HvOpUnknown extends HvOpOutcome {
+  const HvOpUnknown();
+
+  @override
+  String toString() => 'HvOpUnknown()';
+}
+
+/// A submitted operation: the id to ask about it by, and the future of
+/// its result.
+///
+/// Take the id BEFORE awaiting — that is the whole point. Awaiting
+/// first and reading the id after works only when the await succeeded,
+/// which is the case that never needed an id.
+class HvOperation<T> {
+  const HvOperation(this.id, this.result);
+
+  /// Monotonic within one [HvAsyncSpace], starting at 1.
+  final int id;
+
+  /// The same future the non-`Operation` method would have returned.
+  final Future<T> result;
+}
+
 /// Watches the worker isolate and turns its death into a failed future.
 ///
 /// Every RPC used to `await reply.first` with nothing watching the isolate, so
@@ -360,6 +444,45 @@ class HvAsyncSpace {
   bool _closed = false;
   final DeferredVacuum _deferredVacuum = DeferredVacuum();
 
+  /// Next operation id. Monotonic, starts at 1 so that 0 is never a
+  /// valid id and an uninitialised field cannot be mistaken for one
+  /// (audit HV-07).
+  int _nextOpId = 1;
+
+  /// Outcome per submitted operation, oldest evicted first.
+  ///
+  /// A `LinkedHashMap` (Dart's default) keeps insertion order, and ids
+  /// are issued in order, so evicting `keys.first` evicts the oldest.
+  final Map<int, HvOpOutcome> _outcomes = <int, HvOpOutcome>{};
+
+  /// How many operations' outcomes are kept. Bounded on purpose: an
+  /// unbounded map would be a leak on a long-lived handle, and an
+  /// outcome nobody asked about within the last [_outcomeHistory]
+  /// operations is one nobody is going to. Past that the getter says
+  /// [HvOpUnknown] rather than inventing an answer.
+  static const int _outcomeHistory = 128;
+
+  /// What became of the operation [opId] (audit HV-07).
+  ///
+  /// The one thing a `.timeout(...)` on any of the calls below leaves
+  /// you without. Dart futures do not cancel, so a timeout stops the
+  /// caller waiting and nothing else: the worker finishes the call and
+  /// answers into a port the caller has stopped reading. Submit through
+  /// the `*Operation` variant, keep the id, and ask here afterwards.
+  ///
+  /// Returns [HvOpPending] while the worker is still on it,
+  /// [HvOpSucceeded] / [HvOpFailed] once it has answered, and
+  /// [HvOpUnknown] for an id this handle never issued or has since
+  /// evicted.
+  HvOpOutcome outcomeOf(int opId) => _outcomes[opId] ?? const HvOpUnknown();
+
+  void _record(int opId, HvOpOutcome outcome) {
+    _outcomes[opId] = outcome;
+    while (_outcomes.length > _outcomeHistory) {
+      _outcomes.remove(_outcomes.keys.first);
+    }
+  }
+
   /// Spawn a worker, create a fresh container at [path], bootstrap a
   /// space inside it under [password]. See [HvSpace.create] for argument
   /// semantics.
@@ -447,28 +570,72 @@ class HvAsyncSpace {
     return HvAsyncSpace._(isolate, toWorker, death);
   }
 
-  Future<T> _call<T>(_Request Function(SendPort reply) build) async {
+  Future<T> _call<T>(_Request Function(SendPort reply) build) =>
+      _submit<T>(build).result;
+
+  /// Send one request and return its id alongside the future of its
+  /// result.
+  ///
+  /// The id is allocated and filed as [HvOpPending] **before** the
+  /// send, and the outcome is recorded by the `then`/`catchError` on
+  /// the future rather than by whoever awaits it — so a caller who
+  /// walks away (a `.timeout(...)`, a widget disposed mid-flight) still
+  /// leaves a record behind (audit HV-07).
+  HvOperation<T> _submit<T>(_Request Function(SendPort reply) build) {
     if (_closed) {
       throw StateError('HvAsyncSpace is closed');
     }
+    final opId = _nextOpId++;
+    _record(opId, const HvOpPending());
+    final result = _run<T>(opId, build);
+    return HvOperation<T>(opId, result);
+  }
+
+  Future<T> _run<T>(int opId, _Request Function(SendPort reply) build) async {
     final reply = ReceivePort();
     _toWorker.send(build(reply.sendPort));
     // Raced against the worker's death, not awaited alone (audit HV-09).
     final Object? r;
     try {
       r = await Future.any<Object?>([reply.first, _death.future]);
+    } on HvException catch (e) {
+      // The worker died under this call. Nothing was committed, and
+      // that is an answer worth filing rather than dropping.
+      _record(opId, HvOpFailed(e));
+      rethrow;
     } finally {
       reply.close();
     }
     if (r is _ErrorReply) {
-      throw HvException(r.kind, r.message);
+      final e = HvException(r.kind, r.message);
+      _record(opId, HvOpFailed(e));
+      throw e;
     }
-    return (r as _OkReply).value as T;
+    final value = (r as _OkReply).value;
+    _record(opId, HvOpSucceeded(value));
+    return value as T;
   }
 
   /// Apply a batch of writes atomically. Returns the new commit_seq.
-  Future<int> commit(List<HvWriteOp> ops) =>
-      _call<int>((reply) => _CommitRequest(ops: ops, reply: reply));
+  ///
+  /// Wrapping this in `.timeout(...)` leaves you without an answer —
+  /// see [commitOperation] and [outcomeOf] (audit HV-07).
+  Future<int> commit(List<HvWriteOp> ops) async => commitOperation(ops).result;
+
+  /// [commit], submitted with an id you can ask [outcomeOf] about.
+  ///
+  /// ```dart
+  /// final op = space.commitOperation(ops);
+  /// try {
+  ///   await op.result.timeout(const Duration(seconds: 2));
+  /// } on TimeoutException {
+  ///   // The worker is still on it. Ask again later; do NOT re-submit
+  ///   // blindly, and do not assume it failed.
+  ///   final what = space.outcomeOf(op.id);
+  /// }
+  /// ```
+  HvOperation<int> commitOperation(List<HvWriteOp> ops) =>
+      _submit<int>((reply) => _CommitRequest(ops: ops, reply: reply));
 
   /// Read a KV value, or null if absent.
   Future<Uint8List?> get(int namespace, Uint8List key) =>
@@ -503,7 +670,13 @@ class HvAsyncSpace {
       _call<int>((reply) => _CountRequest(namespace: namespace, reply: reply));
 
   /// Drop all entries in [namespace]. Returns the new commit_seq.
-  Future<int> eraseNamespace(int namespace) => _call<int>(
+  ///
+  /// See [eraseNamespaceOperation] if you intend to time this out.
+  Future<int> eraseNamespace(int namespace) async =>
+      eraseNamespaceOperation(namespace).result;
+
+  /// [eraseNamespace], submitted with an id for [outcomeOf].
+  HvOperation<int> eraseNamespaceOperation(int namespace) => _submit<int>(
       (reply) => _EraseNamespaceRequest(namespace: namespace, reply: reply));
 
   /// Read one log entry by `(namespace, logId)`. Null if absent.
@@ -516,8 +689,15 @@ class HvAsyncSpace {
       _call<Uint8List>((reply) => _ListNamespacesRequest(reply: reply));
 
   /// Override the post-commit padding policy.
-  Future<void> setPaddingPolicy(PaddingPreset preset) => _call<void>(
-      (reply) => _SetPaddingPolicyRequest(preset: preset, reply: reply));
+  ///
+  /// See [setPaddingPolicyOperation] if you intend to time this out.
+  Future<void> setPaddingPolicy(PaddingPreset preset) async =>
+      setPaddingPolicyOperation(preset).result;
+
+  /// [setPaddingPolicy], submitted with an id for [outcomeOf].
+  HvOperation<void> setPaddingPolicyOperation(PaddingPreset preset) =>
+      _submit<void>(
+          (reply) => _SetPaddingPolicyRequest(preset: preset, reply: reply));
 
   /// Aggregated per-space stats.
   Future<HvStatsInfo> stats() =>
@@ -525,8 +705,13 @@ class HvAsyncSpace {
 
   /// Reclaim DataBatch chunk slots that no longer hold live log
   /// entries. Returns the count of slots scrubbed.
-  Future<int> vacuumDataBatches() =>
-      _call<int>((reply) => _VacuumDataBatchesRequest(reply: reply));
+  ///
+  /// See [vacuumDataBatchesOperation] if you intend to time this out.
+  Future<int> vacuumDataBatches() async => vacuumDataBatchesOperation().result;
+
+  /// [vacuumDataBatches], submitted with an id for [outcomeOf].
+  HvOperation<int> vacuumDataBatchesOperation() =>
+      _submit<int>((reply) => _VacuumDataBatchesRequest(reply: reply));
 
   /// Run the post-open forward-secrecy scrub **now** (audit HV-01).
   /// Returns the number of orphan index chunks reclaimed.
@@ -537,8 +722,11 @@ class HvAsyncSpace {
   /// scrub costs time and disk writes in proportion to the space's
   /// history, only ever happens when the password was right, and an
   /// observer who can see either at the moment of unlock learns that.
-  Future<int> vacuumAfterOpen() =>
-      _call<int>((reply) => _VacuumAfterOpenRequest(reply: reply));
+  Future<int> vacuumAfterOpen() async => vacuumAfterOpenOperation().result;
+
+  /// [vacuumAfterOpen], submitted with an id for [outcomeOf].
+  HvOperation<int> vacuumAfterOpenOperation() =>
+      _submit<int>((reply) => _VacuumAfterOpenRequest(reply: reply));
 
   /// Arm [vacuumAfterOpen] to run once, after a delay drawn uniformly at
   /// random from [window]. Returns the delay chosen. Re-arming cancels
