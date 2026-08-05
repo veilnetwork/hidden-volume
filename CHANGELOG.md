@@ -12,6 +12,31 @@ format.
 
 ## [Unreleased]
 
+### Fixed — report7 P2 (Dart)
+
+- **Three counts crossed the Dart FFI boundary unchecked.** `_ns` and
+  `_sid` guard the two parameters that were audited; `initialGarbageChunks`,
+  `superblockReplicas` and the range iterator's `limit` were passed bare,
+  and `dart:ffi` narrows silently.
+
+  The consequence the report predicted does not happen — the core clamps
+  both capacity and the replica minimum, so nothing overruns. The real one
+  is quieter and worse for a format whose point is deniability: **the
+  caller asks for something and gets less, with nothing said.**
+  `superblockReplicas: 256` narrows to 0, and 0 means "the minimum", so a
+  request for 256 replicas produces **one** — fewer than the default 3, on
+  the copies a torn write is recovered from. `initialGarbageChunks` is
+  worse still: Dart's `int` is 64-bit and *signed*, `1 << 64` evaluates to
+  `0`, and a decoy size that wraps to zero switches off the padding the
+  caller explicitly requested. A `limit` of 2^32 narrows to 0, which is a
+  legal request for an empty page, so the caller reads "no entries" from a
+  namespace that has them.
+
+  Guarded by `_u8` / `_u32` / `_u64`, in the shape of the two that already
+  existed. `kvKeysPage` took its limit through the same door and is
+  guarded with it — the same defect one method along, which nothing would
+  have caught either.
+
 ### Hygiene — report7 P3
 
 - **The collapsed key-ops map wears `Redacted` now.** `space::tree`'s
