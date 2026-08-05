@@ -278,7 +278,7 @@ impl<'f> Space<'f> {
             // Collapse the Tx's ops to one per key, in key order, so the
             // tree update is a merge against the entry stream rather
             // than a sequence of point edits (audit HV-16).
-            let mut keyed = KeyOps::new();
+            let mut keyed = KeyOps::default();
             for op in ops {
                 match op {
                     KvOp::Put { key, value } => {
@@ -309,7 +309,13 @@ impl<'f> Space<'f> {
             let root = match prior_roots_by_ns.get(ns_byte) {
                 Some(prior) => self.update_tree(ns, prior, &keyed, &mut build)?,
                 None => {
+                    // `into_inner` rather than iterating through the
+                    // wrapper: taking the plaintext out is the one
+                    // explicit step `Redacted` asks for, and the map is
+                    // consumed here. The wrapper is left holding an
+                    // empty map, so its own drop still scrubs.
                     let entries = keyed
+                        .into_inner()
                         .into_iter()
                         .filter_map(|(key, value)| value.map(|v| (key, v)));
                     self.build_tree(ns, entries, &mut build)?

@@ -61,7 +61,14 @@ use super::walk::TreeWalk;
 
 /// The operations of one Tx against one namespace, collapsed to one
 /// entry per key in key order. `None` is a delete.
-pub(super) type KeyOps = BTreeMap<Vec<u8>, Option<Vec<u8>>>;
+///
+/// `Redacted` because this is a **full copy** of the transaction's
+/// plaintext — every key and every value it writes — and the `KvOp`s it
+/// is built from are themselves redacted (report7 P3). A bare map here
+/// let the copy print under `{:?}` and outlive its source's scrub, which
+/// is the shape of leak `redact` exists to close: the wrapper on the
+/// original said nothing about the derived collection.
+pub(super) type KeyOps = Redacted<BTreeMap<Vec<u8>, Option<Vec<u8>>>>;
 
 /// Index chunks of the namespace's **current** tree that a rebuild may
 /// point at instead of writing again (audit HV-14), keyed by the BLAKE3
@@ -154,7 +161,11 @@ impl Build {
 /// Unsealed level-0 items — the entries of the leaf being formed.
 struct LeafRun {
     ns: Namespace,
-    entries: Vec<(Vec<u8>, Vec<u8>)>,
+    /// `Redacted` for the same reason as [`KeyOps`]: these are the
+    /// `(key, value)` pairs of a leaf, in the clear, held for as long as
+    /// the run is open (report7 P3). `LeafNode` already wears the
+    /// wrapper on the identical field; the buffer that feeds it did not.
+    entries: Redacted<Vec<(Vec<u8>, Vec<u8>)>>,
     fill: usize,
 }
 
@@ -171,7 +182,7 @@ impl LeafRun {
     fn new(ns: Namespace) -> Self {
         Self {
             ns,
-            entries: Vec::new(),
+            entries: Redacted::new(Vec::new()),
             fill: NODE_HEADER_LEN,
         }
     }
@@ -717,6 +728,31 @@ mod tests {
             padding_policy: PaddingPolicy::None,
             superblock_replicas: 1,
         }
+    }
+
+    /// `KeyOps` — the collapsed copy of a whole transaction's plaintext
+    /// — must be the redacted type, not a bare map (report7 P3).
+    ///
+    /// Asserted on the ALIAS rather than on the `Secret` impl, because
+    /// the way this regresses is someone writing `BTreeMap<..>` back
+    /// into the type definition, which leaves every `Secret`
+    /// implementation intact and passing. The `Debug` header is the
+    /// cheapest observable difference between the two.
+    #[test]
+    fn key_ops_is_the_redacted_type() {
+        let mut ops = KeyOps::default();
+        ops.insert(b"k".to_vec(), Some(b"a-plaintext-value".to_vec()));
+
+        let printed = format!("{ops:?}");
+        assert!(
+            printed.starts_with("Redacted"),
+            "KeyOps is a bare map again — a full copy of the Tx plaintext \
+             that prints itself and does not scrub: {printed}"
+        );
+        assert!(
+            !printed.contains("a-plaintext-value"),
+            "value leaked through Debug: {printed}"
+        );
     }
 
     fn scratch() -> std::path::PathBuf {
