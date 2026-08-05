@@ -178,23 +178,37 @@ impl Argon2Params {
     }
 
     /// Hard ceiling on `m_cost_kib` accepted from a stored header.
-    /// 1 GiB = 4× HEAVY's 256 MiB; sufficient headroom for any realistic
-    /// stronger preset, while bounding the worst-case allocation at open
-    /// time. **Closes a DoS vector**: the cleartext header is not AEAD-
+    /// 512 MiB = 2× HEAVY's 256 MiB.
+    ///
+    /// **Closes a DoS vector**: the cleartext header is not AEAD-
     /// protected, so a T2 file-modification adversary could otherwise
     /// write `m_cost_kib = u32::MAX` (≈4 TiB) and force every subsequent
     /// `Container::open` to OOM during Argon2id derivation. See
     /// `docs/en/security/threat-model.md` §F1 and `tests/header_params.rs`.
-    pub const MAX_M_COST_KIB: u32 = 1024 * 1024;
-    /// Hard ceiling on `t_cost`. Same DoS rationale as
-    /// [`Self::MAX_M_COST_KIB`]. 100 iterations is ~250× the HEAVY
-    /// preset's 4 iterations — strictly an upper bound, not a target.
-    pub const MAX_T_COST: u32 = 100;
-    /// Hard ceiling on `p_cost` (parallelism lanes). 64 lanes is well
-    /// above any realistic deployment; the underlying `argon2` crate
-    /// also imposes its own per-thread memory minimum which prevents
-    /// pathological lane×memory combinations.
-    pub const MAX_P_COST: u32 = 64;
+    ///
+    /// **Why it moved down** (report6 P2, was 1 GiB). The three ceilings
+    /// bound OOM but not TIME, and the worst case they admitted —
+    /// 1 GiB × 100 iterations × 64 lanes — measures **43 seconds** on an
+    /// Apple-Silicon desktop and correspondingly worse on a phone. So a
+    /// header edit no adversary needs a key for turned every open of
+    /// that container into a minute-long freeze, on a file the owner
+    /// cannot tell is tampered until the derivation finishes and fails.
+    ///
+    /// The alternative the audit proposed — a caller-supplied budget at
+    /// open time — would create containers that open on a desktop and
+    /// refuse on a phone, which is a worse failure for a format meant to
+    /// be carried between them. Tightening the constants keeps the
+    /// answer the same everywhere.
+    pub const MAX_M_COST_KIB: u32 = 512 * 1024;
+    /// Hard ceiling on `t_cost`. 2× HEAVY's 4 iterations. Same DoS
+    /// rationale as [`Self::MAX_M_COST_KIB`], and the same reason for
+    /// the move down from 100 — an upper bound, not a target.
+    pub const MAX_T_COST: u32 = 8;
+    /// Hard ceiling on `p_cost` (parallelism lanes). 4× HEAVY's 4 lanes,
+    /// still above any realistic deployment; the underlying `argon2`
+    /// crate also imposes its own per-thread memory minimum which
+    /// prevents pathological lane×memory combinations.
+    pub const MAX_P_COST: u32 = 16;
 
     /// Reject params we won't honor: unknown version, below MIN, above
     /// MAX (DoS guards), or outside the underlying argon2 crate's
@@ -494,9 +508,63 @@ mod tests {
     /// crate accepts each cost word on its own. Reaching for `u32::MAX`
     /// instead would have tested the dependency's bounds and passed with
     /// `validate()` deleted, which is the shape of hole this test exists
-    /// to close. `MAX_M_COST_KIB + 1` really is a gibibyte of Argon2
-    /// working set a direct low-level caller could force, and `t_cost`
-    /// has no upper bound in the crate at all.
+    /// to close. `MAX_M_COST_KIB + 1` really is half a gibibyte of
+    /// Argon2 working set a direct low-level caller could force, and
+    /// `t_cost` has no upper bound in the `argon2` crate at all.
+    /// The ceilings must sit within a small multiple of the heaviest
+    /// shipped preset (report6 P2).
+    ///
+    /// They exist to bound what a **tampered** header can cost, and the
+    /// cost that matters is time as much as memory. At the old values —
+    /// 1 GiB, 100 iterations, 64 lanes — the worst admissible header
+    /// measured 43 seconds on an Apple-Silicon desktop, against 416 ms
+    /// for `HEAVY` on the same machine: a header edit that needs no key
+    /// turned every open into a minute-long freeze. The current values
+    /// measure 1.7 s there.
+    ///
+    /// Expressed as multiples of `HEAVY` rather than as seconds on
+    /// purpose. A wall-clock assertion would be a flaky test on shared
+    /// CI, and the invariant that actually matters is the ratio between
+    /// the worst thing an attacker can write and the worst thing an
+    /// honest host asks for.
+    #[test]
+    fn the_ceilings_stay_within_a_small_multiple_of_the_heaviest_preset() {
+        let heavy = Argon2Params::HEAVY;
+
+        // Every shipped preset must still be admissible — a ceiling
+        // below one of them would reject containers this library
+        // itself creates.
+        for preset in [
+            Argon2Params::MIN,
+            Argon2Params::LIGHT,
+            Argon2Params::DEFAULT,
+            heavy,
+        ] {
+            preset
+                .validate()
+                .expect("a shipped preset must pass validation");
+        }
+
+        assert!(
+            Argon2Params::MAX_M_COST_KIB <= heavy.m_cost_kib * 2,
+            "memory ceiling {} KiB is more than twice HEAVY's {} KiB",
+            Argon2Params::MAX_M_COST_KIB,
+            heavy.m_cost_kib
+        );
+        assert!(
+            Argon2Params::MAX_T_COST <= heavy.t_cost * 2,
+            "iteration ceiling {} is more than twice HEAVY's {}",
+            Argon2Params::MAX_T_COST,
+            heavy.t_cost
+        );
+        assert!(
+            Argon2Params::MAX_P_COST <= heavy.p_cost * 4,
+            "lane ceiling {} is more than four times HEAVY's {}",
+            Argon2Params::MAX_P_COST,
+            heavy.p_cost
+        );
+    }
+
     #[test]
     fn master_key_derivation_validates_params() {
         let salt = [0x11u8; 32];
