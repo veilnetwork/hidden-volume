@@ -12,6 +12,34 @@ format.
 
 ## [Unreleased]
 
+### Hygiene — report7 P3
+
+- **The collapsed key-ops map wears `Redacted` now.** `space::tree`'s
+  `KeyOps` is a full copy of one transaction's plaintext — every key and
+  every value it writes — assembled by `space::commit` from `KvOp`s that
+  are themselves `Redacted`. As a bare `BTreeMap` the copy printed under
+  `{:?}` and outlived its source's scrub, which is precisely the shape of
+  leak the `redact` module exists to close: the wrapper on the original
+  said nothing about the collection derived from it. `LeafRun::entries`
+  gets the same treatment — `LeafNode` already wore the wrapper on the
+  identical field; the buffer that feeds it did not.
+
+  `Secret` is implemented for the map shape. Its scrub drains rather
+  than iterating, because a `BTreeMap`'s keys are not reachable as
+  `&mut` and an in-place pass would have zeroized the values and left
+  every key intact.
+
+- **`unsafe impl Send for OwnedSpace` removed.** Every field is `Send`,
+  so the compiler derives it — the `unsafe impl` asserted something
+  nobody had to be told. Worse than redundant: it would have gone on
+  holding if a future field stopped being `Send`, turning a compile
+  error into a data race. Replaced by a static assertion that fails to
+  **compile** in exactly that case, which is the outcome the `unsafe
+  impl` was suppressing. Verified by pointing the assertion at a
+  `*const u8`, which does not build.
+
+- **`hex-literal` dropped** from dev-dependencies. Zero uses in the tree.
+
 ### Fixed — report7 P2
 
 - **A custom padding policy inherited the previous container's preset
