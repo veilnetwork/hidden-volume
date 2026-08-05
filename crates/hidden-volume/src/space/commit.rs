@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use crate::chunk::ChunkKind;
 use crate::redact::Redacted;
 use crate::tx::commit::{CommitPayload, IndexRoot};
-use crate::tx::{KvOp, PendingKv, PendingLog};
+use crate::tx::{KvOp, KvOrigin, PendingKv, PendingKvOrigin, PendingLog};
 use crate::{Error, Result};
 
 use super::Space;
@@ -66,6 +66,7 @@ impl<'f> Space<'f> {
         &mut self,
         mut pending: Redacted<PendingKv>,
         pending_log: Redacted<PendingLog>,
+        kv_origin: PendingKvOrigin,
     ) -> Result<u64> {
         // Audit pass 7 (C1): if both pending maps are empty, the
         // commit is a no-op. Previously commit_tx unconditionally
@@ -116,25 +117,51 @@ impl<'f> Space<'f> {
             .map(|r| (r.namespace.0, r))
             .collect();
 
-        for (ns, ops) in pending.iter() {
+        for ns in pending.keys() {
             if pending_log.contains_key(ns) {
                 return Err(Error::WrongNamespaceKind(
                     "namespace touched as both Kv and Log in one Tx",
                 ));
             }
-            // Pure-Delete op sets are allowed against a Log namespace
-            // because they cannot introduce mixed-kind state (no new
-            // entries, only removal). This is the path
-            // `Space::erase_namespace` uses to clear a Log namespace
-            // via `delete_internal`. Anything else (any `Put`) is
-            // a true Kv-on-Log violation.
-            if let Some(prior) = prior_roots_by_ns.get(ns)
-                && prior.kind != crate::tx::NamespaceKind::Kv
-                && ops.iter().any(|op| matches!(op, KvOp::Put { .. }))
-            {
-                return Err(Error::WrongNamespaceKind(
-                    "Kv Put op against existing Log namespace",
-                ));
+            // No prior root: the namespace does not exist yet, so there
+            // is no recorded kind for these ops to contradict. The kind
+            // this Tx establishes is decided below.
+            let Some(prior) = prior_roots_by_ns.get(ns) else {
+                continue;
+            };
+            // Audit HV-04. This gate used to read the op SHAPE — it
+            // rejected a `Put` against a Log namespace and let every
+            // pure-`Delete` set through, because that is how
+            // `Space::erase_namespace` clears a Log namespace. The
+            // exemption was written for erase and granted to anything
+            // that looked like erase, so a `Tx::delete` on a log passed
+            // it; and `Tx::delete_log` never reached this loop's
+            // predicate at all, since its op is a KV `Delete` while the
+            // log-side check below reads `pending_log`.
+            //
+            // It now reads where the op came from. Two of the three
+            // origins name a kind and must match what is on disk; only
+            // an erase may disagree with it, because the namespace it
+            // leaves behind is empty and so cannot be half of one kind
+            // and half of another.
+            let origin = kv_origin
+                .get(ns)
+                .copied()
+                .ok_or(Error::Internal("pending KV ops with no recorded origin"))?;
+            match (origin, prior.kind) {
+                (KvOrigin::Erase, _) => {},
+                (KvOrigin::ByKey, crate::tx::NamespaceKind::Kv) => {},
+                (KvOrigin::ByLog, crate::tx::NamespaceKind::Log) => {},
+                (KvOrigin::ByKey, _) => {
+                    return Err(Error::WrongNamespaceKind(
+                        "KV op addressed by key against an existing Log namespace",
+                    ));
+                },
+                (KvOrigin::ByLog, _) => {
+                    return Err(Error::WrongNamespaceKind(
+                        "delete addressed by log id against an existing Kv namespace",
+                    ));
+                },
             }
         }
         for ns in pending_log.keys() {

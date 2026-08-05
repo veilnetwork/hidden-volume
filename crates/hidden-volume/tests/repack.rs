@@ -10,7 +10,6 @@
 use hidden_volume::container::RepackOptions;
 use hidden_volume::crypto::kdf::Argon2Params;
 use hidden_volume::space::index::Namespace;
-use hidden_volume::space::log::log_id_key;
 use hidden_volume::{Container, Error};
 
 mod common;
@@ -149,10 +148,12 @@ fn repack_drops_deleted_log_messages() {
                 .unwrap();
         }
         tx.commit().unwrap();
-        // Delete every other message.
+        // Delete every other message. `delete_log`, not `delete` on the
+        // `log_id_key`: a log record is addressed by id, and audit
+        // HV-04 made the index say so rather than accept either.
         let mut tx = s.begin_tx();
         for i in (1..=10u64).step_by(2) {
-            tx.delete(Namespace::MESSAGE_LOG, &log_id_key(i)).unwrap();
+            tx.delete_log(Namespace::MESSAGE_LOG, i).unwrap();
         }
         tx.commit().unwrap();
     }
@@ -424,10 +425,13 @@ fn realistic_messenger_compaction() {
         // Actually 300 < MAX_RECORDS_PER_BATCH (1024) so OK. Commit.
         tx.commit().unwrap();
 
-        // Delete half the messages and one contact.
+        // Delete half the messages and one contact. The log deletes go
+        // through `delete_log` and the contact through `delete` — one
+        // Tx, two namespaces, each addressed the way its kind says
+        // (audit HV-04).
         let mut tx = s.begin_tx();
         for i in 1..=150u64 {
-            tx.delete(Namespace::MESSAGE_LOG, &log_id_key(i)).unwrap();
+            tx.delete_log(Namespace::MESSAGE_LOG, i).unwrap();
         }
         tx.delete(Namespace::CONTACTS, b"c05").unwrap();
         tx.commit().unwrap();

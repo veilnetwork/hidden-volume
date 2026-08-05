@@ -803,10 +803,12 @@ impl<'f> Space<'f> {
         // R-NSKIND: works on both Kv AND Log namespaces. Internally
         // we walk the KV index via `list_keys` (which enumerates keys
         // regardless of the namespace's kind — for Log namespaces those
-        // are the `log_id_key_be` keys) and queue Delete ops via the
-        // kind-bypassing internal helper. `commit_tx` permits pure-Delete
-        // op sets against a Log namespace because they cannot introduce
-        // mixed-kind state.
+        // are the `log_id_key_be` keys) and queue Delete ops tagged
+        // `KvOrigin::Erase`, the one origin `commit_tx` lets disagree
+        // with the recorded kind (audit HV-04). It used to be that ANY
+        // pure-Delete op set was let through, which is the same
+        // permission stated by shape instead of by intent — and by
+        // shape it also covered a `Tx::delete` aimed at a log record.
         //
         // `list_keys`, not `list`: a delete is addressed by key, so the
         // values this used to materialise alongside them were read,
@@ -825,7 +827,7 @@ impl<'f> Space<'f> {
         // never both live. The op list itself stays whole — the erase
         // is one transaction by contract (audit HV-03).
         for key in keys.drain(..) {
-            tx.delete_internal(namespace, key)?;
+            tx.delete_internal(namespace, key, crate::tx::KvOrigin::Erase)?;
         }
         tx.commit()?;
         Ok(count)

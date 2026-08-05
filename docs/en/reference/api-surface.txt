@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-05T04:26:33Z
+# Captured: 2026-08-05T04:52:51Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -262,8 +262,8 @@ space/mod.rs:  677:    pub fn list_keys_after(
 space/mod.rs:  722:    pub fn list_after(
 space/mod.rs:  749:    pub fn count(&mut self, namespace: Namespace) -> Result<usize> {
 space/mod.rs:  802:    pub fn erase_namespace(&mut self, namespace: Namespace) -> Result<usize> {
-space/mod.rs:  837:    pub fn list_namespaces(&mut self) -> Result<Vec<Namespace>> {
-space/mod.rs:  849:    pub fn list_namespaces_with_kind(
+space/mod.rs:  839:    pub fn list_namespaces(&mut self) -> Result<Vec<Namespace>> {
+space/mod.rs:  851:    pub fn list_namespaces_with_kind(
 space/superblock.rs:  30:pub const NO_RECORD: u64 = u64::MAX;
 space/superblock.rs:  37:pub struct Superblock {
 space/superblock.rs:  72:    pub const ENCODED_LEN: usize = 8 + 8 + 32;
@@ -287,14 +287,14 @@ tx/commit.rs:  202:    pub fn compute_tx_root_hash(roots: &[IndexRoot]) -> [u8; 
 tx/commit.rs:  215:pub fn blake3_of(payload: &[u8]) -> [u8; 32] {
 tx/mod.rs:  28:pub mod commit;
 tx/mod.rs:  40:pub use commit::{CommitPayload, IndexRoot, MAX_NAMESPACES_PER_TX, NamespaceKind};
-tx/mod.rs:  137:pub struct Tx<'s, 'f> {
-tx/mod.rs:  235:    pub fn put(&mut self, namespace: Namespace, key: &[u8], value: &[u8]) -> Result<()> {
-tx/mod.rs:  263:    pub fn delete(&mut self, namespace: Namespace, key: &[u8]) -> Result<()> {
-tx/mod.rs:  367:    pub fn append_log(&mut self, namespace: Namespace, log_id: u64, payload: &[u8]) -> Result<()> {
-tx/mod.rs:  407:    pub fn delete_log(&mut self, namespace: Namespace, log_id: u64) -> Result<()> {
-tx/mod.rs:  428:    pub fn touched_namespaces(&self) -> usize {
-tx/mod.rs:  438:    pub fn is_empty(&self) -> bool {
-tx/mod.rs:  443:    pub fn commit(self) -> Result<u64> {
+tx/mod.rs:  174:pub struct Tx<'s, 'f> {
+tx/mod.rs:  295:    pub fn put(&mut self, namespace: Namespace, key: &[u8], value: &[u8]) -> Result<()> {
+tx/mod.rs:  332:    pub fn delete(&mut self, namespace: Namespace, key: &[u8]) -> Result<()> {
+tx/mod.rs:  443:    pub fn append_log(&mut self, namespace: Namespace, log_id: u64, payload: &[u8]) -> Result<()> {
+tx/mod.rs:  495:    pub fn delete_log(&mut self, namespace: Namespace, log_id: u64) -> Result<()> {
+tx/mod.rs:  510:    pub fn touched_namespaces(&self) -> usize {
+tx/mod.rs:  520:    pub fn is_empty(&self) -> bool {
+tx/mod.rs:  525:    pub fn commit(self) -> Result<u64> {
 
 ==========================================
 crate: hidden-volume-rt
@@ -362,72 +362,72 @@ lib.rs:  382:pub struct PasswordRotation {
 lib.rs:  428:pub fn compact_known(path: String, passwords: Vec<Vec<u8>>) -> HvResult<()> {
 lib.rs:  455:pub fn change_passwords(path: String, rotations: Vec<PasswordRotation>) -> HvResult<()> {
 lib.rs:  495:pub enum WriteOp {
-lib.rs:  577:pub struct LogEntry {
-lib.rs:  599:pub struct StatsInfo {
-lib.rs:  632:    pub fn utilization_ratio(&self) -> f64 {
-lib.rs:  643:pub struct NamespaceCount {
-lib.rs:  658:pub enum OperationOutcome {
-lib.rs:  701:pub struct AbandonedOperation {
-lib.rs:  727:pub struct IntegrityResult {
-lib.rs:  753:pub struct SpaceHandle {
-lib.rs:  839:    pub fn create(
-lib.rs:  890:    pub fn add_space(path: String, password: Vec<u8>) -> HvResult<std::sync::Arc<Self>> {
-lib.rs:  919:    pub fn open_with_keys(path: String, keys: Vec<u8>) -> HvResult<std::sync::Arc<Self>> {
-lib.rs:  953:    pub fn space_keys(&self) -> HvResult<Vec<u8>> {
-lib.rs:  969:    pub fn open(path: String, password: Vec<u8>) -> HvResult<std::sync::Arc<Self>> {
-lib.rs:  984:    pub fn commit_seq(&self) -> HvResult<u64> {
-lib.rs:  991:    pub fn commit_history(&self) -> HvResult<Vec<u64>> {
-lib.rs:  1006:    pub fn set_padding_policy(&self, preset: PaddingPreset) -> HvResult<()> {
-lib.rs:  1014:    pub fn list_namespaces(&self) -> HvResult<Vec<u8>> {
-lib.rs:  1021:    pub fn count(&self, namespace: u8) -> HvResult<u64> {
-lib.rs:  1048:    pub fn kv_keys(&self, namespace: u8) -> HvResult<Vec<u8>> {
-lib.rs:  1069:    pub fn kv_keys_page(
-lib.rs:  1084:    pub fn get(&self, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
-lib.rs:  1091:    pub fn read_log(&self, namespace: u8, log_id: u64) -> HvResult<Option<Vec<u8>>> {
-lib.rs:  1100:    pub fn iter_log_range(
-lib.rs:  1120:    pub fn commit(&self, ops: Vec<WriteOp>) -> HvResult<u64> {
-lib.rs:  1158:    pub fn stats(&self) -> HvResult<StatsInfo> {
-lib.rs:  1181:    pub fn verify_integrity(&self) -> HvResult<IntegrityResult> {
-lib.rs:  1208:    pub fn vacuum_data_batches(&self) -> HvResult<u64> {
-lib.rs:  1234:    pub fn vacuum_after_open(&self) -> HvResult<u64> {
-lib.rs:  1256:    pub fn erase_namespace(&self, namespace: u8) -> HvResult<u64> {
-lib.rs:  1336:pub struct AsyncSpaceHandle {
-lib.rs:  1408:    pub async fn create(
-lib.rs:  1441:    pub async fn open(path: String, password: Vec<u8>) -> HvResult<Arc<Self>> {
-lib.rs:  1458:    pub async fn add_space(path: String, password: Vec<u8>) -> HvResult<Arc<Self>> {
-lib.rs:  1475:    pub async fn open_with_keys(path: String, keys: Vec<u8>) -> HvResult<Arc<Self>> {
-lib.rs:  1493:    pub async fn space_keys(&self) -> HvResult<Vec<u8>> {
-lib.rs:  1505:    pub async fn commit_seq(&self) -> HvResult<u64> {
-lib.rs:  1511:    pub async fn commit_history(&self) -> HvResult<Vec<u64>> {
-lib.rs:  1519:    pub async fn set_padding_policy(&self, preset: PaddingPreset) -> HvResult<()> {
-lib.rs:  1528:    pub async fn list_namespaces(&self) -> HvResult<Vec<u8>> {
-lib.rs:  1537:    pub async fn count(&self, namespace: u8) -> HvResult<u64> {
-lib.rs:  1547:    pub async fn get(&self, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
-lib.rs:  1556:    pub async fn read_log(&self, namespace: u8, log_id: u64) -> HvResult<Option<Vec<u8>>> {
-lib.rs:  1565:    pub async fn iter_log_range(
-lib.rs:  1584:    pub async fn commit(&self, ops: Vec<WriteOp>) -> HvResult<u64> {
-lib.rs:  1633:    pub async fn stats(&self) -> HvResult<StatsInfo> {
-lib.rs:  1657:    pub async fn verify_integrity(&self) -> HvResult<IntegrityResult> {
-lib.rs:  1672:    pub async fn vacuum_data_batches(&self) -> HvResult<u64> {
-lib.rs:  1685:    pub async fn vacuum_after_open(&self) -> HvResult<u64> {
-lib.rs:  1695:    pub async fn erase_namespace(&self, namespace: u8) -> HvResult<u64> {
-lib.rs:  1725:    pub fn abandoned_operations(&self) -> Vec<AbandonedOperation> {
-lib.rs:  1735:    pub fn clear_settled_operations(&self) {
-lib.rs:  1742:    pub fn forgotten_abandonments(&self) -> u64 {
-lib.rs:  1802:pub struct MultiSpaceHandle {
-lib.rs:  1811:    pub fn open(path: String) -> HvResult<std::sync::Arc<Self>> {
-lib.rs:  1822:    pub fn open_space(&self, keys: Vec<u8>) -> HvResult<u32> {
-lib.rs:  1841:    pub fn vacuum_space(&self, id: u32) -> HvResult<()> {
-lib.rs:  1847:    pub fn space_count(&self) -> HvResult<u32> {
-lib.rs:  1854:    pub fn set_padding_policy(&self, preset: PaddingPreset) -> HvResult<()> {
-lib.rs:  1861:    pub fn space_keys(&self, id: u32) -> HvResult<Vec<u8>> {
-lib.rs:  1872:    pub fn commit(&self, id: u32, ops: Vec<WriteOp>) -> HvResult<u64> {
-lib.rs:  1902:    pub fn get(&self, id: u32, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
-lib.rs:  1909:    pub fn read_log(&self, id: u32, namespace: u8, log_id: u64) -> HvResult<Option<Vec<u8>>> {
-lib.rs:  1917:    pub fn iter_log_range(
-lib.rs:  1936:    pub fn count(&self, id: u32, namespace: u8) -> HvResult<u64> {
-lib.rs:  1948:    pub fn kv_keys(&self, id: u32, namespace: u8) -> HvResult<Vec<u8>> {
-lib.rs:  1958:    pub fn kv_keys_page(
-lib.rs:  1974:    pub fn commit_seq(&self, id: u32) -> HvResult<u64> {
-lib.rs:  1981:    pub fn vacuum_data_batches(&self, id: u32) -> HvResult<u64> {
+lib.rs:  589:pub struct LogEntry {
+lib.rs:  611:pub struct StatsInfo {
+lib.rs:  644:    pub fn utilization_ratio(&self) -> f64 {
+lib.rs:  655:pub struct NamespaceCount {
+lib.rs:  670:pub enum OperationOutcome {
+lib.rs:  713:pub struct AbandonedOperation {
+lib.rs:  739:pub struct IntegrityResult {
+lib.rs:  765:pub struct SpaceHandle {
+lib.rs:  851:    pub fn create(
+lib.rs:  902:    pub fn add_space(path: String, password: Vec<u8>) -> HvResult<std::sync::Arc<Self>> {
+lib.rs:  931:    pub fn open_with_keys(path: String, keys: Vec<u8>) -> HvResult<std::sync::Arc<Self>> {
+lib.rs:  965:    pub fn space_keys(&self) -> HvResult<Vec<u8>> {
+lib.rs:  981:    pub fn open(path: String, password: Vec<u8>) -> HvResult<std::sync::Arc<Self>> {
+lib.rs:  996:    pub fn commit_seq(&self) -> HvResult<u64> {
+lib.rs:  1003:    pub fn commit_history(&self) -> HvResult<Vec<u64>> {
+lib.rs:  1018:    pub fn set_padding_policy(&self, preset: PaddingPreset) -> HvResult<()> {
+lib.rs:  1026:    pub fn list_namespaces(&self) -> HvResult<Vec<u8>> {
+lib.rs:  1033:    pub fn count(&self, namespace: u8) -> HvResult<u64> {
+lib.rs:  1060:    pub fn kv_keys(&self, namespace: u8) -> HvResult<Vec<u8>> {
+lib.rs:  1081:    pub fn kv_keys_page(
+lib.rs:  1096:    pub fn get(&self, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
+lib.rs:  1103:    pub fn read_log(&self, namespace: u8, log_id: u64) -> HvResult<Option<Vec<u8>>> {
+lib.rs:  1112:    pub fn iter_log_range(
+lib.rs:  1132:    pub fn commit(&self, ops: Vec<WriteOp>) -> HvResult<u64> {
+lib.rs:  1170:    pub fn stats(&self) -> HvResult<StatsInfo> {
+lib.rs:  1193:    pub fn verify_integrity(&self) -> HvResult<IntegrityResult> {
+lib.rs:  1220:    pub fn vacuum_data_batches(&self) -> HvResult<u64> {
+lib.rs:  1246:    pub fn vacuum_after_open(&self) -> HvResult<u64> {
+lib.rs:  1268:    pub fn erase_namespace(&self, namespace: u8) -> HvResult<u64> {
+lib.rs:  1348:pub struct AsyncSpaceHandle {
+lib.rs:  1420:    pub async fn create(
+lib.rs:  1453:    pub async fn open(path: String, password: Vec<u8>) -> HvResult<Arc<Self>> {
+lib.rs:  1470:    pub async fn add_space(path: String, password: Vec<u8>) -> HvResult<Arc<Self>> {
+lib.rs:  1487:    pub async fn open_with_keys(path: String, keys: Vec<u8>) -> HvResult<Arc<Self>> {
+lib.rs:  1505:    pub async fn space_keys(&self) -> HvResult<Vec<u8>> {
+lib.rs:  1517:    pub async fn commit_seq(&self) -> HvResult<u64> {
+lib.rs:  1523:    pub async fn commit_history(&self) -> HvResult<Vec<u64>> {
+lib.rs:  1531:    pub async fn set_padding_policy(&self, preset: PaddingPreset) -> HvResult<()> {
+lib.rs:  1540:    pub async fn list_namespaces(&self) -> HvResult<Vec<u8>> {
+lib.rs:  1549:    pub async fn count(&self, namespace: u8) -> HvResult<u64> {
+lib.rs:  1559:    pub async fn get(&self, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
+lib.rs:  1568:    pub async fn read_log(&self, namespace: u8, log_id: u64) -> HvResult<Option<Vec<u8>>> {
+lib.rs:  1577:    pub async fn iter_log_range(
+lib.rs:  1596:    pub async fn commit(&self, ops: Vec<WriteOp>) -> HvResult<u64> {
+lib.rs:  1645:    pub async fn stats(&self) -> HvResult<StatsInfo> {
+lib.rs:  1669:    pub async fn verify_integrity(&self) -> HvResult<IntegrityResult> {
+lib.rs:  1684:    pub async fn vacuum_data_batches(&self) -> HvResult<u64> {
+lib.rs:  1697:    pub async fn vacuum_after_open(&self) -> HvResult<u64> {
+lib.rs:  1707:    pub async fn erase_namespace(&self, namespace: u8) -> HvResult<u64> {
+lib.rs:  1737:    pub fn abandoned_operations(&self) -> Vec<AbandonedOperation> {
+lib.rs:  1747:    pub fn clear_settled_operations(&self) {
+lib.rs:  1754:    pub fn forgotten_abandonments(&self) -> u64 {
+lib.rs:  1814:pub struct MultiSpaceHandle {
+lib.rs:  1823:    pub fn open(path: String) -> HvResult<std::sync::Arc<Self>> {
+lib.rs:  1834:    pub fn open_space(&self, keys: Vec<u8>) -> HvResult<u32> {
+lib.rs:  1853:    pub fn vacuum_space(&self, id: u32) -> HvResult<()> {
+lib.rs:  1859:    pub fn space_count(&self) -> HvResult<u32> {
+lib.rs:  1866:    pub fn set_padding_policy(&self, preset: PaddingPreset) -> HvResult<()> {
+lib.rs:  1873:    pub fn space_keys(&self, id: u32) -> HvResult<Vec<u8>> {
+lib.rs:  1884:    pub fn commit(&self, id: u32, ops: Vec<WriteOp>) -> HvResult<u64> {
+lib.rs:  1914:    pub fn get(&self, id: u32, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
+lib.rs:  1921:    pub fn read_log(&self, id: u32, namespace: u8, log_id: u64) -> HvResult<Option<Vec<u8>>> {
+lib.rs:  1929:    pub fn iter_log_range(
+lib.rs:  1948:    pub fn count(&self, id: u32, namespace: u8) -> HvResult<u64> {
+lib.rs:  1960:    pub fn kv_keys(&self, id: u32, namespace: u8) -> HvResult<Vec<u8>> {
+lib.rs:  1970:    pub fn kv_keys_page(
+lib.rs:  1986:    pub fn commit_seq(&self, id: u32) -> HvResult<u64> {
+lib.rs:  1993:    pub fn vacuum_data_batches(&self, id: u32) -> HvResult<u64> {
 
