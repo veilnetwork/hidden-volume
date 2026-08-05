@@ -28,6 +28,10 @@ mod common;
 use common::{fast_params, scratch_path};
 
 const CAP: u64 = hidden_volume::MAX_OPEN_SCAN_CHUNKS;
+/// Only the two sparse-file tests below need this, and both are `cfg(unix)`:
+/// they size a file past the cap without writing the bytes, which needs
+/// `set_len` plus a block count only `MetadataExt` reports.
+#[cfg(unix)]
 const CHUNK: u64 = 4096;
 
 /// The write side. Nothing new — this pins the shape the read side must now

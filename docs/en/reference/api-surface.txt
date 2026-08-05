@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-05T14:34:54Z
+# Captured: 2026-08-05T17:22:19Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -53,18 +53,18 @@ container/file.rs:  159:pub const DEFAULT_SUPERBLOCK_REPLICAS: u8 = 3;
 container/file.rs:  164:pub enum LockMode {
 container/file.rs:  197:    pub fn allows_writes(self) -> bool {
 container/file.rs:  207:pub struct ContainerFile {
-container/file.rs:  307:    pub fn create<P: AsRef<Path>>(path: P, params: Argon2Params) -> Result<Self> {
-container/file.rs:  382:    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-container/file.rs:  413:    pub fn open_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
-container/file.rs:  443:    pub fn open_exclusive_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
-container/file.rs:  495:    pub fn append_garbage_chunks(&mut self, n: u64) -> Result<()> {
-container/file.rs:  535:    pub fn slot_count(&self) -> u64 {
-container/file.rs:  546:    pub fn read_slot(&mut self, i: u64) -> Result<[u8; CHUNK_SIZE]> {
-container/file.rs:  568:    pub fn read_slot_concurrent(&self, i: u64) -> Result<[u8; CHUNK_SIZE]> {
-container/file.rs:  587:    pub fn raw_file(&self) -> &File {
-container/file.rs:  597:    pub fn append_slot(&mut self, chunk: &[u8; CHUNK_SIZE]) -> Result<u64> {
-container/file.rs:  618:    pub fn scrub_slot(&mut self, slot: u64) -> Result<()> {
-container/file.rs:  632:    pub fn fsync(&mut self) -> Result<()> {
+container/file.rs:  310:    pub fn create<P: AsRef<Path>>(path: P, params: Argon2Params) -> Result<Self> {
+container/file.rs:  385:    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+container/file.rs:  416:    pub fn open_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
+container/file.rs:  446:    pub fn open_exclusive_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
+container/file.rs:  498:    pub fn append_garbage_chunks(&mut self, n: u64) -> Result<()> {
+container/file.rs:  538:    pub fn slot_count(&self) -> u64 {
+container/file.rs:  549:    pub fn read_slot(&mut self, i: u64) -> Result<[u8; CHUNK_SIZE]> {
+container/file.rs:  571:    pub fn read_slot_concurrent(&self, i: u64) -> Result<[u8; CHUNK_SIZE]> {
+container/file.rs:  590:    pub fn raw_file(&self) -> &File {
+container/file.rs:  600:    pub fn append_slot(&mut self, chunk: &[u8; CHUNK_SIZE]) -> Result<u64> {
+container/file.rs:  621:    pub fn scrub_slot(&mut self, slot: u64) -> Result<()> {
+container/file.rs:  635:    pub fn fsync(&mut self) -> Result<()> {
 container/header.rs:  31:pub struct Header {
 container/header.rs:  45:    pub fn new_random(params: Argon2Params) -> Result<Self> {
 container/header.rs:  55:    pub fn decode(bytes: &[u8]) -> Result<Self> {
