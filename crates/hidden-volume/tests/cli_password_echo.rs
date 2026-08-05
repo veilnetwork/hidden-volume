@@ -16,9 +16,12 @@
 //! real terminal to hand the child, and the master side shows exactly
 //! what a user would have seen on screen.
 //!
-//! Unix only, same as the code it covers: turning echo off on Windows
-//! needs `SetConsoleMode`, which is deliberately not implemented (see
-//! `EchoOff` in `src/bin/hv.rs`).
+//! Unix only, because `openpty` is: a pty is how the property is made
+//! observable, not where the property lives. The Windows arm of
+//! `EchoOff` clears `ENABLE_ECHO_INPUT` with `SetConsoleMode`
+//! (report7 P1); it is compiled by the cross-check in `the local release checklist` §4
+//! and exercised by the unit tests in `src/bin/hv.rs`, which
+//! `windows-release-gate.yml` runs on a Windows runner.
 
 #![cfg(all(feature = "cli", unix))]
 
@@ -188,6 +191,14 @@ impl Session {
         self.master.flush().ok();
     }
 
+    /// Ctrl-D at the start of a line — what a user presses to end the
+    /// list `hv repack` asks for. In canonical mode this makes the
+    /// pending read return 0, which is the EOF the command waits on.
+    fn type_eof(&mut self) {
+        self.master.write_all(&[0x04]).expect("type Ctrl-D");
+        self.master.flush().ok();
+    }
+
     /// Reap the child, killing it rather than waiting forever.
     fn wait_for_exit(&mut self) {
         let deadline = std::time::Instant::now() + STEP_TIMEOUT;
@@ -351,4 +362,141 @@ fn the_password_still_arrives_when_echo_is_suppressed() {
     );
 
     let _ = std::fs::remove_file(&path);
+}
+
+/// `hv repack` must not echo either — and it reads EVERY space's
+/// password (report7 P1).
+///
+/// This is the worse of the two prompts and it was the one left open.
+/// `read_password`, closed in report6 P2, takes one password. `repack`
+/// calls `read_all_passwords`, which had no echo handling at all, and
+/// it *invites* interactive use: it prints "Reading passwords from
+/// stdin (one per line, EOF to end)" and waits. Everything the user
+/// then types — the key to every space in the container, one after
+/// another — went into the terminal scrollback together.
+///
+/// The existing tests in this file could not see it: they all drive
+/// `create-space`, which goes through the other function.
+#[test]
+fn repack_passwords_typed_at_a_terminal_are_not_echoed() {
+    let source = scratch_path();
+    let source_str = source.to_str().unwrap().to_owned();
+    let dest = scratch_path();
+    let dest_str = dest.to_str().unwrap().to_owned();
+
+    let status = Command::new(env!("CARGO_BIN_EXE_hv"))
+        .args(["create", &source_str, "--params", "min", "--replicas", "1"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("hv create");
+    assert!(status.success(), "hv create failed");
+
+    // Two spaces, so the test covers what makes this prompt different:
+    // it collects a list, and every entry in it is a password.
+    const FIRST: &str = "zzREPACKsecretONE41";
+    const SECOND: &str = "zzREPACKsecretTWO42";
+    for pw in [FIRST, SECOND] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_hv"))
+            .args(["create-space", &source_str])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn hv create-space");
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(format!("{pw}\n").as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success(), "hv create-space failed");
+    }
+
+    let mut session = Session::start(&["repack", &source_str, &dest_str]);
+    session.wait_for_prompt();
+    session.type_line(FIRST);
+    session.type_line(SECOND);
+    session.type_eof();
+    session.wait_for_exit();
+    let transcript = session.transcript();
+
+    // Calibration: the invitation really did reach the terminal, so
+    // this is a transcript of a session and not an empty read. Without
+    // it, "the passwords are absent" would be satisfied by capturing
+    // nothing at all.
+    assert!(
+        transcript.to_lowercase().contains("password"),
+        "no prompt in the terminal transcript ({transcript:?}) — this test \
+         captured nothing, so its main assertion proves nothing"
+    );
+
+    assert!(
+        !transcript.contains(FIRST),
+        "the first repack password was echoed to the terminal: {transcript:?}"
+    );
+    assert!(
+        !transcript.contains(SECOND),
+        "the second repack password was echoed to the terminal: {transcript:?}"
+    );
+
+    // ...and the repack actually happened, so suppressing echo did not
+    // come at the price of the passwords never arriving. Without this,
+    // a `read_all_passwords` that returned nothing would pass every
+    // assertion above.
+    assert!(
+        std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0) > 0,
+        "repack produced no destination container — the passwords typed \
+         at the terminal did not arrive; transcript: {transcript:?}"
+    );
+
+    let _ = std::fs::remove_file(&source);
+    let _ = std::fs::remove_file(&dest);
+}
+
+/// The terminal is restored after the repack prompt too.
+///
+/// `read_all_passwords` holds echo off across a whole list of lines and
+/// several early returns — an over-long line, too many passwords, a
+/// read error. A guard dropped on only one of those paths would leave
+/// the user's shell unable to show what they type, and the failure
+/// outlives the process that caused it.
+#[test]
+fn the_terminal_is_restored_after_the_repack_prompt() {
+    let source = scratch_path();
+    let source_str = source.to_str().unwrap().to_owned();
+    let dest = scratch_path();
+    let dest_str = dest.to_str().unwrap().to_owned();
+
+    let status = Command::new(env!("CARGO_BIN_EXE_hv"))
+        .args(["create", &source_str, "--params", "min", "--replicas", "1"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("hv create");
+    assert!(status.success());
+
+    let mut session = Session::start(&["repack", &source_str, &dest_str]);
+    let observer = session.observer.take().expect("observer fd");
+    assert!(
+        echo_is_on(&observer),
+        "a fresh pty should start with ECHO on"
+    );
+
+    session.wait_for_prompt();
+    // No passwords at all: the empty-stdin path, which is one of the
+    // early returns the guard has to survive.
+    session.type_eof();
+    session.wait_for_exit();
+
+    assert!(
+        echo_is_on(&observer),
+        "hv repack exited with the terminal's ECHO still cleared — the \
+         user's shell is left unable to show what they type"
+    );
+
+    let _ = std::fs::remove_file(&source);
+    let _ = std::fs::remove_file(&dest);
 }

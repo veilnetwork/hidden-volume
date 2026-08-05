@@ -25,11 +25,17 @@
 //! reason there is no `--password` flag: an argument is world-readable
 //! in `ps` for the life of the process.
 //!
-//! When stdin is a **terminal**, echo is suppressed while the password
-//! is typed (report6 P2) — on Unix; see `EchoOff`. A piped or
-//! redirected password takes exactly the path it always did.
+//! When stdin is a **terminal**, echo is suppressed while a password is
+//! typed — for the single-password prompts (report6 P2) and for
+//! `repack`, which collects one per space (report7 P1) — on Unix and on
+//! Windows alike; see `EchoOff`. A piped or redirected password takes
+//! exactly the path it always did.
+//!
+//! Stdin is also bounded: `MAX_PASSWORD_LINE` per line and
+//! `MAX_PASSWORDS` in total, so a file redirected here by mistake is
+//! refused rather than buffered.
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read as _, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -235,12 +241,18 @@ fn read_password(prompt: &str) -> Result<zeroize::Zeroizing<Vec<u8>>> {
 /// caller's terminal. Leaving a shell with `ECHO` cleared is a bad way
 /// to fail.
 ///
-/// **Unix only.** `IsTerminal` answers on every platform, but turning
-/// echo off does not: Windows needs `SetConsoleMode`, and this host
-/// cannot compile, let alone run, that branch, so shipping it would
-/// mean shipping code nobody has executed. On Windows `engage` answers
-/// `None` and the read behaves as it did before — stated here rather
-/// than papered over.
+/// **Unix and Windows.** Unix clears `ECHO` with `tcsetattr`; Windows
+/// clears `ENABLE_ECHO_INPUT` with `SetConsoleMode`. The Windows arm
+/// was omitted when this guard was written, on the grounds that this
+/// host could not compile or run it — but `hv.exe` is built and shipped
+/// in every release, and `windows-release-gate.yml` already runs this
+/// crate's tests on a Windows runner. There was a place to compile and
+/// execute it; it just was not here. Until it was written, the shipped
+/// Windows binary printed passwords on screen (report7 P1).
+///
+/// Everywhere else — a platform that is neither — `engage` answers
+/// `None` and the read behaves as an ordinary `read_line`, which is
+/// what every platform did before.
 ///
 /// Not signal-safe: a SIGINT between engage and drop leaves the
 /// terminal with echo off until `stty sane`. That is the same hole
@@ -250,6 +262,24 @@ fn read_password(prompt: &str) -> Result<zeroize::Zeroizing<Vec<u8>>> {
 struct EchoOff {
     #[cfg(unix)]
     saved: libc::termios,
+    #[cfg(windows)]
+    saved: u32,
+}
+
+/// The console mode `mode` with echo cleared.
+///
+/// Split out from the syscall wiring so the one piece of *logic* on the
+/// Windows path can be tested on every platform, including the hosts
+/// that cannot run a Windows console. `ENABLE_LINE_INPUT` is
+/// deliberately left alone: with line input on and echo off, `ReadFile`
+/// still does the usual line editing while showing nothing, which is
+/// exactly what a password prompt wants.
+#[cfg(any(windows, test))]
+const fn console_mode_without_echo(mode: u32) -> u32 {
+    // Same value as `windows_sys::Win32::System::Console::ENABLE_ECHO_INPUT`,
+    // written out so this function compiles — and is tested — off Windows.
+    const ENABLE_ECHO_INPUT: u32 = 0x0004;
+    mode & !ENABLE_ECHO_INPUT
 }
 
 impl EchoOff {
@@ -280,7 +310,43 @@ impl EchoOff {
         Some(Self { saved })
     }
 
-    #[cfg(not(unix))]
+    /// Clear `ENABLE_ECHO_INPUT` on the console attached to stdin.
+    ///
+    /// `None` on every failure, which includes the ordinary case of
+    /// stdin not being a console at all: `GetConsoleMode` fails on a
+    /// pipe or a redirected file, and the caller then reads exactly as
+    /// it did before. That path is the one CI exercises, since a
+    /// GitHub-hosted runner gives the test process a pipe.
+    #[cfg(windows)]
+    fn engage() -> Option<Self> {
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::System::Console::{
+            GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE, SetConsoleMode,
+        };
+
+        // SAFETY: `GetStdHandle` takes a constant and returns a handle
+        // the process already owns; it is not ours to close.
+        let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let mut mode: u32 = 0;
+        // SAFETY: `handle` is a valid stdin handle and `mode` is a live
+        // `u32`; the call reports failure in its return value and only
+        // writes through the pointer on success.
+        if unsafe { GetConsoleMode(handle, &raw mut mode) } == 0 {
+            // Not a console — a pipe or a file. Nothing to suppress.
+            return None;
+        }
+        // SAFETY: same handle, and the mode differs from the one just
+        // read only in the echo bit.
+        if unsafe { SetConsoleMode(handle, console_mode_without_echo(mode)) } == 0 {
+            return None;
+        }
+        Some(Self { saved: mode })
+    }
+
+    #[cfg(not(any(unix, windows)))]
     fn engage() -> Option<Self> {
         None
     }
@@ -298,26 +364,112 @@ impl Drop for EchoOff {
                 libc::tcsetattr(fd, libc::TCSAFLUSH, &raw const self.saved);
             }
         }
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::Console::{
+                GetStdHandle, STD_INPUT_HANDLE, SetConsoleMode,
+            };
+            // SAFETY: the guard only exists when `engage` succeeded, so
+            // stdin is a console and `saved` is the mode it reported.
+            unsafe {
+                let handle = GetStdHandle(STD_INPUT_HANDLE);
+                SetConsoleMode(handle, self.saved);
+            }
+        }
     }
 }
 
+/// Longest accepted password line, in bytes.
+///
+/// Not a policy on how long a password may be — it is a bound on how
+/// much a single unterminated line can make this process allocate.
+/// Without one, `hv repack < /dev/zero` grows a buffer until the
+/// machine gives out. 1 KiB is far past any passphrase a human types
+/// and far short of anything worth worrying about.
+const MAX_PASSWORD_LINE: usize = 1024;
+
+/// Most passwords accepted from one stdin.
+///
+/// One line per space in the container, and a repack that names more
+/// spaces than this is a mistake — a stray file redirected into stdin,
+/// most likely — not a request. Bounded for the same reason as the line
+/// length: every accepted line is held in memory at once.
+const MAX_PASSWORDS: usize = 256;
+
+/// Read one password per line until EOF.
+///
+/// **Echo is suppressed when stdin is a terminal**, for the same reason
+/// as in [`read_password`] and by the same guard (report7 P1). This one
+/// mattered more and was missed: `hv repack` *prompts* for interactive
+/// use — "Reading passwords from stdin (one per line, EOF to end)" is an
+/// invitation, not a warning — and what it collects is the password to
+/// EVERY space in the container. All of them went into the terminal
+/// scrollback together.
 fn read_all_passwords() -> Result<Vec<zeroize::Zeroizing<Vec<u8>>>> {
+    use std::io::IsTerminal as _;
+
+    let interactive = std::io::stdin().is_terminal();
+    let echo_off = if interactive { EchoOff::engage() } else { None };
+
     let stdin = std::io::stdin();
-    let mut out: Vec<zeroize::Zeroizing<Vec<u8>>> = Vec::new();
-    for line in stdin.lock().lines() {
-        let mut s = line.map_err(|e| {
-            hidden_volume::Error::Io(std::io::Error::other(format!(
-                "read password from stdin: {e}"
-            )))
-        })?;
-        if s.ends_with('\r') {
-            s.pop();
-        }
-        if !s.is_empty() {
-            out.push(zeroize::Zeroizing::new(s.into_bytes()));
-        }
+    let out = read_passwords_from(stdin.lock());
+
+    // Restore before any early return, so a rejected line does not leave
+    // the user's shell unable to show what they type.
+    drop(echo_off);
+    if interactive {
+        // None of the newlines the user typed were echoed.
+        eprintln!();
     }
-    Ok(out)
+    out
+}
+
+/// The parsing half of [`read_all_passwords`], over any reader.
+///
+/// Split out so the caps below are testable without a terminal and
+/// without a subprocess.
+fn read_passwords_from(mut reader: impl BufRead) -> Result<Vec<zeroize::Zeroizing<Vec<u8>>>> {
+    let mut out: Vec<zeroize::Zeroizing<Vec<u8>>> = Vec::new();
+    loop {
+        // `Zeroizing`: these bytes are password material from the first
+        // read, not from the moment they are accepted.
+        let mut buf = zeroize::Zeroizing::new(Vec::<u8>::new());
+        // Read at most one byte more than a line may hold, so a line
+        // that is too long is *detected* rather than *buffered*.
+        let n = (&mut reader)
+            .take(MAX_PASSWORD_LINE as u64 + 1)
+            .read_until(b'\n', &mut buf)
+            .map_err(|e| {
+                hidden_volume::Error::Io(std::io::Error::other(format!(
+                    "read password from stdin: {e}"
+                )))
+            })?;
+        if n == 0 {
+            return Ok(out);
+        }
+        if buf.last() == Some(&b'\n') {
+            buf.pop();
+        } else if buf.len() > MAX_PASSWORD_LINE {
+            // Filled the whole allowance without reaching a newline.
+            return Err(hidden_volume::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("hv: a password line exceeds {MAX_PASSWORD_LINE} bytes"),
+            )));
+        }
+        if buf.last() == Some(&b'\r') {
+            buf.pop();
+        }
+        if buf.is_empty() {
+            continue;
+        }
+        if out.len() == MAX_PASSWORDS {
+            return Err(hidden_volume::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("hv: more than {MAX_PASSWORDS} passwords on stdin"),
+            )));
+        }
+        out.push(buf);
+    }
 }
 
 fn hex(b: &[u8]) -> String {
@@ -560,4 +712,175 @@ fn cmd_repack(source: PathBuf, dest: PathBuf) -> Result<()> {
     Container::repack(&source, &dest, &pw_refs, RepackOptions::default())?;
     println!("repacked: {} → {}", source.display(), dest.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- report7 P1: the caps on what stdin may hand us ----
+
+    fn collect(input: &[u8]) -> Result<Vec<String>> {
+        let got = read_passwords_from(std::io::Cursor::new(input.to_vec()))?;
+        Ok(got
+            .iter()
+            .map(|p| String::from_utf8_lossy(p).into_owned())
+            .collect())
+    }
+
+    #[test]
+    fn ordinary_input_is_unchanged() {
+        // The shape every script and every test uses must keep working
+        // byte-for-byte: blank lines skipped, CRLF tolerated, no
+        // trailing-newline required.
+        assert_eq!(collect(b"a\nb\n").unwrap(), vec!["a", "b"]);
+        assert_eq!(collect(b"a\r\nb\r\n").unwrap(), vec!["a", "b"]);
+        assert_eq!(collect(b"a\n\n\nb").unwrap(), vec!["a", "b"]);
+        assert_eq!(collect(b"").unwrap(), Vec::<String>::new());
+    }
+
+    /// The caps are BOUNDS, and a bound has to be an absolute number.
+    ///
+    /// Stated separately, and first, because the two tests below phrase
+    /// their inputs in terms of the constants — so raising a constant
+    /// raises the probe along with it and those tests go on passing at
+    /// any size. A cap of `usize::MAX` satisfies both of them and bounds
+    /// nothing; break-checking found exactly that. These two assertions
+    /// are what actually holds the values down. The ceilings are loose
+    /// on purpose: a deliberate adjustment stays easy, an accidental
+    /// removal does not.
+    #[test]
+    fn the_caps_are_actually_small() {
+        // Bound through locals rather than asserting on the constants
+        // directly: `clippy::assertions_on_constants` would otherwise
+        // push this into a `const` block, and a build error names no
+        // test. A raised cap should fail HERE, by name.
+        let line = MAX_PASSWORD_LINE;
+        let count = MAX_PASSWORDS;
+        assert!(
+            line <= 4096,
+            "a {line}-byte password line is not a bound on anything"
+        );
+        assert!(
+            count <= 1024,
+            "{count} passwords is not a bound on anything"
+        );
+    }
+
+    #[test]
+    fn a_password_line_may_not_exceed_its_cap() {
+        // A line one byte inside the cap is still a password...
+        let ok = vec![b'x'; MAX_PASSWORD_LINE];
+        assert_eq!(collect(&ok).unwrap().len(), 1);
+
+        // ...and one byte past it is refused rather than buffered. The
+        // point is that the refusal happens without reading the rest:
+        // before this cap, `hv repack < /dev/zero` grew a single line
+        // until the machine gave out.
+        let mut too_long = vec![b'x'; MAX_PASSWORD_LINE + 1];
+        too_long.push(b'\n');
+        let err = collect(&too_long).expect_err("an over-long line must be refused");
+        assert!(
+            err.to_string().contains("exceeds"),
+            "unhelpful message: {err}"
+        );
+
+        // And an ABSOLUTE input, owing nothing to the constant: one
+        // mebibyte on a single line is not a password under any cap
+        // this program should ship with.
+        let a_megabyte = vec![b'x'; 1024 * 1024];
+        collect(&a_megabyte).expect_err("a 1 MiB line must be refused whatever the cap says");
+    }
+
+    #[test]
+    fn the_number_of_passwords_is_capped() {
+        let at_cap: Vec<u8> = (0..MAX_PASSWORDS)
+            .flat_map(|i| format!("pw{i}\n").into_bytes())
+            .collect();
+        assert_eq!(collect(&at_cap).unwrap().len(), MAX_PASSWORDS);
+
+        let over_cap: Vec<u8> = (0..MAX_PASSWORDS + 1)
+            .flat_map(|i| format!("pw{i}\n").into_bytes())
+            .collect();
+        let err = collect(&over_cap).expect_err("more passwords than the cap must be refused");
+        assert!(
+            err.to_string().contains("more than"),
+            "unhelpful message: {err}"
+        );
+
+        // Absolute, as above: four thousand lines is a file someone
+        // redirected by mistake, not a container's worth of spaces.
+        let four_thousand: Vec<u8> = (0..4096)
+            .flat_map(|i| format!("pw{i}\n").into_bytes())
+            .collect();
+        collect(&four_thousand).expect_err("4096 passwords must be refused whatever the cap says");
+    }
+
+    // ---- report7 P1: the Windows echo branch ----
+
+    /// The one piece of logic on the Windows path, checked on every
+    /// platform.
+    ///
+    /// `SetConsoleMode` cannot be called on a host without a console, and
+    /// the CI runner that CAN call it hands the test process a pipe. What
+    /// remains testable everywhere is the mode arithmetic — and getting it
+    /// wrong is the failure that matters, because clearing the wrong bit
+    /// would either leave echo on (the bug this closes) or disable line
+    /// editing and leave the prompt unusable.
+    #[test]
+    fn clearing_echo_leaves_every_other_console_bit_alone() {
+        const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
+        const ENABLE_LINE_INPUT: u32 = 0x0002;
+        const ENABLE_ECHO_INPUT: u32 = 0x0004;
+
+        // The mode a Windows console starts with, echo included.
+        let typical = ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT;
+        let suppressed = console_mode_without_echo(typical);
+
+        assert_eq!(
+            suppressed & ENABLE_ECHO_INPUT,
+            0,
+            "echo is still enabled — the password would be printed"
+        );
+        assert_eq!(
+            suppressed,
+            typical & !ENABLE_ECHO_INPUT,
+            "a bit other than ENABLE_ECHO_INPUT changed"
+        );
+        // Line editing must survive: with it cleared the prompt stops
+        // handling backspace and Enter, which is a broken prompt rather
+        // than a private one.
+        assert_ne!(
+            suppressed & ENABLE_LINE_INPUT,
+            0,
+            "line input was cleared along with echo"
+        );
+
+        // Idempotent, and a no-op on a mode that never had echo.
+        assert_eq!(console_mode_without_echo(suppressed), suppressed);
+        assert_eq!(console_mode_without_echo(0), 0);
+    }
+
+    /// Engaging against a non-console stdin must answer `None` quietly.
+    ///
+    /// This is the branch a GitHub-hosted Windows runner actually takes —
+    /// the test process is handed a pipe, so `GetConsoleMode` fails — and
+    /// it is the branch that must not panic, must not corrupt the handle,
+    /// and must leave the caller reading exactly as it did before. It
+    /// runs on Unix too, where a non-tty stdin is the same story.
+    #[test]
+    fn engage_is_harmless_when_stdin_is_not_a_terminal() {
+        use std::io::IsTerminal as _;
+        if std::io::stdin().is_terminal() {
+            // Someone is running the suite from a terminal with stdin
+            // attached; this test has nothing to say about that case.
+            return;
+        }
+        let guard = EchoOff::engage();
+        assert!(
+            guard.is_none(),
+            "engaged echo suppression on a stdin that is not a terminal"
+        );
+        drop(guard);
+    }
 }

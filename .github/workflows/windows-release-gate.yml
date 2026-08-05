@@ -24,6 +24,17 @@ jobs:
       - run: cargo test --workspace --tests --no-fail-fast --locked
       - run: cargo test --workspace --doc --locked
       - run: cargo test -p hidden-volume --features cli --test cli --locked
+      # The `hv` binary's OWN unit tests (report7 P1). `--test cli` above
+      # selects one integration target and so never builds these; without
+      # this line the Windows `EchoOff` arm — `GetConsoleMode` /
+      # `SetConsoleMode`, the half that keeps `hv.exe` from printing
+      # passwords on screen — is compiled here and executed nowhere.
+      #
+      # A hosted runner hands the test process a pipe, not a console, so
+      # what runs is the not-a-console path: `engage` must answer `None`
+      # quietly rather than panic or clobber the handle. The mode
+      # arithmetic itself is asserted on every platform.
+      - run: cargo test -p hidden-volume --features cli --bins --locked
 
   release-build:
     name: Windows release build
