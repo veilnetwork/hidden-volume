@@ -188,9 +188,22 @@ impl Container {
         // custom values that don't map to a preset (FixedRatio, custom
         // bucket size), the policy is runtime-only — host-app must
         // call `set_padding_policy` after every open.
+        //
+        // The custom arm must ZERO the index, not pass `options.argon2`
+        // through (report7 P2). `Argon2Params` carries the index in bits
+        // 16..24 of its version word, so "leave it alone" means "keep
+        // whatever index arrived in the caller's params" — and the
+        // caller is not always writing them from scratch. `repack`
+        // builds the destination's params from the SOURCE's header,
+        // which already carries the source's index; ask that repack for
+        // a custom policy and the new container's header claimed the old
+        // container's preset while nothing at runtime applied it. The
+        // next open then read that index back and applied the WRONG
+        // policy, silently, to a container whose owner had explicitly
+        // asked for a different one.
         let argon2_for_header = match options.padding_policy.to_persisted_index() {
             Some(idx) => options.argon2.with_padding_policy_index(idx),
-            None => options.argon2,
+            None => options.argon2.with_padding_policy_index(0),
         };
         let path = path.as_ref();
         let mut file = ContainerFile::create(path, argon2_for_header)?;
