@@ -108,9 +108,10 @@ offset 44..48  params_version u32 LE   (упаковано; см. bit-layout н�
 - `m_cost_kib`, `t_cost`, `p_cost` ОБЯЗАНЫ быть ≥
   `Argon2Params::MIN` (m=8 MiB, t=2, p=1). Библиотека отказывается
   открывать или создавать container с более слабыми параметрами.
-  Симметричные потолки — 1 GiB / 100 / 64 — закрывают DoS через
+  Симметричные потолки — 512 MiB / 8 / 16 — закрывают DoS через
   cleartext-header, где tampered-поле заставляло бы следующего
-  opener'а уйти в multi-TiB Argon2id-аллокацию.
+  opener'а уйти в multi-TiB Argon2id-аллокацию, и ограничивают
+  худшую допустимую деривацию по *времени*, а не только по памяти.
 - Более старые v1 (pre-pass-13) и v2 (post-pass-13) контейнеры
   ОТВЕРГАЮТСЯ v3-readers'ами потому что `format_version != 3`.
   Отказ теперь **двойной**: и `Argon2Params::validate`-политика, и
@@ -676,7 +677,7 @@ In-place миграция не предоставляется. Чтобы пер
 | `DEFAULT_SUPERBLOCK_REPLICAS` | 3 | SB replicas per commit. |
 | `params_version.format_version` | 3 | Поколение on-disk формата; кодируется в младших 16 битах 4-байтного `params.version` (§1.2). v3-читатели отказываются открывать v1/v2-файлы, а v3-читатели отвергаются гипотетическими v4-читателями. |
 | `argon2_floor` (`Argon2Params::MIN`) | m=8 MiB, t=2, p=1 | Refuse-to-open threshold. |
-| `Argon2Params::MAX_M_COST_KIB` / `MAX_T_COST` / `MAX_P_COST` | 1 GiB / 100 / 64 | Refuse-to-open ceilings (audit pass 1 D1). |
+| `Argon2Params::MAX_M_COST_KIB` / `MAX_T_COST` / `MAX_P_COST` | 512 MiB / 8 / 16 | Refuse-to-open ceilings (audit pass 1 D1, смягчение Argon2-OOM через header-tamper). Каждый — небольшая кратность самого тяжёлого поставляемого preset'а (`HEAVY`: m=256 MiB, t=4, p=4), что ограничивает стоимость tampered-заголовка по *времени*, а не только по памяти — ровно ради этого потолки и были ужаты (report6 P2, см. CHANGELOG). |
 | `MAX_OPEN_SCAN_CHUNKS` | 16 × 1024 × 1024 (= 64 GiB при `CHUNK_SIZE`) | Жёсткий cap на slot-grid (audit pass 16 TM1 / audit pass 17 B). Обе стороны отвечают `Error::ContainerTooLarge { chunks, cap }` (согласовано в audit HV-13; раньше read-side отвечал `Error::Malformed`). |
 | глубина дерева | выводится из числа chunk'ов, а не константа | Константы глубины больше нет (аудит HV-15 убрал `MAX_TREE_DEPTH = 3`, который заодно был потолком ёмкости namespace). Писатель добавляет уровень всякий раз, когда нижний перестаёт помещаться в один chunk; любой walker (Space::get, list, log_iter, integrity, vacuum) может спуститься настолько глубоко, насколько могли бы быть уложены chunk'и, которыми владеет space, — при том что каждый уровень минимум в `MIN_FULL_INTERNAL_FANOUT` (12) раз шире вышестоящего. Глубже — `Error::Malformed("tree deeper than this space's chunk count can hold")` либо его `IntegrityFailure`-аналог. При `MAX_OPEN_SCAN_CHUNKS` этот предел равен 7 спускам. |
 | `MIN_FULL_INTERNAL_FANOUT` | `(PAYLOAD_CAP - 4) / (2 + MAX_KEY_LEN + 8 + 32) - 1` = 12 | Сколько детей гарантированно держит *полный* internal-узел при самом большом возможном указателе на ребёнка. Писатель пакует жадно, поэтому полны все узлы уровня, кроме последнего, — именно это делает глубину логарифмической по числу chunk'ов и позволяет читателям вывести из неё свой предел глубины. |

@@ -98,9 +98,9 @@ NIST рекомендацией для password-based KDF'ов:
 | `Argon2Params::MIN.m_cost_kib` | **8 MiB** | **ниже OWASP low-end (12 MiB)** | ⚠ **P-LOW1** |
 | `Argon2Params::MIN.t_cost` | 2 | = OWASP mainline | ✓ |
 | `Argon2Params::MIN.p_cost` | 1 | = OWASP | ✓ |
-| `Argon2Params::MAX.m_cost_kib` | 1 GiB | = OWASP «no constraint» | ✓ |
-| `Argon2Params::MAX.t_cost` | 100 | well above OWASP | ✓ |
-| `Argon2Params::MAX.p_cost` | 64 | well above OWASP | ✓ |
+| `Argon2Params::MAX_M_COST_KIB` | 512 MiB | ½ OWASP «no constraint»; 2× `HEAVY` | ✓ |
+| `Argon2Params::MAX_T_COST` | 8 | well above OWASP; 2× `HEAVY` | ✓ |
+| `Argon2Params::MAX_P_COST` | 16 | well above OWASP; 4× `HEAVY` | ✓ |
 
 **P-LOW1 — `Argon2Params::MIN` m_cost ниже OWASP low-end.**
 

@@ -522,9 +522,12 @@ documented under threat-model "out of scope".
    presets (`Argon2Params::LIGHT/DEFAULT/HEAVY`) and a floor
    (`Argon2Params::MIN`, below which open/create is rejected). Audit
    pass 1 D1 also added an upper ceiling
-   (`MAX_M_COST_KIB` = 1 GiB, `MAX_T_COST` = 100, `MAX_P_COST` = 64) to
+   (`MAX_M_COST_KIB` = 512 MiB, `MAX_T_COST` = 8, `MAX_P_COST` = 16) to
    close the OOM DoS where a tampered header would force the next opener
-   into a 4 TiB Argon2 derivation.
+   into a 4 TiB Argon2 derivation. Each ceiling is a small multiple of
+   the heaviest shipped preset (`HEAVY`: m=256 MiB, t=4, p=4), so the
+   worst header an adversary can write is bounded in *time* as well as
+   in memory.
 
 2. **Replay/rollback protection.** ✅ Delegated to host-app. A snapshot
    adversary (T2) can roll the file back to an old version — the library

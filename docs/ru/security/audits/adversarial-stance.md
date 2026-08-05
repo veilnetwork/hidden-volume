@@ -79,8 +79,8 @@ source-константы (`HEADER_LEN = 80`) говорят 80. Fix включ�
   Argon2Params (16)` (v3 layout; v2 имел дополнительные 32 байта
   cleartext `container_id` по offset 32..64 — закрыто v3 #10).
   Проверить, содержит ли 16-байтный `Argon2Params` блок значения
-  в plausible-диапазоне (`m_cost_kib ∈ [8192, 2²⁰]`,
-  `t_cost ∈ [2, 100]`, `p_cost ∈ [1, 64]`,
+  в plausible-диапазоне (`m_cost_kib ∈ [8192, 524288]` KiB,
+  `t_cost ∈ [2, 8]`, `p_cost ∈ [1, 16]`,
   `format_version == 3`, padding-policy биты 16..24 ∈
   {0, 1, 2, 3}, reserved биты 24..32 == 0). Если всё парсится, с
   высокой вероятностью это `hidden-volume` контейнер.
@@ -546,9 +546,10 @@ cooperative)
 - **Метод.** Tamper Argon2Params в extreme значения
   (`m_cost_kib = u32::MAX`).
 - **Outcome.** `Argon2Params::validate` отвергает с explicit
-  caps (`m_cost_kib ≤ 1 GiB`, `t_cost ≤ 100`, `p_cost ≤ 64`,
-  `format_version == 2`, reserved биты 24..32 == 0). Closed
-  в audit pass 1 (D1).
+  caps (`m_cost_kib ≤ 512 MiB`, `t_cost ≤ 8`, `p_cost ≤ 16`,
+  `format_version == 3`, reserved биты 24..32 == 0). Closed
+  в audit pass 1 (D1); в report6 P2 потолки ужаты так, чтобы
+  ограничивать деривацию и по *времени*, а не только по памяти.
 - **Verdict.** **Defended.**
 - **Severity.** INFO.
 
