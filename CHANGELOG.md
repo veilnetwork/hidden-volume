@@ -12,6 +12,46 @@ format.
 
 ## [Unreleased]
 
+### Breaking — report6 follow-through
+
+- **A delete now has to be addressed the way its namespace is kept
+  (HV-04).** The single-kind-per-namespace contract was enforced for
+  every operation except the two that delete.
+
+  `Tx::delete` on a namespace recorded `Log` went through. The Tx-side
+  check only asks whether the *other* kind is pending in the same
+  transaction, which for a lone delete it is not; the commit-side check
+  then looked for a `Put` among the ops, because pure-`Delete` op sets
+  had been exempted so `Space::erase_namespace` could clear a log
+  namespace. The exemption was written for erase and granted to
+  everything shaped like erase.
+
+  `Tx::delete_log` on a namespace recorded `Kv` went through for the
+  opposite reason: a log delete is stored as a KV `Delete` on the
+  `log_id_key`, so the log-side gate never saw it, and it reached the
+  index through the same internal helper erase uses — which skipped the
+  KV-side gate outright. It was the only operation in the crate that met
+  no kind check at all.
+
+  Neither needs an attacker; both need the password and a mistake in the
+  host app. The first unlinks a message from its `DataBatch` through an
+  API documented to refuse. The second removes a real KV entry whenever
+  its key happens to be the eight big-endian bytes of the id.
+
+  Ops now carry a `KvOrigin` — `ByKey`, `ByLog` or `Erase` — and
+  `commit_tx` weighs that against the recorded kind instead of guessing
+  from op shape. Only `Erase` may disagree with what is on disk, because
+  the namespace it leaves behind is empty and so cannot end up half of
+  one kind and half of another.
+
+  **Breaking for callers who deleted log records with
+  `Tx::delete(ns, log_id_key(id))` or the FFI `WriteOp::Delete` on a log
+  namespace** — that now fails the commit with `WrongNamespaceKind`.
+  `Tx::delete_log` / `WriteOp::DeleteLog` is the call. Four of this
+  crate's own tests were written that way and are migrated in the same
+  commit, which is the best evidence available that the mistake is an
+  easy one to make.
+
 ### Performance — report6 follow-through
 
 - **Maintenance stops materialising whole namespaces (HV-02, HV-03).**

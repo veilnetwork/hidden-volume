@@ -102,6 +102,143 @@ fn cross_tx_log_namespace_locked() {
     std::fs::remove_file(&path).ok();
 }
 
+/// Cross-Tx: a namespace established as Log cannot be `delete`-ed by
+/// KEY in a later Tx (audit HV-04).
+///
+/// This got through both gates. The Tx-side check only asks whether
+/// the OTHER kind is pending in the same transaction, which for a
+/// lone `delete` it is not; the commit-side check then looked only for
+/// a `Put` among the ops, because pure-`Delete` sets had been let
+/// through deliberately so that `Space::erase_namespace` could clear a
+/// Log namespace. That exemption was written for erase and applied to
+/// everything shaped like erase, so an application that reached for
+/// `delete` on its message log — the wrong call, but a plausible one —
+/// silently unlinked a record's `DataBatch` pointer through an API
+/// that is documented to reject exactly this.
+#[test]
+fn cross_tx_log_namespace_rejects_delete_by_key() {
+    let path = scratch_path();
+    {
+        let mut c = Container::create(&path, fast_params()).unwrap();
+        let mut s = c.create_space(b"pw").unwrap();
+        let mut tx = s.begin_tx();
+        tx.append_log(Namespace(7), 1, b"msg").unwrap();
+        tx.commit().unwrap();
+    }
+    {
+        let mut c = Container::open(&path).unwrap();
+        let mut s = c.open_space(b"pw").unwrap();
+        let mut tx = s.begin_tx();
+        // The key a log record actually occupies, so this is the delete
+        // that would have removed one had it been permitted.
+        tx.delete(Namespace(7), &1u64.to_be_bytes()).unwrap();
+        match tx.commit() {
+            Err(Error::WrongNamespaceKind(_)) => {},
+            other => panic!("expected commit-time WrongNamespaceKind, got {other:?}"),
+        }
+    }
+
+    // And the record is still there — the rejection has to happen
+    // before anything is written, not after.
+    let mut c = Container::open(&path).unwrap();
+    let mut s = c.open_space(b"pw").unwrap();
+    assert_eq!(
+        s.read_log(Namespace(7), 1).unwrap().as_deref(),
+        Some(&b"msg"[..]),
+        "the rejected delete still unlinked the record"
+    );
+    std::fs::remove_file(&path).ok();
+}
+
+/// Cross-Tx: a namespace established as Kv cannot be `delete_log`-ed
+/// in a later Tx (audit HV-04) — the mirror of the test above.
+///
+/// `delete_log` routes through the same internal helper
+/// `erase_namespace` uses, which skips the kind check on purpose, and
+/// the commit-side check never saw it because a log DELETE lands in
+/// the KV op map rather than the log one. So the one op addressed by
+/// log id was the one op that never met the recorded kind at all.
+#[test]
+fn cross_tx_kv_namespace_rejects_delete_by_log_id() {
+    let path = scratch_path();
+    {
+        let mut c = Container::create(&path, fast_params()).unwrap();
+        let mut s = c.create_space(b"pw").unwrap();
+        let mut tx = s.begin_tx();
+        // The key a `delete_log(ns, 1)` would address, so the delete
+        // below names something that really is in this namespace.
+        tx.put(Namespace(5), &1u64.to_be_bytes(), b"v").unwrap();
+        tx.commit().unwrap();
+    }
+    {
+        let mut c = Container::open(&path).unwrap();
+        let mut s = c.open_space(b"pw").unwrap();
+        let mut tx = s.begin_tx();
+        tx.delete_log(Namespace(5), 1).unwrap();
+        match tx.commit() {
+            Err(Error::WrongNamespaceKind(_)) => {},
+            other => panic!("expected commit-time WrongNamespaceKind, got {other:?}"),
+        }
+    }
+
+    let mut c = Container::open(&path).unwrap();
+    let mut s = c.open_space(b"pw").unwrap();
+    assert_eq!(
+        s.get(Namespace(5), &1u64.to_be_bytes()).unwrap().as_deref(),
+        Some(&b"v"[..]),
+        "the rejected delete_log still removed the entry"
+    );
+    std::fs::remove_file(&path).ok();
+}
+
+/// The exemption the two tests above close must stay open for the one
+/// caller it was written for: `erase_namespace` clears a Log namespace
+/// by issuing a `Delete` per key.
+///
+/// Without this, "reject deletes that do not match the recorded kind"
+/// is trivially satisfiable by rejecting all of them, and the bulk
+/// erase — the documented way to clear a chat history — would break.
+#[test]
+fn erase_namespace_still_clears_a_log_namespace() {
+    let path = scratch_path();
+    let mut c = Container::create(&path, fast_params()).unwrap();
+    let mut s = c.create_space(b"pw").unwrap();
+    let mut tx = s.begin_tx();
+    for id in 0..5u64 {
+        tx.append_log(Namespace(9), id, b"msg").unwrap();
+    }
+    tx.commit().unwrap();
+
+    assert_eq!(s.erase_namespace(Namespace(9)).unwrap(), 5);
+    assert_eq!(s.count(Namespace(9)).unwrap(), 0);
+    std::fs::remove_file(&path).ok();
+}
+
+/// `delete_log` on a Log namespace is the legitimate use and must keep
+/// working — the check has to read the RECORDED kind, not refuse every
+/// delete that did not arrive through `put`/`delete`.
+#[test]
+fn delete_log_on_a_log_namespace_still_works() {
+    let path = scratch_path();
+    let mut c = Container::create(&path, fast_params()).unwrap();
+    let mut s = c.create_space(b"pw").unwrap();
+    let mut tx = s.begin_tx();
+    tx.append_log(Namespace(11), 1, b"a").unwrap();
+    tx.append_log(Namespace(11), 2, b"b").unwrap();
+    tx.commit().unwrap();
+
+    let mut tx = s.begin_tx();
+    tx.delete_log(Namespace(11), 1).unwrap();
+    tx.commit().unwrap();
+
+    assert_eq!(s.read_log(Namespace(11), 1).unwrap(), None);
+    assert_eq!(
+        s.read_log(Namespace(11), 2).unwrap().as_deref(),
+        Some(&b"b"[..])
+    );
+    std::fs::remove_file(&path).ok();
+}
+
 /// `Space::list_namespaces_with_kind` returns the persisted kind
 /// for every namespace with at least one committed entry.
 #[test]

@@ -250,13 +250,12 @@ fn vacuum_does_not_break_databatch_messages() {
     }
     tx.commit().unwrap();
 
-    // Tx2: delete one message id (removes the KV pointer; batch chunk stays).
+    // Tx2: delete one message id (removes the KV pointer; batch chunk
+    // stays). Addressed by id — a log namespace no longer accepts a
+    // delete addressed by key, even the key the id encodes to (audit
+    // HV-04).
     let mut tx = s.begin_tx();
-    tx.delete(
-        Namespace::MESSAGE_LOG,
-        &hidden_volume::space::log::log_id_key(3),
-    )
-    .unwrap();
+    tx.delete_log(Namespace::MESSAGE_LOG, 3).unwrap();
     tx.commit().unwrap();
 
     s.vacuum_orphans().unwrap();

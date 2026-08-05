@@ -27,7 +27,7 @@
 
 pub mod commit;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use zeroize::Zeroize;
 
@@ -48,6 +48,43 @@ pub(crate) enum KvOp {
 
 /// A transaction's pending KV ops: `namespace_byte → ordered ops`.
 pub(crate) type PendingKv = BTreeMap<u8, Vec<KvOp>>;
+
+/// How a namespace's pending KV ops were addressed — and therefore
+/// what the namespace's **recorded** kind has to be for them to be
+/// legal (audit HV-04).
+///
+/// Every mutation of a namespace's KV index arrives through one of
+/// three doors, and until this existed the index could not tell them
+/// apart. `Space::erase_namespace` needs to clear a Log namespace, and
+/// it does so by issuing one `Delete` per key — so a pure-`Delete` op
+/// set against a Log namespace was permitted, wholesale. That
+/// exemption was written for erase and granted to everything shaped
+/// like erase: `Tx::delete` on a message log went through it, and
+/// `Tx::delete_log` on a KV namespace went around the kind check
+/// altogether, because it shares erase's internal helper and its op
+/// lands in the KV map where the log-side check never looks.
+///
+/// Naming the door closes both halves without taking anything away
+/// from erase: the kind gate now asks where an op came from, and only
+/// [`Self::Erase`] may disagree with what is on disk.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum KvOrigin {
+    /// [`Tx::put`] / [`Tx::delete`] — addressed by key. The namespace
+    /// must be recorded `Kv`.
+    ByKey,
+    /// [`Tx::delete_log`] — addressed by log id. The namespace must be
+    /// recorded `Log`.
+    ByLog,
+    /// [`crate::space::Space::erase_namespace`] — removes every key
+    /// there is, whatever the namespace holds. The only origin allowed
+    /// to bypass the recorded kind, because it is the only one that
+    /// cannot leave a namespace half of one kind and half of another:
+    /// what it leaves behind is nothing.
+    Erase,
+}
+
+/// A transaction's per-namespace [`KvOrigin`].
+pub(crate) type PendingKvOrigin = BTreeMap<u8, KvOrigin>;
 
 /// A transaction's pending log appends: `namespace_byte → ordered
 /// (log_id, payload) records`.
@@ -142,9 +179,12 @@ pub struct Tx<'s, 'f> {
     /// `namespace_byte → ordered (log_id, payload) appends`. Each
     /// non-empty entry produces one `DataBatch` chunk on commit.
     pub(crate) pending_log: Redacted<PendingLog>,
-    /// Namespaces whose `pending_kv` entries came from [`Self::delete_log`].
-    /// Keeps public KV mutations from being mixed with Log-index deletes.
-    pending_log_deletes: BTreeSet<u8>,
+    /// Which door each namespace's `pending_kv` entries came through —
+    /// see [`KvOrigin`]. One origin per namespace per Tx: the three are
+    /// mutually exclusive (a whole-namespace erase and two disjoint
+    /// ways of naming a single entry), so mixing them is a caller
+    /// mistake rather than a shape the commit has to express.
+    kv_origin: PendingKvOrigin,
 }
 
 // A transaction is the largest single pile of user plaintext this crate
@@ -157,7 +197,7 @@ pub struct Tx<'s, 'f> {
 redacted_debug!(Tx<'s, 'f> {
     pending_kv,
     pending_log,
-    pending_log_deletes
+    kv_origin
 });
 
 impl<'s, 'f> Tx<'s, 'f> {
@@ -166,8 +206,23 @@ impl<'s, 'f> Tx<'s, 'f> {
             space,
             pending_kv: Redacted::default(),
             pending_log: Redacted::default(),
-            pending_log_deletes: BTreeSet::new(),
+            kv_origin: PendingKvOrigin::new(),
         }
+    }
+
+    /// Record that this namespace's KV ops are addressed the `want`
+    /// way, or reject the call if an earlier op in this Tx addressed
+    /// them another way (audit HV-04).
+    fn claim_kv_origin(&mut self, ns_byte: u8, want: KvOrigin) -> Result<()> {
+        if let Some(have) = self.kv_origin.get(&ns_byte)
+            && *have != want
+        {
+            return Err(Error::WrongNamespaceKind(
+                "namespace already has KV ops addressed a different way in this Tx",
+            ));
+        }
+        self.kv_origin.insert(ns_byte, want);
+        Ok(())
     }
 
     /// Audit pass 7 (L2): a single Tx may touch at most
@@ -223,15 +278,20 @@ impl<'s, 'f> Tx<'s, 'f> {
     ///    in `pending_log` (same Tx).
     /// 2. **`commit_tx`** — returns
     ///    [`Error::WrongNamespaceKind`] before writing any chunk if
-    ///    the namespace already has a prior `IndexRoot` with
-    ///    `kind == Log` (cross-Tx).
+    ///    the namespace already has a prior `IndexRoot` whose `kind`
+    ///    disagrees with how the ops were addressed (cross-Tx). What
+    ///    is weighed there is *how the ops were addressed* — by key, by
+    ///    log id, or by a whole-namespace erase — not their shape;
+    ///    audit HV-04 replaced a shape test that let a `delete` on a
+    ///    log through.
     /// 3. **On-disk** — every `IndexRoot` carries an explicit
     ///    `kind` byte (CommitPayload v2 layout). Repack and vacuum
     ///    route by this persisted kind, no shape heuristic.
     ///
-    /// Pure-`Delete` op sets are permitted against a Log namespace
-    /// (used by [`crate::space::Space::erase_namespace`] to clear
-    /// log namespaces) — they cannot introduce mixed-kind state.
+    /// The one operation permitted to disagree with the recorded kind
+    /// is [`crate::space::Space::erase_namespace`], which removes every
+    /// key there is and so leaves nothing that could be half of one
+    /// kind and half of another.
     pub fn put(&mut self, namespace: Namespace, key: &[u8], value: &[u8]) -> Result<()> {
         if namespace == Namespace::RESERVED {
             return Err(Error::Malformed("namespace 0 is reserved"));
@@ -242,13 +302,9 @@ impl<'s, 'f> Tx<'s, 'f> {
         if value.len() > crate::space::index::MAX_VALUE_LEN {
             return Err(Error::PayloadTooLarge);
         }
-        if self.pending_log_deletes.contains(&namespace.0) {
-            return Err(Error::WrongNamespaceKind(
-                "put cannot be mixed with delete_log in one Tx",
-            ));
-        }
         self.check_namespace_capacity(namespace.0)?;
         self.check_namespace_kind(namespace.0, NamespaceKind::Kv)?;
+        self.claim_kv_origin(namespace.0, KvOrigin::ByKey)?;
         self.pending_kv
             .entry(namespace.0)
             .or_default()
@@ -260,6 +316,19 @@ impl<'s, 'f> Tx<'s, 'f> {
     }
 
     /// Delete a KV entry.
+    ///
+    /// **Kind contract.** Same three layers as [`Self::put`], and for
+    /// the same reason. A `delete` is addressed by key, so it belongs
+    /// to a `Kv` namespace; against a namespace recorded `Log` it is
+    /// rejected at commit with [`Error::WrongNamespaceKind`].
+    ///
+    /// It was not, until audit HV-04. The commit-side gate looked for a
+    /// `Put` among the ops, because pure-`Delete` sets had been let
+    /// through so that [`crate::space::Space::erase_namespace`] could
+    /// clear a Log namespace — and a lone `delete` is a pure-`Delete`
+    /// set. Deleting a log record's index entry this way left the
+    /// `DataBatch` chunk behind with nothing pointing at it, through an
+    /// API documented to refuse.
     pub fn delete(&mut self, namespace: Namespace, key: &[u8]) -> Result<()> {
         if namespace == Namespace::RESERVED {
             return Err(Error::Malformed("namespace 0 is reserved"));
@@ -267,13 +336,9 @@ impl<'s, 'f> Tx<'s, 'f> {
         if key.is_empty() || key.len() > crate::space::index::MAX_KEY_LEN {
             return Err(Error::Malformed("invalid key length"));
         }
-        if self.pending_log_deletes.contains(&namespace.0) {
-            return Err(Error::WrongNamespaceKind(
-                "delete cannot be mixed with delete_log in one Tx",
-            ));
-        }
         self.check_namespace_capacity(namespace.0)?;
         self.check_namespace_kind(namespace.0, NamespaceKind::Kv)?;
+        self.claim_kv_origin(namespace.0, KvOrigin::ByKey)?;
         self.pending_kv
             .entry(namespace.0)
             .or_default()
@@ -281,17 +346,26 @@ impl<'s, 'f> Tx<'s, 'f> {
         Ok(())
     }
 
-    /// **Internal:** delete a KV entry bypassing the kind check used
-    /// by [`Self::delete`]. Used by [`crate::space::Space::erase_namespace`]
-    /// to drop entries from Log namespaces (whose underlying KV
-    /// shape stores `log_id_key → batch_slot` pointers — the bulk-
-    /// delete is structurally a KV operation regardless of kind).
-    /// `commit_tx`'s cross-kind check explicitly permits pure-Delete
-    /// op-sets against a Log namespace, so erase commits cleanly.
+    /// **Internal:** queue a `Delete` tagged with the door it came
+    /// through, for the two callers that are not [`Self::delete`].
+    ///
+    /// `origin` is what `commit_tx` weighs against the namespace's
+    /// recorded kind (see [`KvOrigin`]). It is a parameter rather than
+    /// a blanket exemption because the blanket exemption is what audit
+    /// HV-04 found: this helper skipped the kind check outright, which
+    /// was right for [`crate::space::Space::erase_namespace`] and wrong
+    /// for [`Self::delete_log`], whose op then reached disk without
+    /// ever meeting the recorded kind.
+    ///
     /// Takes the key **by value** so a bulk erase can hand over each
     /// key as it is enumerated instead of holding the whole key list
     /// alongside the whole op list (audit HV-03).
-    pub(crate) fn delete_internal(&mut self, namespace: Namespace, key: Vec<u8>) -> Result<()> {
+    pub(crate) fn delete_internal(
+        &mut self,
+        namespace: Namespace,
+        key: Vec<u8>,
+        origin: KvOrigin,
+    ) -> Result<()> {
         if namespace == Namespace::RESERVED {
             return Err(Error::Malformed("namespace 0 is reserved"));
         }
@@ -299,10 +373,12 @@ impl<'s, 'f> Tx<'s, 'f> {
             return Err(Error::Malformed("invalid key length"));
         }
         self.check_namespace_capacity(namespace.0)?;
-        // Deliberately skip `check_namespace_kind`: erase needs to
-        // delete keys from a Log namespace, which is fine because
-        // it cannot introduce mixed-kind state (Delete-only ops
-        // can't change a namespace's shape).
+        // `check_namespace_kind` is deliberately not called here: it
+        // asks whether the OTHER kind is pending in this same Tx, which
+        // is a different question from the one `origin` answers. The
+        // recorded-kind gate is in `commit_tx`, where the prior root is
+        // readable.
+        self.claim_kv_origin(namespace.0, origin)?;
         self.pending_kv
             .entry(namespace.0)
             .or_default()
@@ -404,22 +480,28 @@ impl<'s, 'f> Tx<'s, 'f> {
     /// namespace, but it must not mix `delete_log` and `append_log` for that
     /// namespace in one transaction. Callers that replace some records and
     /// delete others should commit the appends first and the deletes second.
+    ///
+    /// **Kind contract.** The namespace must be recorded `Log`; against
+    /// one recorded `Kv` this returns [`Error::WrongNamespaceKind`] at
+    /// commit. Until audit HV-04 it did not: a log delete is stored as
+    /// a KV `Delete` on the `log_id_key`, so it never passed the
+    /// log-side gate, and it reached the index through
+    /// the same internal helper `erase_namespace` uses, which skipped
+    /// the KV-side one. It was
+    /// the only op in the crate that met no kind check at all — an
+    /// application that mixed up two namespace constants removed a real
+    /// KV entry, silently, whenever its key happened to be the eight
+    /// big-endian bytes of the id.
     pub fn delete_log(&mut self, namespace: Namespace, log_id: u64) -> Result<()> {
         if self.pending_log.contains_key(&namespace.0) {
             return Err(Error::WrongNamespaceKind(
                 "delete_log cannot be mixed with append_log in one Tx",
             ));
         }
-        if self.pending_kv.contains_key(&namespace.0)
-            && !self.pending_log_deletes.contains(&namespace.0)
-        {
-            return Err(Error::WrongNamespaceKind(
-                "delete_log cannot be mixed with KV ops in one Tx",
-            ));
-        }
-        self.delete_internal(namespace, log_id.to_be_bytes().to_vec())?;
-        self.pending_log_deletes.insert(namespace.0);
-        Ok(())
+        // "Not mixed with KV ops in one Tx" is now the origin claim:
+        // `ByLog` against a namespace already claimed `ByKey` (or being
+        // erased) is the same rejection, stated once.
+        self.delete_internal(namespace, log_id.to_be_bytes().to_vec(), KvOrigin::ByLog)
     }
 
     /// Number of distinct namespaces touched by pending ops in this
@@ -441,6 +523,7 @@ impl<'s, 'f> Tx<'s, 'f> {
 
     /// Flush. Returns the new commit sequence. Consumes the [`Tx`].
     pub fn commit(self) -> Result<u64> {
-        self.space.commit_tx(self.pending_kv, self.pending_log)
+        self.space
+            .commit_tx(self.pending_kv, self.pending_log, self.kv_origin)
     }
 }
