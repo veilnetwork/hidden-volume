@@ -8,11 +8,11 @@ use crate::{Error, Result};
 ///
 /// Reserved discriminator bytes (not exposed as variants):
 /// - `0x03` — historically "Data" (direct-data references); never
-///   produced. Reserved for future direct-blob storage; current v1
+///   produced. Reserved for future direct-blob storage; the current
 ///   reader rejects with `Error::Malformed("unknown chunk kind")`.
 /// - `0x04` — historically "Journal" (intent-log for in-place
-///   updates); never produced. Superseded by vacuum + scrub; current
-///   v1 reader rejects.
+///   updates); never produced. Superseded by vacuum + scrub; the
+///   current reader rejects.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -43,7 +43,11 @@ impl ChunkKind {
     /// Decode a wire-format kind byte into a [`ChunkKind`]. Unknown
     /// values surface as [`Error::Malformed`] — callers MUST NOT log
     /// the raw byte (deniability invariant). Reserved discriminators
-    /// 0x03 and 0x04 are treated as unknown by v1 readers.
+    /// 0x03 and 0x04 are treated as unknown.
+    ///
+    /// This is the authority on which kinds exist: `tests/properties.rs`
+    /// sweeps all 256 bytes through it to check that its own generator
+    /// covers every one that gets through (report6 P2).
     pub fn from_u8(b: u8) -> Result<Self> {
         Ok(match b {
             0x01 => Self::Superblock,
