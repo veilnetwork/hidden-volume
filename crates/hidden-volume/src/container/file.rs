@@ -269,7 +269,10 @@ fn fsync_parent_dir_strict(_path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+// `unix` as well as `test`: the only thing that reads this switch is the
+// `cfg(unix)` half of `fsync_parent_dir_strict`. Windows takes the no-op half,
+// where there is no durability step to fail and therefore nothing to arm.
+#[cfg(all(test, unix))]
 thread_local! {
     /// Test-only switch that makes `create`'s final durability step fail.
     ///
@@ -289,7 +292,7 @@ thread_local! {
     static CREATE_FSYNC_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn create_fsync_should_fail() -> bool {
     CREATE_FSYNC_FAILS.with(std::cell::Cell::get)
 }
@@ -663,7 +666,11 @@ pub(crate) fn write_budget_error_for_test(current: u64, extra: u64) -> Error {
     check_write_budget(current, extra).expect_err("caller must pass an over-budget pair")
 }
 
-#[cfg(test)]
+// `unix` too, and not to silence a warning: the failure this module exercises
+// can only be provoked through the parent-directory fsync, which exists on
+// unix alone. Compiled for Windows, the test armed a switch nothing reads and
+// would have asserted that a create which actually SUCCEEDED had failed.
+#[cfg(all(test, unix))]
 mod hv07_tests {
     use super::*;
     use crate::crypto::kdf::Argon2Params;

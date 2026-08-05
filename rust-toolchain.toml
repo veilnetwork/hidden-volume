@@ -1,0 +1,23 @@
+# Pin the toolchain, because an unpinned one silently rewrites the tree.
+#
+# The sibling `veil` repository had `cargo fmt --all --check` go red on
+# 2026-08-05 across 34 files nobody had touched: CI installed a bare `stable`,
+# so a rustfmt release rather than a commit changed what the gate demanded.
+# This repository was clean at the time by luck, not by construction.
+#
+# Bump this deliberately: change the channel, run `cargo fmt --all`, and commit
+# the reformat as its own change, so it is reviewable and dated instead of
+# arriving mixed into unrelated work.
+#
+# MSRV is a separate promise -- see the local release checklist section 5. This pin says which
+# toolchain the gates run on, not the oldest one the crate supports.
+#
+# `targets` lists only what the pre-tag gate CROSS-compiles: the Android build
+# through cargo-ndk, and the Windows check that type-checks the `cfg(windows)`
+# arms a darwin host never sees. Host targets come with the toolchain and the
+# release matrix installs its own per runner.
+[toolchain]
+channel = "1.97.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
+targets = ["aarch64-linux-android", "x86_64-pc-windows-gnu"]
