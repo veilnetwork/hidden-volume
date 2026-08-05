@@ -12,6 +12,27 @@ format.
 
 ## [Unreleased]
 
+### Fixed — report7 P2
+
+- **A custom padding policy inherited the previous container's preset
+  index.** `Container::create_with_options` derives the header's
+  padding bits (16..24 of the Argon2 version word) from the requested
+  policy — except for a custom one, where it passed `options.argon2`
+  through untouched. That word *is* where the index lives, so "untouched"
+  meant "keep whatever index the caller's params already carried".
+
+  Not only reachable by a host passing something odd. `repack` builds
+  the destination's params from the **source header**, which carries the
+  source's index by construction; ask that repack for a custom policy and
+  the new container's header claimed a preset nothing at runtime was
+  applying. The next open read the index back and applied a policy its
+  owner had explicitly asked to replace. The comment at the site said the
+  custom case is "runtime-only" — true of the policy, false of the header.
+
+  The custom arm now zeroes the index, so a runtime-only policy reads
+  back as `None`: a host that forgets `set_padding_policy` gets no
+  padding rather than the wrong padding.
+
 ### Security — report7 P1
 
 - **`hv repack` echoed every password in the container, and the Windows
