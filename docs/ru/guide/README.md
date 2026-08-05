@@ -19,8 +19,10 @@
   семантика синхронизации, замечания о replay-rollback.
 - **[flutter.md](flutter.md)** — встраивание `hidden-volume` в
   Flutter-приложение через FFI-биндинги (uniffi 0.31).
-- **[migration.md](migration.md)** — пустой shell для будущей
-  миграции on-disk формата v1 → v2.
+- **[migration.md](migration.md)** — политика межпоколенческой
+  миграции формата. До 1.0 on-disk формат менялся дважды
+  (v1 → v2 → v3), ломающе by design и без in-place-инструмента;
+  текущее поколение — v3.
 
 ## Что читать дальше
 

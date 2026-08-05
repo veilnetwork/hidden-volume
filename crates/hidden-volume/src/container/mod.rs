@@ -400,6 +400,29 @@ impl Container {
     /// Cost: one Argon2 derivation (per the container's params) plus an
     /// O(N) scan over current slots to detect collision.
     ///
+    /// ## If this call is interrupted
+    ///
+    /// It writes `superblock_replicas` copies of one initial Superblock
+    /// (`seq = 1`, `root_slot = NO_RECORD`) and fsyncs. A crash, a kill
+    /// or a cancelled future partway through leaves some replicas on
+    /// disk and no return value — but what is on disk is a **complete,
+    /// empty space**, not a half-built one. There is nothing yet for a
+    /// partial write to make inconsistent: the space owns no namespaces,
+    /// no Commit chunk and no data.
+    ///
+    /// So reconciliation is just **opening it again with the same
+    /// password**. [`Self::open_space`] finds the replica that landed and
+    /// hands back exactly the space this call would have returned. A
+    /// second `create_space` with that password answers
+    /// [`Error::SpaceAlreadyExists`], which is the truth and not a
+    /// symptom — the space exists, and the retry the caller wants is an
+    /// open.
+    ///
+    /// There is deliberately no third outcome here (no
+    /// "created-but-unconfirmed"). A caller cannot act differently on it
+    /// than on either of the two, and every space this API can leave
+    /// behind is openable.
+    ///
     /// [`Error::SpaceAlreadyExists`]: crate::Error::SpaceAlreadyExists
     pub fn create_space(&mut self, password: &[u8]) -> Result<Space<'_>> {
         // Audit pass 7 (L4): fail fast on read-only. Without this

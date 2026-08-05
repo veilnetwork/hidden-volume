@@ -19,8 +19,10 @@ reference material you consult as needed.
   sync semantics, replay-rollback considerations.
 - **[flutter.md](flutter.md)** — embedding `hidden-volume` in a
   Flutter app via the FFI bindings (uniffi 0.31).
-- **[migration.md](migration.md)** — empty shell for the eventual
-  v1 → v2 on-disk format migration.
+- **[migration.md](migration.md)** — cross-generation format
+  policy. Pre-1.0 the on-disk format bumped twice (v1 → v2 → v3),
+  breaking by design and with no in-place tool; the current
+  generation is v3.
 
 ## Where to read next
 
