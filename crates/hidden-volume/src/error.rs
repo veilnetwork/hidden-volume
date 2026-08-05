@@ -88,6 +88,26 @@ pub enum Error {
     #[error("rename is visible but its durability is unconfirmed: {0}")]
     RenameVisibleDurabilityUncertain(&'static str),
 
+    /// The atomic rewrite's `rename` SUCCEEDED, and the file now at that
+    /// path is **not the one we wrote**.
+    ///
+    /// The rewrite pins the temp file's inode before renaming it into
+    /// place and re-reads the path's inode after. A mismatch means
+    /// something renamed over `path` in the window between the two, so
+    /// what a reader will find there is content this library did not
+    /// produce — attacker-chosen, in the threat model this check exists
+    /// for.
+    ///
+    /// **The old container is gone either way.** This is not a failed
+    /// operation to retry: the rename happened, the previous inode is
+    /// unlinked, and the caller's remedy is to restore from backup and
+    /// to treat the directory as writable by someone else. Reporting it
+    /// as [`Error::Internal`] said the opposite — a crate bug, and by
+    /// implication nothing done — which is why it has its own variant
+    /// now (report6 P2, sibling of the durability case above).
+    #[error("rename is visible but the file at that path is not the one written: {0}")]
+    RenameVisibleContentUnverified(&'static str),
+
     /// A previous publish got at least one Superblock replica onto the disk
     /// and then failed, so this handle's view of the tree may be one era
     /// behind what a reopen would select.
