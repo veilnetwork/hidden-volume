@@ -681,12 +681,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
-name = "hex-literal"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6fe2267d4ed49bc07b63801559be28c718ea06c4738b7a03c94df7386d2cde46"
-
-[[package]]
 name = "hidden-volume"
 version = "1.2.3"
 dependencies = [
@@ -698,7 +692,6 @@ dependencies = [
  "clap",
  "criterion",
  "getrandom 0.2.17",
- "hex-literal",
  "libc",
  "memmap2",
  "proptest",

@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-05T09:24:59Z
+# Captured: 2026-08-05T09:41:20Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -185,12 +185,12 @@ padding/mod.rs:  69:    pub const DEFAULT: Self = Self::BucketGrowth { bucket_ch
 padding/mod.rs:  91:    pub fn from_persisted_index(idx: u8) -> Self {
 padding/mod.rs:  108:    pub fn to_persisted_index(&self) -> Option<u8> {
 padding/mod.rs:  133:    pub fn garbage_after_commit(
-redact.rs:  60:pub struct SecretShape {
-redact.rs:  74:pub trait Secret {
-redact.rs:  89:pub struct Redacted<T: Secret> {
-redact.rs:  95:    pub const fn new(inner: T) -> Self {
-redact.rs:  101:    pub const fn as_inner(&self) -> &T {
-redact.rs:  113:    pub fn into_inner(mut self) -> T {
+redact.rs:  61:pub struct SecretShape {
+redact.rs:  75:pub trait Secret {
+redact.rs:  90:pub struct Redacted<T: Secret> {
+redact.rs:  96:    pub const fn new(inner: T) -> Self {
+redact.rs:  102:    pub const fn as_inner(&self) -> &T {
+redact.rs:  114:    pub fn into_inner(mut self) -> T {
 space/index.rs:  90:pub struct Namespace(pub u8);
 space/index.rs:  94:    pub const SETTINGS: Self = Self(1);
 space/index.rs:  96:    pub const CONTACTS: Self = Self(2);
@@ -307,20 +307,20 @@ lib.rs:  177:    pub fn wrap_open_with_keys(
 lib.rs:  196:    pub fn wrap_open_constant_time(
 lib.rs:  211:    pub fn wrap_open_with_keys_constant_time(
 lib.rs:  245:    pub fn with_space_mut<R>(&mut self, f: impl for<'a> FnOnce(&mut Space<'a>) -> R) -> R {
-lib.rs:  307:pub enum BlockingFailure {
-lib.rs:  355:pub async fn run_blocking<F, T, E>(
-lib.rs:  377:pub struct OpId(pub u64);
-lib.rs:  387:pub enum OpOutcome {
-lib.rs:  417:    pub fn is_settled(self) -> bool {
-lib.rs:  425:    pub fn may_have_mutated(self) -> bool {
-lib.rs:  434:pub struct AbandonedOp {
-lib.rs:  514:pub struct OpLedger {
-lib.rs:  532:    pub fn new(max_concurrent: usize) -> Self {
-lib.rs:  556:    pub fn abandoned_operations(&self) -> Vec<AbandonedOp> {
-lib.rs:  573:    pub fn clear_settled_operations(&self) {
-lib.rs:  586:    pub fn forgotten_abandonments(&self) -> u64 {
-lib.rs:  595:    pub async fn run<F, T, E>(
-lib.rs:  627:    pub async fn run_cancellable<F, T, E>(
+lib.rs:  321:pub enum BlockingFailure {
+lib.rs:  369:pub async fn run_blocking<F, T, E>(
+lib.rs:  391:pub struct OpId(pub u64);
+lib.rs:  401:pub enum OpOutcome {
+lib.rs:  431:    pub fn is_settled(self) -> bool {
+lib.rs:  439:    pub fn may_have_mutated(self) -> bool {
+lib.rs:  448:pub struct AbandonedOp {
+lib.rs:  528:pub struct OpLedger {
+lib.rs:  546:    pub fn new(max_concurrent: usize) -> Self {
+lib.rs:  570:    pub fn abandoned_operations(&self) -> Vec<AbandonedOp> {
+lib.rs:  587:    pub fn clear_settled_operations(&self) {
+lib.rs:  600:    pub fn forgotten_abandonments(&self) -> u64 {
+lib.rs:  609:    pub async fn run<F, T, E>(
+lib.rs:  641:    pub async fn run_cancellable<F, T, E>(
 
 ==========================================
 crate: hidden-volume-async

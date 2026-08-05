@@ -50,6 +50,7 @@
 
 use core::fmt;
 use core::ops::{Deref, DerefMut};
+use std::collections::BTreeMap;
 
 use zeroize::Zeroize;
 
@@ -195,6 +196,36 @@ impl Secret for Vec<u8> {
     }
 }
 
+/// One Tx's operations against one namespace, collapsed to one entry per
+/// key: `key → Some(value)` for a put, `key → None` for a delete. Both
+/// halves are user plaintext, and this map is a **full copy** of the
+/// transaction's — built by `space::commit` from `KvOp`s that are already
+/// `Redacted`, so leaving it bare made the copy outlive the discipline
+/// its source was held to (report7 P3).
+impl Secret for BTreeMap<Vec<u8>, Option<Vec<u8>>> {
+    fn secret_shape(&self) -> SecretShape {
+        SecretShape {
+            items: self.len(),
+            bytes: self
+                .iter()
+                .map(|(k, v)| k.len() + v.as_ref().map_or(0, Vec::len))
+                .sum(),
+        }
+    }
+
+    fn scrub_secret(&mut self) {
+        // The keys of a `BTreeMap` are not reachable as `&mut`, so they
+        // cannot be zeroized in place: drain the map instead, scrub each
+        // pair as it comes out, and let the owned copies drop.
+        for (mut k, v) in core::mem::take(self) {
+            k.zeroize();
+            if let Some(mut v) = v {
+                v.zeroize();
+            }
+        }
+    }
+}
+
 /// Leaf entries: `(key, value)` pairs, both halves user plaintext.
 impl Secret for Vec<(Vec<u8>, Vec<u8>)> {
     fn secret_shape(&self) -> SecretShape {
@@ -286,6 +317,37 @@ mod tests {
         let mut v = vec![(b"ab".to_vec(), b"cde".to_vec())];
         v.scrub_secret();
         assert!(v.is_empty());
+    }
+
+    /// The collapsed key-ops map — `space::tree::KeyOps` — is a full copy
+    /// of a transaction's plaintext and gets the same treatment as the
+    /// `KvOp`s it is built from (report7 P3).
+    #[test]
+    fn key_ops_map_is_redacted_and_scrubbed() {
+        let mut m: BTreeMap<Vec<u8>, Option<Vec<u8>>> = BTreeMap::new();
+        m.insert(b"contact-id".to_vec(), Some(b"alice@example".to_vec()));
+        m.insert(b"gone".to_vec(), None);
+
+        // Counts both halves, and counts a delete as its key alone.
+        let shape = m.secret_shape();
+        assert_eq!(shape.items, 2);
+        assert_eq!(
+            shape.bytes,
+            b"contact-id".len() + b"alice@example".len() + b"gone".len()
+        );
+
+        // `{:?}` says how much, never what.
+        let r = Redacted::new(m);
+        let printed = format!("{r:?}");
+        assert!(!printed.contains("alice"), "value leaked: {printed}");
+        assert!(!printed.contains("contact-id"), "key leaked: {printed}");
+
+        // And the scrub empties it. Keys of a `BTreeMap` are not
+        // reachable as `&mut`, so this drains rather than iterating —
+        // an implementation that skipped the keys would leave them here.
+        let mut m = r.into_inner();
+        m.scrub_secret();
+        assert!(m.is_empty(), "scrub left {} entries", m.len());
     }
 
     #[test]

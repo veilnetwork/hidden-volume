@@ -297,10 +297,24 @@ impl std::fmt::Debug for OwnedSpace {
     }
 }
 
-// SAFETY: `Container` and `Space<'_>` are both `Send`; `Box<Container>`
-// is `Send`; `ManuallyDrop<Space<'static>>` is `Send`. The fake `'static`
-// lifetime doesn't escape this struct — `with_space_mut()` re-narrows it.
-unsafe impl Send for OwnedSpace {}
+// `OwnedSpace` is `Send` by auto-derivation, not by assertion.
+//
+// It used to carry `unsafe impl Send for OwnedSpace {}`, reasoning that
+// `Box<Container>` is `Send` and so is `ManuallyDrop<Space<'static>>`.
+// Both are true — and both are exactly what the compiler works out on
+// its own, since every field is `Send`. The `unsafe impl` asserted a
+// property nobody had to be told, and an `unsafe impl` that is not
+// load-bearing is worse than none: it would go on holding if a future
+// field stopped being `Send`, silently turning a compile error into a
+// data race (report7 P3).
+//
+// The static assertion below keeps the guarantee without the assertion.
+// It fails to COMPILE if any field ever loses `Send`, which is the
+// outcome the `unsafe impl` was suppressing.
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<OwnedSpace>();
+};
 
 /// Reason a [`run_blocking`] call did not produce a result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
