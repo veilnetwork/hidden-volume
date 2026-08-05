@@ -118,9 +118,13 @@ Mechanics: writes a fresh container at a sibling temp file named
 `.{stem}.hv-rotate.{16hex}.tmp` (the random 16-hex suffix avoids
 collisions; the leading dot keeps it out of casual listings), then
 `rename(2)`s it over `path` under the source `LOCK_EX` with a
-parent-dir `fsync`. On any failure the temp is removed and the
-original `path` is untouched. See [`Container::change_passwords`]
-for the full contract.
+parent-dir `fsync`. On any failure **before the rename** the temp is
+removed and the original `path` is untouched. The rename is the point
+of no return: after it, `Error::RenameVisibleDurabilityUncertain` and
+`Error::RenameVisibleContentUnverified` both mean the rewrite is in
+place and the old file is gone — neither is retryable against the old
+container, because there is none. See
+[`Container::change_passwords`] for the full contract.
 
 **Data-loss-by-design warning.** Spaces NOT listed in the password
 mapping are **silently and permanently dropped** — see §2.2 and the

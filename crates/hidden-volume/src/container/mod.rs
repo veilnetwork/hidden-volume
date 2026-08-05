@@ -315,9 +315,9 @@ impl Container {
     ///
     /// Use it when both properties are needed at once:
     /// - **in-place rewrite** (`compact_known` / `change_passwords`) —
-    ///   the lock must be unbroken from first read through rename, and an
-    ///   abandoned rewrite must leave the source byte-identical
-    ///   (audit HV-06);
+    ///   the lock must be unbroken from first read through rename, and a
+    ///   rewrite abandoned before that rename must leave the source
+    ///   byte-identical (audit HV-06);
     /// - **forensic / backup copies** that must hash-match the original
     ///   and must not race a concurrent writer.
     ///
@@ -1223,11 +1223,21 @@ impl Container {
     /// the FS — for forensic-grade scrub of the underlying storage,
     /// host-app must run a separate tool.
     ///
-    /// **On any failure, `path` is left BYTE-IDENTICAL.** The source is
-    /// read under an exclusive lock that refuses writes, so neither the
-    /// auto-vacuum nor the self-heal checkpoint runs against it — an
-    /// abandoned compaction leaves nothing behind to show it was
-    /// attempted (audit HV-06).
+    /// **On any failure BEFORE the rename, `path` is left
+    /// BYTE-IDENTICAL.** The source is read under an exclusive lock that
+    /// refuses writes, so neither the auto-vacuum nor the self-heal
+    /// checkpoint runs against it — an abandoned compaction leaves
+    /// nothing behind to show it was attempted (audit HV-06).
+    ///
+    /// The qualifier is not decoration. `rename(2)` is the point of no
+    /// return, and two outcomes are reported after it, both meaning the
+    /// old file is already gone:
+    /// [`Error::RenameVisibleDurabilityUncertain`] (the rewrite is in
+    /// place; whether the directory entry survives a crash is unknown)
+    /// and [`Error::RenameVisibleContentUnverified`] (the path resolves
+    /// to a file this call did not write). Neither is a failure to
+    /// retry against the old container, because there is no old
+    /// container left to retry against.
     pub fn compact_known(
         path: &std::path::Path,
         passwords: &[&[u8]],
@@ -1258,9 +1268,11 @@ impl Container {
 
     /// Rotate one or more space passwords in-place. The atomic-rename
     /// pattern is the same as [`Self::compact_known`]: write to a
-    /// temp file, then `rename(2)` over `path`. On any failure the
-    /// temp is removed and the original `path` is left byte-identical —
-    /// see [`Self::compact_known`] for what that took (audit HV-06).
+    /// temp file, then `rename(2)` over `path`. On any failure **before
+    /// the rename** the temp is removed and the original `path` is left
+    /// byte-identical — see [`Self::compact_known`] for what that took
+    /// (audit HV-06) and for the two outcomes reported after the rename,
+    /// where the old file is already gone.
     ///
     /// `mapping[i] = (open_with, write_as)`:
     /// - `open_with == write_as` — preserve verbatim (no rotation).
@@ -1489,24 +1501,6 @@ where
         return Err(Error::Io(e));
     }
 
-    // M3-hardening (Unix): post-rename inode pin — the path now MUST
-    // resolve to the same inode our `tmp_handle` references. If it
-    // doesn't, an attacker substituted between our magic-check and the
-    // rename. (Hard to mount this attack with our LOCK_EX held, but
-    // belt-and-suspenders.)
-    #[cfg(unix)]
-    if let Some((pre_dev, pre_ino)) = pre_rename_inode {
-        use std::os::unix::fs::MetadataExt as _;
-        if let Ok(post) = std::fs::metadata(path)
-            && (post.dev() != pre_dev || post.ino() != pre_ino)
-        {
-            drop(tmp_handle);
-            return Err(Error::Internal(
-                "M3-hardening: post-rename inode mismatch (tmp substituted under us)",
-            ));
-        }
-    }
-
     // M2: fsync parent directory so the rename is durable. On Unix
     // ext4/xfs/etc. without this, a crash after rename can revert the
     // directory entry — restoring the OLD inode, and with it the old password
@@ -1521,9 +1515,53 @@ where
 
     drop(tmp_handle);
     drop(src); // explicit: release lock on the (now-orphan) old inode
+
+    // M3-hardening (Unix): post-rename inode pin. Reported BEFORE the
+    // durability outcome, because "the file at this path is not the one
+    // we wrote" is strictly worse news than "it is, and might not
+    // survive a crash".
+    #[cfg(unix)]
+    verify_renamed_inode(path, pre_rename_inode)?;
+
     if durability.is_err() {
         return Err(Error::RenameVisibleDurabilityUncertain(
             "parent-directory fsync failed after a successful rename",
+        ));
+    }
+    Ok(())
+}
+
+/// After the rename, `path` must resolve to the very inode the rewrite
+/// pinned and renamed. A mismatch means something renamed over `path` in
+/// the window between the pin and our rename, so the file a reader will
+/// find there is not the one this call wrote. (Hard to mount with our
+/// `LOCK_EX` held — belt-and-suspenders.)
+///
+/// **The failure is post-rename, and the error has to say so** (report6
+/// P2). It used to be an [`Error::Internal`], which reads as a crate bug
+/// and, by implication, as "nothing was done" — while in fact the
+/// rename had already happened and the previous inode was already
+/// unlinked. That is the same shape audit HV-03 fixed one branch below
+/// for the parent-directory fsync, left unfixed here; and it is why the
+/// `compact_known` / `change_passwords` contract now says "before the
+/// rename" rather than "on any failure".
+///
+/// `pinned == None` means the pre-rename `metadata` call failed, and a
+/// check with nothing to compare against passes. Likewise a `metadata`
+/// that fails now: the answer is unknown, not wrong, and inventing a
+/// failure would make an unreadable directory look like an attack.
+#[cfg(unix)]
+fn verify_renamed_inode(path: &std::path::Path, pinned: Option<(u64, u64)>) -> Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+    let Some((pre_dev, pre_ino)) = pinned else {
+        return Ok(());
+    };
+    let Ok(post) = std::fs::metadata(path) else {
+        return Ok(());
+    };
+    if post.dev() != pre_dev || post.ino() != pre_ino {
+        return Err(Error::RenameVisibleContentUnverified(
+            "post-rename inode mismatch (tmp substituted under us)",
         ));
     }
     Ok(())
@@ -1698,6 +1736,88 @@ fn change_passwords_impl(
     atomic_rewrite_under_source_lock(path, "hv-rotate", cancel, |src, tmp, cancel| {
         Container::repack_into_dest(src, tmp, mapping, options, cancel)
     })
+}
+
+/// The post-rename inode pin must report a POST-rename outcome
+/// (report6 P2).
+///
+/// Driven at the helper rather than through `compact_known`, because
+/// reaching the mismatch through the public API means renaming another
+/// file over `path` in the window between our pin and our rename, while
+/// we hold `LOCK_EX` — a race that decides at random whether the test
+/// proves anything. The helper takes the pinned inode as a parameter
+/// precisely so that "the path is not what we pinned" can be stated
+/// directly.
+#[cfg(all(test, unix))]
+mod post_rename_inode_tests {
+    use super::verify_renamed_inode;
+    use crate::Error;
+
+    struct Scratch(std::path::PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn scratch_file(tag: &str) -> Scratch {
+        let p = std::env::temp_dir().join(format!(
+            "hv-inode-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&p, b"container-ish").expect("scratch file");
+        Scratch(p)
+    }
+
+    fn inode_of(path: &std::path::Path) -> (u64, u64) {
+        use std::os::unix::fs::MetadataExt as _;
+        let m = std::fs::metadata(path).expect("metadata");
+        (m.dev(), m.ino())
+    }
+
+    /// The whole point: a mismatch is not [`Error::Internal`].
+    ///
+    /// `Internal` is documented as a crate bug, which a caller reads as
+    /// "nothing happened" — and here the rename HAS happened and the
+    /// old inode is already unlinked. Asserting the variant is the
+    /// assertion, because the detection itself was never broken.
+    #[test]
+    fn a_mismatch_reports_the_rename_as_visible_not_as_an_internal_bug() {
+        let f = scratch_file("mismatch");
+        let (dev, ino) = inode_of(&f.0);
+        // Any inode but this file's. `ino + 1` is not guaranteed to be
+        // allocated, which is fine — the check compares, it does not
+        // resolve.
+        let err = verify_renamed_inode(&f.0, Some((dev, ino.wrapping_add(1))))
+            .expect_err("a different inode must not pass the pin");
+        assert!(
+            matches!(err, Error::RenameVisibleContentUnverified(_)),
+            "post-rename substitution reported as {err:?}, which tells the \
+             caller the rewrite did not happen"
+        );
+    }
+
+    /// The honest case still passes, or the check would fail every
+    /// rewrite and the test above would be satisfied by a stub that
+    /// always errors.
+    #[test]
+    fn the_pinned_inode_passes() {
+        let f = scratch_file("match");
+        assert!(verify_renamed_inode(&f.0, Some(inode_of(&f.0))).is_ok());
+    }
+
+    /// Nothing pinned, and a path that cannot be read, are both
+    /// "unknown" rather than "wrong". Inventing a failure there would
+    /// make an unreadable directory look like an attack.
+    #[test]
+    fn an_unknown_answer_is_not_a_failure() {
+        let f = scratch_file("unknown");
+        assert!(verify_renamed_inode(&f.0, None).is_ok());
+        let missing = f.0.with_extension("does-not-exist");
+        assert!(verify_renamed_inode(&missing, Some((0, 0))).is_ok());
+    }
 }
 
 #[cfg(test)]

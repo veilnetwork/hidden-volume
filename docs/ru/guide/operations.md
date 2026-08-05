@@ -121,9 +121,14 @@ hidden_volume::Container::change_passwords(
 `.{stem}.hv-rotate.{16hex}.tmp` (случайный 16-hex суффикс
 избегает коллизий; ведущая точка убирает файл из обычных
 листингов), затем `rename(2)`-ит его поверх `path` под source
-`LOCK_EX` с `fsync` родительской директории. При любой ошибке
-temp удаляется, а оригинальный `path` остаётся нетронутым. Полный
-contract см. в [`Container::change_passwords`].
+`LOCK_EX` с `fsync` родительской директории. При любой ошибке **до
+rename** temp удаляется, а оригинальный `path` остаётся нетронутым.
+Rename — точка невозврата: после него и
+`Error::RenameVisibleDurabilityUncertain`, и
+`Error::RenameVisibleContentUnverified` означают, что перезапись уже
+на месте, а старый файл исчез, — ретраить против старого контейнера
+нечего, его больше нет. Полный contract см. в
+[`Container::change_passwords`].
 
 **Предупреждение: потеря данных by design.** Spaces, НЕ
 перечисленные в password-mapping, **молча и безвозвратно
