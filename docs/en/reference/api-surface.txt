@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-05T06:23:36Z
+# Captured: 2026-08-05T07:29:03Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -129,13 +129,13 @@ crypto/kdf.rs:  137:    pub const HEAVY: Self = Self {
 crypto/kdf.rs:  149:    pub fn format_version(&self) -> u16 {
 crypto/kdf.rs:  157:    pub fn padding_policy_index(&self) -> u8 {
 crypto/kdf.rs:  170:    pub fn with_padding_policy_index(self, idx: u8) -> Self {
-crypto/kdf.rs:  188:    pub const MAX_M_COST_KIB: u32 = 1024 * 1024;
-crypto/kdf.rs:  192:    pub const MAX_T_COST: u32 = 100;
-crypto/kdf.rs:  197:    pub const MAX_P_COST: u32 = 64;
-crypto/kdf.rs:  202:    pub fn validate(&self) -> Result<()> {
-crypto/kdf.rs:  244:    pub fn encode(&self) -> [u8; HEADER_PARAMS_LEN] {
-crypto/kdf.rs:  256:    pub fn decode(bytes: &[u8]) -> Result<Self> {
-crypto/kdf.rs:  309:pub fn derive_master_key(
+crypto/kdf.rs:  202:    pub const MAX_M_COST_KIB: u32 = 512 * 1024;
+crypto/kdf.rs:  206:    pub const MAX_T_COST: u32 = 8;
+crypto/kdf.rs:  211:    pub const MAX_P_COST: u32 = 16;
+crypto/kdf.rs:  216:    pub fn validate(&self) -> Result<()> {
+crypto/kdf.rs:  258:    pub fn encode(&self) -> [u8; HEADER_PARAMS_LEN] {
+crypto/kdf.rs:  270:    pub fn decode(bytes: &[u8]) -> Result<Self> {
+crypto/kdf.rs:  323:pub fn derive_master_key(
 crypto/mod.rs:  3:pub mod aead;
 crypto/mod.rs:  4:pub mod derive;
 crypto/mod.rs:  5:pub mod kdf;
