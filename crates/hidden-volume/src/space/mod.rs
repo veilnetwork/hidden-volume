@@ -616,6 +616,12 @@ impl<'f> Space<'f> {
 
     /// List all `(key, value)` pairs in `namespace`, sorted by key.
     /// Empty Vec for namespaces that have never been written to.
+    ///
+    /// **Peak is the namespace's entire plaintext**, by construction —
+    /// that is what the call is. Callers that only need the keys have
+    /// [`Self::list_keys`]; callers that can work a page at a time have
+    /// [`Self::list_after`], whose peak is bounded by `limit` instead
+    /// (audit HV-02).
     pub fn list(&mut self, namespace: Namespace) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let root_slot = match self.find_root_slot(namespace)? {
             Some(s) => s,
@@ -686,6 +692,52 @@ impl<'f> Space<'f> {
         let mut out: Vec<Vec<u8>> = Vec::with_capacity(limit.min(1024));
         let mut walk = self.new_tree_walk();
         self.collect_leaf_keys_after_at(
+            root_slot, namespace, after, limit, 0, &mut walk, &mut out,
+        )?;
+        Ok(out)
+    }
+
+    /// Paginate forward through a namespace's `(key, value)` pairs.
+    ///
+    /// The pair-carrying twin of [`Self::list_keys_after`], and the
+    /// bounded-peak alternative to [`Self::list`]: up to `limit` entries
+    /// whose key is strictly greater than `after`, in ascending key
+    /// order. `after = None` starts at the beginning; pass the last key
+    /// of the previous page for each page after that.
+    ///
+    /// Memory bound: `limit` entries plus one decoded node, independent
+    /// of the namespace's total size. This is the difference that
+    /// matters for a copy loop — [`crate::Container::repack`] used to
+    /// `list` a whole namespace and then hand every pair to `Tx::put`,
+    /// which copies each one, so the peak was **twice** the namespace's
+    /// plaintext with no bound on either half (audit HV-02).
+    ///
+    /// Read bound: as in [`Self::list_keys_after`], the descent to
+    /// `after` plus the leaves the page consumes — internal nodes are
+    /// entered at [`child_index_for(after)`][index::InternalNode::child_index_for],
+    /// so a page does not re-read the prefix it already returned. And as
+    /// there, `limit` bounds the OUTPUT, not the number of chunks read;
+    /// on adversarial input it is the traversal guard that terminates
+    /// the walk.
+    pub fn list_after(
+        &mut self,
+        namespace: Namespace,
+        after: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let root_slot = match self.find_root_slot(namespace)? {
+            Some(s) => s,
+            None => return Ok(Vec::new()),
+        };
+        // Cap the pre-allocation the way `list_keys_after` does: a
+        // caller may pass `usize::MAX` to mean "everything", and
+        // `Vec::with_capacity` panics on overflow.
+        let mut out: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(limit.min(1024));
+        let mut walk = self.new_tree_walk();
+        self.collect_leaf_pairs_after_at(
             root_slot, namespace, after, limit, 0, &mut walk, &mut out,
         )?;
         Ok(out)
@@ -762,13 +814,17 @@ impl<'f> Space<'f> {
         // looked at. On a namespace holding megabytes of message bodies
         // that is the difference between peaking at the keys and
         // peaking at the entire plaintext (report5 HV-04).
-        let keys = self.list_keys(namespace)?;
+        let mut keys = self.list_keys(namespace)?;
         if keys.is_empty() {
             return Ok(0);
         }
         let count = keys.len();
         let mut tx = self.begin_tx();
-        for key in &keys {
+        // `drain`, not `&keys`: every key is about to exist a second
+        // time as a `Delete` op, and moving it means the two copies are
+        // never both live. The op list itself stays whole — the erase
+        // is one transaction by contract (audit HV-03).
+        for key in keys.drain(..) {
             tx.delete_internal(namespace, key)?;
         }
         tx.commit()?;
@@ -924,6 +980,70 @@ impl<'f> Space<'f> {
                         break;
                     }
                     self.collect_leaf_keys_after_at(
+                        c.child_slot,
+                        namespace,
+                        after,
+                        limit,
+                        depth + 1,
+                        walk,
+                        out,
+                    )?;
+                }
+                Ok(())
+            },
+        }
+    }
+
+    /// Walk leaves left-to-right, pushing the `(key, value)` PAIRS of
+    /// entries greater than `after` into `out` and stopping once
+    /// `out.len() >= limit`.
+    ///
+    /// Shape-identical to [`Self::collect_leaf_keys_after_at`] — same
+    /// cursor filter, same `child_index_for` seek, same guard — with the
+    /// value kept instead of dropped. Written out rather than layered on
+    /// `get`-per-key because a page must cost one descent, not `limit`
+    /// of them.
+    #[allow(clippy::too_many_arguments)]
+    fn collect_leaf_pairs_after_at(
+        &mut self,
+        slot: u64,
+        namespace: Namespace,
+        after: Option<&[u8]>,
+        limit: usize,
+        depth: u8,
+        walk: &mut TreeWalk,
+        out: &mut Vec<(Vec<u8>, Vec<u8>)>,
+    ) -> Result<()> {
+        if out.len() >= limit {
+            return Ok(());
+        }
+        walk.admit(slot, depth)?;
+        let node = self.read_index_node_at_expected(slot, namespace)?;
+        match node {
+            IndexNode::Leaf(l) => {
+                for (k, value) in l.entries.into_inner() {
+                    if out.len() >= limit {
+                        break;
+                    }
+                    if let Some(a) = after
+                        && k.as_slice() <= a
+                    {
+                        continue;
+                    }
+                    out.push((k, value));
+                }
+                Ok(())
+            },
+            IndexNode::Internal(i) => {
+                // Seek instead of scan (audit HV-05): every sibling
+                // before `child_index_for(after)` ends strictly below
+                // the cursor. See `collect_leaf_keys_after_at`.
+                let first = after.map_or(0, |a| i.child_index_for(a));
+                for c in i.children.into_iter().skip(first) {
+                    if out.len() >= limit {
+                        break;
+                    }
+                    self.collect_leaf_pairs_after_at(
                         c.child_slot,
                         namespace,
                         after,

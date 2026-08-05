@@ -12,6 +12,57 @@ format.
 
 ## [Unreleased]
 
+### Performance — report6 follow-through
+
+- **Maintenance stops materialising whole namespaces (HV-02, HV-03).**
+  Three paths held plaintext, or slot bookkeeping, proportional to the
+  container rather than to the work in front of them. All three were
+  written under the two-level B+ tree cap of ~10 K entries per namespace,
+  which audit HV-15 removed without revisiting the callers that leaned on
+  it — comments in `repack` still cited the cap as the reason its KV leg
+  was safe.
+
+  - `Container::repack`'s KV leg did `src_space.list(ns)` — every key and
+    every value of the namespace in one `Vec` — and then handed each pair
+    to `Tx::put`, which copies. Peak was **twice the namespace's
+    plaintext**. It now pages through the new `Space::list_after(ns,
+    after, limit)`, the pair-carrying twin of `list_keys_after`, and
+    drains each page into the destination transaction: ≈ 1 MiB per page,
+    flat in namespace size. Splitting a namespace's copy across several
+    destination transactions is sound because the destination is a file
+    the call created; a failure between pages leaves a partial `dest` the
+    caller discards. This is not a general licence to split transactions.
+  - `Space::vacuum_orphans` built a `HashSet<u64>` of reachable slots
+    beside the traversal guard's own visited set — the same set, twice —
+    cloned `owned_slots` whole, and built a second `HashSet<u64>` of
+    slots to drop. It now reads the guard's set through
+    `TreeWalk::has_visited`, indexes `owned_slots` in place, and keys the
+    drop set on a **slot bitmap**: one bit per slot, 2 MiB at the format's
+    16 M-chunk ceiling against hundreds of MiB of hashed `u64`s. This one
+    is not merely an allocation win — `vacuum_orphans` runs automatically
+    on every writable open, so a container grown past where the vacuum can
+    allocate stops opening **at all**.
+  - `Space::vacuum_data_batches` reached its referenced-slot set through
+    `collect_leaves`, materialising every `(log_id_key, batch_slot)` pair
+    of every log namespace before reading one. Paged scan, same bitmap.
+  - `Space::verify_integrity` pooled every log namespace's DataBatch
+    pointers and verified the lot after the last root; it now flushes per
+    namespace. Per-namespace is as fine as this can safely go: the batch
+    pass admits each slot to the shared traversal guard, and log_ids in
+    one batch need not be contiguous, so a boundary inside a namespace
+    could split one batch's pointers across two flushes and report a
+    healthy container as corrupt.
+  - `Space::erase_namespace` moves each key into its `Delete` op instead
+    of copying it, so the key list and the op list are never both live.
+
+  Additive at every level; `Space::list_after` is the only new public
+  item. Coverage: `tests/repack_peak_memory.rs`,
+  `tests/vacuum_peak_memory.rs` and `tests/integrity_peak_memory.rs`
+  measure peak allocation under a counting global allocator, because none
+  of this is visible in any return value — every correctness test in
+  `tests/repack.rs`, `tests/scrub.rs` and `tests/integrity.rs` passed
+  against the old code and passes against the new.
+
 ### Security — report6 follow-through
 
 - **The constant-time open no longer performs maintenance (HV-01).**

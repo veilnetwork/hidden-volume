@@ -288,7 +288,10 @@ impl<'s, 'f> Tx<'s, 'f> {
     /// delete is structurally a KV operation regardless of kind).
     /// `commit_tx`'s cross-kind check explicitly permits pure-Delete
     /// op-sets against a Log namespace, so erase commits cleanly.
-    pub(crate) fn delete_internal(&mut self, namespace: Namespace, key: &[u8]) -> Result<()> {
+    /// Takes the key **by value** so a bulk erase can hand over each
+    /// key as it is enumerated instead of holding the whole key list
+    /// alongside the whole op list (audit HV-03).
+    pub(crate) fn delete_internal(&mut self, namespace: Namespace, key: Vec<u8>) -> Result<()> {
         if namespace == Namespace::RESERVED {
             return Err(Error::Malformed("namespace 0 is reserved"));
         }
@@ -303,7 +306,7 @@ impl<'s, 'f> Tx<'s, 'f> {
         self.pending_kv
             .entry(namespace.0)
             .or_default()
-            .push(KvOp::Delete { key: key.to_vec() });
+            .push(KvOp::Delete { key });
         Ok(())
     }
 
@@ -414,7 +417,7 @@ impl<'s, 'f> Tx<'s, 'f> {
                 "delete_log cannot be mixed with KV ops in one Tx",
             ));
         }
-        self.delete_internal(namespace, &log_id.to_be_bytes())?;
+        self.delete_internal(namespace, log_id.to_be_bytes().to_vec())?;
         self.pending_log_deletes.insert(namespace.0);
         Ok(())
     }

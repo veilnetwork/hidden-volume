@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-04T11:12:33Z
+# Captured: 2026-08-05T04:26:33Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -106,12 +106,12 @@ container/mod.rs:  818:    pub fn open_space_parallel_constant_time(&mut self, p
 container/mod.rs:  828:    pub fn open_space_with_keys_parallel_constant_time(
 container/mod.rs:  848:    pub fn open_space_mmap_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
 container/mod.rs:  858:    pub fn open_space_with_keys_mmap_constant_time(
-container/mod.rs:  935:    pub fn repack(
-container/mod.rs:  957:    pub fn repack_cancellable(
-container/mod.rs:  1195:    pub fn compact_known(
-container/mod.rs:  1206:    pub fn compact_known_cancellable(
-container/mod.rs:  1265:    pub fn change_passwords(
-container/mod.rs:  1276:    pub fn change_passwords_cancellable(
+container/mod.rs:  942:    pub fn repack(
+container/mod.rs:  964:    pub fn repack_cancellable(
+container/mod.rs:  1231:    pub fn compact_known(
+container/mod.rs:  1242:    pub fn compact_known_cancellable(
+container/mod.rs:  1301:    pub fn change_passwords(
+container/mod.rs:  1312:    pub fn change_passwords_cancellable(
 crypto/aead.rs:  21:pub struct ChunkAead {
 crypto/aead.rs:  36:    pub fn new(key: &[u8; 32]) -> Self {
 crypto/aead.rs:  46:    pub fn seal(&self, plaintext: &[u8], aad: [u8; AAD_LEN]) -> Result<([u8; NONCE_LEN], Vec<u8>)> {
@@ -216,7 +216,7 @@ space/index.rs:  533:    pub fn encoded_len(&self) -> usize {
 space/index.rs:  546:    pub fn encode(&self) -> Result<Vec<u8>> {
 space/index.rs:  590:    pub fn decode(bytes: &[u8]) -> Result<Self> {
 space/index.rs:  670:    pub fn child_index_for(&self, key: &[u8]) -> usize {
-space/integrity.rs:  117:    pub fn verify_integrity(&mut self) -> Result<IntegrityReport> {
+space/integrity.rs:  123:    pub fn verify_integrity(&mut self) -> Result<IntegrityReport> {
 space/log.rs:  58:pub const MAX_RECORDS_PER_BATCH: usize = 1024;
 space/log.rs:  62:pub const MAX_LOG_PAYLOAD_LEN: usize = 8 * 1024;
 space/log.rs:  71:pub const MAX_DECODED_BATCH_LEN: usize = 4 + MAX_RECORDS_PER_BATCH * (12 + MAX_LOG_PAYLOAD_LEN);
@@ -256,13 +256,14 @@ space/mod.rs:  536:    pub fn audit_owned_chunk_count(&self) -> usize {
 space/mod.rs:  552:    pub fn stats(&mut self) -> Result<SpaceStats> {
 space/mod.rs:  570:    pub fn begin_tx<'s>(&'s mut self) -> Tx<'s, 'f> {
 space/mod.rs:  583:    pub fn get(&mut self, namespace: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>> {
-space/mod.rs:  619:    pub fn list(&mut self, namespace: Namespace) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-space/mod.rs:  645:    pub fn list_keys(&mut self, namespace: Namespace) -> Result<Vec<Vec<u8>>> {
-space/mod.rs:  671:    pub fn list_keys_after(
-space/mod.rs:  697:    pub fn count(&mut self, namespace: Namespace) -> Result<usize> {
-space/mod.rs:  750:    pub fn erase_namespace(&mut self, namespace: Namespace) -> Result<usize> {
-space/mod.rs:  781:    pub fn list_namespaces(&mut self) -> Result<Vec<Namespace>> {
-space/mod.rs:  793:    pub fn list_namespaces_with_kind(
+space/mod.rs:  625:    pub fn list(&mut self, namespace: Namespace) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+space/mod.rs:  651:    pub fn list_keys(&mut self, namespace: Namespace) -> Result<Vec<Vec<u8>>> {
+space/mod.rs:  677:    pub fn list_keys_after(
+space/mod.rs:  722:    pub fn list_after(
+space/mod.rs:  749:    pub fn count(&mut self, namespace: Namespace) -> Result<usize> {
+space/mod.rs:  802:    pub fn erase_namespace(&mut self, namespace: Namespace) -> Result<usize> {
+space/mod.rs:  837:    pub fn list_namespaces(&mut self) -> Result<Vec<Namespace>> {
+space/mod.rs:  849:    pub fn list_namespaces_with_kind(
 space/superblock.rs:  30:pub const NO_RECORD: u64 = u64::MAX;
 space/superblock.rs:  37:pub struct Superblock {
 space/superblock.rs:  72:    pub const ENCODED_LEN: usize = 8 + 8 + 32;
@@ -270,9 +271,9 @@ space/superblock.rs:  76:    pub const ENCODED_LEN_WITH_CHECKPOINT: usize = Self
 space/superblock.rs:  84:    pub fn is_valid_encoded_len(len: usize) -> bool {
 space/superblock.rs:  100:    pub fn encode(&self) -> Vec<u8> {
 space/superblock.rs:  130:    pub fn decode(bytes: &[u8]) -> Result<Self> {
-space/vacuum.rs:  43:    pub fn vacuum_orphans(&mut self) -> Result<usize> {
-space/vacuum.rs:  169:    pub fn vacuum_after_open(&mut self) -> Result<usize> {
-space/vacuum.rs:  232:    pub fn vacuum_data_batches(&mut self) -> Result<usize> {
+space/vacuum.rs:  121:    pub fn vacuum_orphans(&mut self) -> Result<usize> {
+space/vacuum.rs:  260:    pub fn vacuum_after_open(&mut self) -> Result<usize> {
+space/vacuum.rs:  323:    pub fn vacuum_data_batches(&mut self) -> Result<usize> {
 tx/commit.rs:  39:pub const MAX_NAMESPACES_PER_TX: usize = (PAYLOAD_CAP - 2 - 32) / (1 + 1 + 8 + 32);
 tx/commit.rs:  54:pub enum NamespaceKind {
 tx/commit.rs:  68:    pub fn as_u8(self) -> u8 {
@@ -289,11 +290,11 @@ tx/mod.rs:  40:pub use commit::{CommitPayload, IndexRoot, MAX_NAMESPACES_PER_TX,
 tx/mod.rs:  137:pub struct Tx<'s, 'f> {
 tx/mod.rs:  235:    pub fn put(&mut self, namespace: Namespace, key: &[u8], value: &[u8]) -> Result<()> {
 tx/mod.rs:  263:    pub fn delete(&mut self, namespace: Namespace, key: &[u8]) -> Result<()> {
-tx/mod.rs:  364:    pub fn append_log(&mut self, namespace: Namespace, log_id: u64, payload: &[u8]) -> Result<()> {
-tx/mod.rs:  404:    pub fn delete_log(&mut self, namespace: Namespace, log_id: u64) -> Result<()> {
-tx/mod.rs:  425:    pub fn touched_namespaces(&self) -> usize {
-tx/mod.rs:  435:    pub fn is_empty(&self) -> bool {
-tx/mod.rs:  440:    pub fn commit(self) -> Result<u64> {
+tx/mod.rs:  367:    pub fn append_log(&mut self, namespace: Namespace, log_id: u64, payload: &[u8]) -> Result<()> {
+tx/mod.rs:  407:    pub fn delete_log(&mut self, namespace: Namespace, log_id: u64) -> Result<()> {
+tx/mod.rs:  428:    pub fn touched_namespaces(&self) -> usize {
+tx/mod.rs:  438:    pub fn is_empty(&self) -> bool {
+tx/mod.rs:  443:    pub fn commit(self) -> Result<u64> {
 
 ==========================================
 crate: hidden-volume-rt

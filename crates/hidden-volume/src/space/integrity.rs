@@ -24,8 +24,14 @@ struct VerifyCtx {
     /// namespaces, or by both an index and a log pointer, is a failure
     /// rather than extra work.
     walk: TreeWalk,
-    /// `(batch_slot, log_id)` pairs harvested from the leaves of every
-    /// Log-kind namespace, verified in one pass after the tree walk.
+    /// `(batch_slot, log_id)` pairs harvested from the leaves of ONE
+    /// Log-kind namespace, verified and cleared as soon as that
+    /// namespace's subtree walk returns.
+    ///
+    /// It used to hold every log namespace's pairs at once and verify
+    /// them in a single pass at the end, so the peak was the sum over
+    /// all of them — 16 bytes per log record in the container (audit
+    /// HV-03).
     log_pairs: Vec<(u64, u64)>,
     report: IntegrityReport,
 }
@@ -204,9 +210,23 @@ impl<'f> Space<'f> {
                 ctx.report.max_depth = levels;
             }
             ctx.report.namespaces_verified += 1;
-        }
 
-        self.verify_log_data_batches(&mut ctx)?;
+            // Drain this namespace's DataBatch pointers now rather than
+            // pooling every namespace's until the end (audit HV-03).
+            //
+            // Per-NAMESPACE is as fine-grained as this can safely go.
+            // The batch pass admits each slot to `ctx.walk`, which
+            // refuses a second read of any chunk, so a flush boundary
+            // that fell mid-namespace would turn a batch legitimately
+            // named by two leaves into a spurious IntegrityFailure —
+            // log_ids in one batch need not be contiguous, so nothing
+            // stops a batch's pointers from straddling any boundary
+            // inside a namespace. Across namespaces there is no such
+            // hazard: two roots reaching the same chunk is exactly the
+            // condition the shared guard exists to report, and it
+            // reports it either way.
+            self.verify_log_data_batches(&mut ctx)?;
+        }
 
         Ok(ctx.report)
     }
@@ -227,8 +247,9 @@ impl<'f> Space<'f> {
     ///      two namespaces, is a failure), AEAD-decrypt, kind-check,
     ///      decode, and check every claimed `log_id` is present.
     ///
-    /// Pairs from every namespace are pooled, so a batch slot is read
-    /// once per walk even if several log namespaces name it.
+    /// Called once per Log-kind namespace root, immediately after that
+    /// root's subtree walk, and takes the buffer with it — see the call
+    /// site for why the flush cannot be finer than a namespace.
     ///
     /// Cost: O(unique_batch_slots), bounded by the space's owned
     /// chunk count. Same per-chunk cost as the IndexNode walk above.

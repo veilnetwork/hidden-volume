@@ -12,6 +12,84 @@ use super::index::IndexNode;
 use super::superblock::NO_RECORD;
 use super::walk::TreeWalk;
 
+/// How many `(log_id_key, batch_slot)` entries
+/// [`Space::vacuum_data_batches`] pulls out of a namespace at a time
+/// (audit HV-03).
+///
+/// Both halves of such an entry are 8 bytes, but what the page actually
+/// costs is dominated by the `Vec<(Vec<u8>, Vec<u8>)>` that carries it
+/// — 48 bytes of spine and two allocations per entry, so ~64 bytes
+/// against 16 of payload. 512 keeps a page around 32 KiB; every page
+/// re-descends the tree from the cursor, and at this width that is a
+/// handful of descents per namespace.
+const BATCH_POINTER_PAGE: usize = 512;
+
+/// Membership over chunk slot indices, one bit per slot.
+///
+/// Every set a vacuum builds — reachable, referenced, to-drop — is
+/// keyed on a slot index, and slot indices are dense and bounded by the
+/// file's own [`ContainerFile::slot_count`][crate::container::file::ContainerFile::slot_count].
+/// A `HashSet<u64>` over that costs on the order of 32-48 bytes per
+/// member plus its load-factor slack, and a vacuum built three of them
+/// at once on top of a clone of `owned_slots`: for the container sizes
+/// this format now permits (audit HV-15 removed the per-namespace index
+/// cap; [`crate::MAX_OPEN_SCAN_CHUNKS`] is all that is left) that is
+/// hundreds of MiB where one bit per slot is 2 MiB at the very ceiling
+/// (audit HV-03).
+///
+/// This matters more than an ordinary allocation win because
+/// `vacuum_orphans` runs automatically on every writable open: a
+/// container that has grown to where the vacuum cannot allocate stops
+/// opening at all, and the person who filled it has locked themselves
+/// out with no adversary involved.
+struct SlotSet {
+    words: Vec<u64>,
+    capacity: u64,
+    len: usize,
+}
+
+impl SlotSet {
+    /// Room for slots `0..capacity`. `capacity` is the file's slot
+    /// count, so `Vec` allocates `capacity / 8` bytes.
+    fn with_capacity(capacity: u64) -> Self {
+        Self {
+            words: vec![0u64; capacity.div_ceil(64) as usize],
+            capacity,
+            len: 0,
+        }
+    }
+
+    /// Record `slot`; returns whether it was in range and therefore
+    /// recorded.
+    ///
+    /// Out-of-range is not an error for every caller: the batch-pointer
+    /// scan feeds this arbitrary 8-byte KV values, which need not name
+    /// a real slot. Such a value can never match an owned slot either,
+    /// so dropping it changes no answer. Callers for whom a dropped
+    /// slot WOULD change an answer — anything feeding the reachable set,
+    /// where a miss means scrubbing live data — must check the result.
+    fn insert(&mut self, slot: u64) -> bool {
+        if slot >= self.capacity {
+            return false;
+        }
+        let word = &mut self.words[(slot / 64) as usize];
+        let bit = 1u64 << (slot % 64);
+        if *word & bit == 0 {
+            *word |= bit;
+            self.len += 1;
+        }
+        true
+    }
+
+    fn contains(&self, slot: u64) -> bool {
+        slot < self.capacity && self.words[(slot / 64) as usize] & (1u64 << (slot % 64)) != 0
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
 impl<'f> Space<'f> {
     /// Scrub orphan IndexNode chunks — owned chunks (decrypt under our
     /// key) of kind `IndexNode` that are NOT reachable from the current
@@ -69,27 +147,40 @@ impl<'f> Space<'f> {
             return Ok(0);
         }
 
-        // Reachable from current tree. HashSet (not BTreeSet): we
-        // only need O(1) `contains` for the membership check below;
-        // we don't need ordered iteration.
-        let mut reachable: std::collections::HashSet<u64> = std::collections::HashSet::new();
-        reachable.insert(self.state.superblock.root_slot);
+        // Which chunks the current tree reaches. There is no separate
+        // set for this: `walk` already records exactly it.
+        //
+        // `walk_tree_chunks` admits every node it descends into and
+        // descends into nothing it has not admitted, in one function,
+        // unconditionally — so the guard's visited set and the reachable
+        // set are the same set by construction, and building a second
+        // one alongside it cost another hashed `u64` per live chunk for
+        // no information (audit HV-03). The Commit chunk at
+        // `superblock.root_slot` is not part of any tree, so it is
+        // admitted here rather than by a descent; the guard's
+        // seen-twice rule then also covers the case of a tree claiming
+        // the Commit chunk as one of its nodes.
         let prior_roots = self.load_prior_roots()?;
         let mut walk = self.new_tree_walk();
+        walk.admit(self.state.superblock.root_slot, 0)?;
         for r in prior_roots {
-            self.collect_tree_chunks_into_set(r.index_slot, &mut walk, &mut reachable)?;
+            self.walk_tree_chunks(r.index_slot, &mut walk)?;
         }
 
-        // Owned but not reachable.
-        let owned_snapshot: Vec<u64> = self.state.owned_slots.clone();
+        // Owned but not reachable. Indexed rather than cloned: the loop
+        // body reads chunks and scrubs bytes but never touches
+        // `owned_slots`, which is only rewritten after it (audit HV-03
+        // — the clone was a second copy of the whole slot list, live
+        // for the duration of the pass).
         let mut scrubbed = 0;
-        // HashSet, not Vec, so the `retain(|s| !to_drop.contains(s))`
-        // call below is O(N) instead of O(N²). Audit F1 (2026-05-03):
-        // matters for heavy-history containers (100K owned + 1K
-        // to-scrub = 100M comparisons with Vec::contains).
-        let mut to_drop: std::collections::HashSet<u64> = std::collections::HashSet::new();
-        for slot in owned_snapshot {
-            if reachable.contains(&slot) {
+        // A second `SlotSet`, so the `retain` below stays O(N) rather
+        // than the O(N²) a `Vec::contains` would make it. Audit F1
+        // (2026-05-03): matters for heavy-history containers (100K
+        // owned + 1K to-scrub = 100M comparisons with Vec::contains).
+        let mut to_drop = SlotSet::with_capacity(self.file.slot_count());
+        for i in 0..self.state.owned_slots.len() {
+            let slot = self.state.owned_slots[i];
+            if walk.has_visited(slot) {
                 continue;
             }
             // Inspect kind — only scrub IndexNode orphans. Old
@@ -121,7 +212,7 @@ impl<'f> Space<'f> {
             self.file.fsync()?;
         }
         if !to_drop.is_empty() {
-            self.state.owned_slots.retain(|s| !to_drop.contains(s));
+            self.state.owned_slots.retain(|s| !to_drop.contains(*s));
         }
         Ok(scrubbed)
     }
@@ -255,33 +346,51 @@ impl<'f> Space<'f> {
         //    negative window. With kind-bound iteration that window
         //    is structurally closed.
         let prior_roots = self.load_prior_roots()?;
-        // HashSet: we only need O(1) `contains`, no ordered iteration.
-        let mut referenced: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        // One bit per slot, not a `HashSet<u64>` — see [`SlotSet`]
+        // (audit HV-03).
+        let mut referenced = SlotSet::with_capacity(self.file.slot_count());
         for root in &prior_roots {
             if root.kind != crate::tx::NamespaceKind::Log {
                 continue;
             }
-            let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-            self.collect_leaves(root.index_slot, root.namespace, &mut entries)?;
-            for (_key, value) in entries {
-                if value.len() == 8 {
-                    let mut buf = [0u8; 8];
-                    buf.copy_from_slice(&value);
-                    referenced.insert(u64::from_le_bytes(buf));
+            // Paged, not `collect_leaves` (audit HV-03): only the
+            // 8-byte values are wanted, and materialising every
+            // `(log_id_key, batch_slot)` pair of every log namespace
+            // first meant the peak was the sum over all of them. A page
+            // is dropped before the next is read, so it is now one
+            // page.
+            let mut cursor: Option<Vec<u8>> = None;
+            loop {
+                let page =
+                    self.list_after(root.namespace, cursor.as_deref(), BATCH_POINTER_PAGE)?;
+                let Some((last_key, _)) = page.last() else {
+                    break;
+                };
+                cursor = Some(last_key.clone());
+                for (_key, value) in &page {
+                    if let Ok(bytes) = <[u8; 8]>::try_from(value.as_slice()) {
+                        // A value that names no real slot is dropped by
+                        // `insert` and cannot match an owned slot
+                        // anyway — a false negative at worst, never a
+                        // wrongful scrub.
+                        referenced.insert(u64::from_le_bytes(bytes));
+                    }
                 }
             }
         }
 
         // 2. Walk owned slots; scrub each DataBatch not in `referenced`.
-        let owned_snapshot: Vec<u64> = self.state.owned_slots.clone();
+        //    Indexed rather than cloned — the loop body never touches
+        //    `owned_slots` (audit HV-03).
         let mut scrubbed = 0;
-        // HashSet, not Vec, so the `retain(|s| !to_drop.contains(s))`
-        // call below is O(N) instead of O(N²). Audit F1 (2026-05-03):
-        // matters for heavy-history containers (100K owned + 1K
-        // to-scrub = 100M comparisons with Vec::contains).
-        let mut to_drop: std::collections::HashSet<u64> = std::collections::HashSet::new();
-        for slot in owned_snapshot {
-            if referenced.contains(&slot) {
+        // A second `SlotSet`, so the `retain` below stays O(N) rather
+        // than the O(N²) a `Vec::contains` would make it. Audit F1
+        // (2026-05-03): matters for heavy-history containers (100K
+        // owned + 1K to-scrub = 100M comparisons with Vec::contains).
+        let mut to_drop = SlotSet::with_capacity(self.file.slot_count());
+        for i in 0..self.state.owned_slots.len() {
+            let slot = self.state.owned_slots[i];
+            if referenced.contains(slot) {
                 continue;
             }
             let pt = match self.read_owned_chunk(slot) {
@@ -310,44 +419,34 @@ impl<'f> Space<'f> {
             self.file.fsync()?;
         }
         if !to_drop.is_empty() {
-            self.state.owned_slots.retain(|s| !to_drop.contains(s));
+            self.state.owned_slots.retain(|s| !to_drop.contains(*s));
         }
         Ok(scrubbed)
     }
 
-    /// Walk the tree rooted at `slot` and append every IndexNode chunk
-    /// slot (Leaves and Internal nodes) into `out`. Used at vacuum time.
+    /// Walk the tree rooted at `slot`, admitting every IndexNode chunk
+    /// (Leaves and Internal nodes) into `walk`. Used at vacuum time,
+    /// where `walk`'s visited set IS the answer — see the caller.
+    ///
     /// Guarded by `walk` (visited set + traversal budget + the depth
     /// that budget can hold) against cyclic, DAG-shaped or
     /// unboundedly-deep IndexNode chains — writer-bug regression or
-    /// adversarial key-holder. `out` deduplicates the *result*, so
-    /// before the guard a DAG cost `fanout^depth` reads to produce a
-    /// handful of distinct slots; see [`super::walk`].
+    /// adversarial key-holder. Note that the guard is what makes a DAG
+    /// terminate rather than cost `fanout^depth` reads for a handful of
+    /// distinct slots; see [`super::walk`].
     ///
     /// The caller shares one `walk` across every namespace root, since
     /// no two roots legitimately reach the same chunk.
-    fn collect_tree_chunks_into_set(
-        &mut self,
-        slot: u64,
-        walk: &mut TreeWalk,
-        out: &mut std::collections::HashSet<u64>,
-    ) -> Result<()> {
-        self.collect_tree_chunks_into_set_at(slot, 0, walk, out)
+    fn walk_tree_chunks(&mut self, slot: u64, walk: &mut TreeWalk) -> Result<()> {
+        self.walk_tree_chunks_at(slot, 0, walk)
     }
 
-    fn collect_tree_chunks_into_set_at(
-        &mut self,
-        slot: u64,
-        depth: u8,
-        walk: &mut TreeWalk,
-        out: &mut std::collections::HashSet<u64>,
-    ) -> Result<()> {
+    fn walk_tree_chunks_at(&mut self, slot: u64, depth: u8, walk: &mut TreeWalk) -> Result<()> {
         walk.admit(slot, depth)?;
-        out.insert(slot);
         let node = self.read_index_node_at(slot)?;
         if let IndexNode::Internal(i) = node {
             for c in i.children {
-                self.collect_tree_chunks_into_set_at(c.child_slot, depth + 1, walk, out)?;
+                self.walk_tree_chunks_at(c.child_slot, depth + 1, walk)?;
             }
         }
         Ok(())

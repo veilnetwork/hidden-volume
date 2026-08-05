@@ -173,6 +173,17 @@ impl TreeWalk {
             .map_err(|detail| Error::IntegrityFailure { detail, slot })
     }
 
+    /// Whether this walk has already read `slot`.
+    ///
+    /// The visited set is a reachability record as much as a guard, and
+    /// [`super::Space::vacuum_orphans`] reads it as one: after walking
+    /// every namespace root, "admitted" and "reachable from the current
+    /// commit" name the same slots, so the vacuum asks here instead of
+    /// building a second set beside this one (audit HV-03).
+    pub(super) fn has_visited(&self, slot: u64) -> bool {
+        self.visited.contains(&slot)
+    }
+
     fn check(&mut self, slot: u64, depth: u8) -> std::result::Result<(), &'static str> {
         if depth > self.max_depth {
             return Err("tree deeper than this space's chunk count can hold");
