@@ -54,6 +54,52 @@ int _sid(int v) {
   return v;
 }
 
+/// Refuse a count that will not survive the trip as a `u8` (report7 P2).
+///
+/// `superblockReplicas` was passed bare. The interesting consequence is not
+/// the one you might expect — the core clamps the count to what the container
+/// can hold, so nothing overruns. It is quieter: 256 narrows to 0, and the
+/// core reads 0 as "give me the minimum" and writes **one** replica. A caller
+/// asking for 256 got fewer than the default 3, and got them silently. The
+/// replicas are what a torn write is recovered from, so the request was for
+/// durability and the answer was less of it.
+int _u8(int v, String name) {
+  if (v < 0 || v > 0xFF) {
+    throw ArgumentError.value(v, name, 'must be 0..255 (FFI is u8)');
+  }
+  return v;
+}
+
+/// Refuse a `limit` that will not survive the trip as a `u32`.
+///
+/// A page size of 2^32 narrows to 0, and a zero limit is a legal request for
+/// an empty page. The caller then reads "no entries" from a namespace that
+/// has them, which is indistinguishable from the end of the log.
+int _u32(int v, String name) {
+  if (v < 0 || v > 0xFFFFFFFF) {
+    throw ArgumentError.value(v, name, 'must be 0..2^32-1 (FFI is u32)');
+  }
+  return v;
+}
+
+/// Refuse a chunk count that will not survive the trip as a `u64`.
+///
+/// Dart's `int` is exactly 64 bits, so the width matches — but it is
+/// **signed**, and it wraps. `1 << 64` evaluates to `0` in Dart, and a
+/// negative value reinterprets as an enormous unsigned one. Both matter here:
+/// `initialGarbageChunks` is the decoy size, so a request that wraps to zero
+/// turns off the deniability padding the caller explicitly asked for, and
+/// says nothing about it. Failing loudly is the only way that request can be
+/// seen to have failed.
+int _u64(int v, String name) {
+  if (v < 0) {
+    throw ArgumentError.value(
+        v, name, 'must be >= 0 (FFI is u64; a negative Dart int reinterprets '
+            'as an enormous count)');
+  }
+  return v;
+}
+
 DynamicLibrary _open() {
   // Standalone/headless hosts cannot preload symbols through a Flutter runner.
   // Honour the same explicit path the xVeil desktop integration already uses.
@@ -1229,8 +1275,13 @@ class SpaceHandleBindings {
     final pathBuf = _bufferFromBytes(utf8.encode(path));
     final pwdBuf = _bufferFromByteVec(password);
     final argonBuf = argon._toRustBuffer();
-    final h = rustCall<int>((s) => _spCreate(pathBuf, pwdBuf, argonBuf,
-        initialGarbageChunks, superblockReplicas, s));
+    final h = rustCall<int>((s) => _spCreate(
+        pathBuf,
+        pwdBuf,
+        argonBuf,
+        _u64(initialGarbageChunks, 'initialGarbageChunks'),
+        _u8(superblockReplicas, 'superblockReplicas'),
+        s));
     return SpaceHandleBindings._(h);
   }
 
@@ -1327,7 +1378,8 @@ class SpaceHandleBindings {
     final endBuf = _optU64(end);
     final h = _cloneHandle();
     final out = rustCall<RustBuffer>(
-        (s) => _spIterLogRange(h, _ns(namespace), startBuf, endBuf, limit, s));
+        (s) => _spIterLogRange(h, _ns(namespace), startBuf, endBuf,
+            _u32(limit, 'limit'), s));
     return _readLogEntries(_bufferToBytes(out));
   }
 
@@ -1379,7 +1431,8 @@ class SpaceHandleBindings {
     _ensureOpen();
     final h = _cloneHandle();
     final out = rustCall<RustBuffer>(
-        (s) => _spKvKeysPage(h, _ns(namespace), _optByteVec(after), limit, s));
+        (s) => _spKvKeysPage(
+            h, _ns(namespace), _optByteVec(after), _u32(limit, 'limit'), s));
     return _decodeFramedKeys(_Reader(_bufferToBytes(out)).readByteVec());
   }
 
@@ -1726,7 +1779,8 @@ class MultiSpaceHandleBindings {
     final endBuf = _optU64(end);
     final h = _clone();
     final out = rustCall<RustBuffer>(
-        (s) => _msIterLogRange(h, _sid(id), _ns(namespace), startBuf, endBuf, limit, s));
+        (s) => _msIterLogRange(h, _sid(id), _ns(namespace), startBuf, endBuf,
+            _u32(limit, 'limit'), s));
     return _readLogEntries(_bufferToBytes(out));
   }
 
@@ -1753,7 +1807,8 @@ class MultiSpaceHandleBindings {
     final afterBuf = _optByteVec(after);
     final h = _clone();
     final out = rustCall<RustBuffer>(
-        (s) => _msKvKeysPage(h, _sid(id), _ns(namespace), afterBuf, limit, s));
+        (s) => _msKvKeysPage(h, _sid(id), _ns(namespace), afterBuf,
+            _u32(limit, 'limit'), s));
     return _decodeFramedKeys(_Reader(_bufferToBytes(out)).readByteVec());
   }
 
