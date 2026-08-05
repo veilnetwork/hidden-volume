@@ -54,6 +54,26 @@ format.
 
 ### Security — report6 P2
 
+- **The Argon2 parameter ceilings bound time, not only memory.** They
+  existed to stop a tampered cleartext header from OOM-ing every open —
+  but 1 GiB × 100 iterations × 64 lanes was still admissible, and that
+  worst case measures **43 seconds** on an Apple-Silicon desktop
+  (against 416 ms for `HEAVY` on the same machine). A header edit that
+  needs no key turned every open of that container into a minute-long
+  freeze, on a file whose owner cannot tell it was tampered with until
+  the derivation finishes and fails.
+
+  `MAX_M_COST_KIB` 1 GiB → 512 MiB (2× `HEAVY`), `MAX_T_COST` 100 → 8
+  (2× `HEAVY`), `MAX_P_COST` 64 → 16 (4× `HEAVY`). Worst admissible
+  header now measures **1.7 s** on the same machine. Every shipped
+  preset stays admissible.
+
+  The audit proposed a caller-supplied budget at open time instead.
+  Rejected: it would create containers that open on a desktop and refuse
+  on a phone, which is a worse failure for a format meant to be carried
+  between them.
+
+
 - **`hv` no longer echoes a password typed at a terminal.**
   `read_password` was a bare `read_line`, so at an interactive prompt
   the tty printed every character back and the password stayed in the
