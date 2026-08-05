@@ -136,7 +136,18 @@ void main() {
     // indistinguishable, because what would tell them apart is the reply
     // that never came.
     final space = await makeSpace();
-    addTearDown(space.close);
+    // This test deliberately leaves a DEAD worker behind, and closing over
+    // one now throws (report8): the isolate was killed where an FFI frame
+    // may still have been open, so nothing here can claim the native handle
+    // was released. That report is the point of the change; swallowing it is
+    // right for a teardown and wrong for anywhere else.
+    addTearDown(() async {
+      try {
+        await space.close();
+      } on HvException catch (_) {
+        // Expected: the worker is already gone.
+      }
+    });
 
     // A real kill, not `close()`. `close()` drains the in-flight call
     // first, so a call cannot be caught mid-flight through it — the first
