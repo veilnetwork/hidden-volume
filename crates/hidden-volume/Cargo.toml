@@ -67,15 +67,22 @@ rayon = { version = "1", optional = true }
 # feature.
 memmap2 = { version = "0.9", optional = true }
 
-# Android-only direct lock implementation. Rust std's `File::try_lock`
-# returns `Unsupported "try_lock() not supported"` on Android since
-# 1.89; we call `flock(2)` directly via libc instead. Pre-v1.0 the
-# Android path was a no-op (audit pass 18 M4 documented this as
-# "safe only on app-private storage"), but v1.0 hardens it by
-# acquiring a real flock so cross-process races on
-# `android:process=":subname"` configurations are correctly
-# serialized.
-[target.'cfg(target_os = "android")'.dependencies]
+# Two direct uses, both on Unix:
+#
+#   - Android lock implementation. Rust std's `File::try_lock` returns
+#     `Unsupported "try_lock() not supported"` on Android since 1.89; we
+#     call `flock(2)` directly instead. Pre-v1.0 the Android path was a
+#     no-op (audit pass 18 M4 documented this as "safe only on
+#     app-private storage"), but v1.0 hardens it by acquiring a real
+#     flock so cross-process races on `android:process=":subname"`
+#     configurations are correctly serialized.
+#   - `tcgetattr`/`tcsetattr` in the `hv` CLI, to suppress terminal echo
+#     while a password is typed (report6 P2). Widened from
+#     `cfg(target_os = "android")` to `cfg(unix)` for it.
+#
+# Free in dependency terms: `libc` is already in the tree on every Unix
+# via getrandom / zstd / memmap2 / rayon.
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
@@ -83,6 +90,12 @@ proptest = "1.4"
 hex-literal = "0.4"
 tempfile = "3.10"
 criterion = { version = "0.5", default-features = false }
+
+# `openpty` for the CLI echo-suppression test: the property only exists
+# when stdin IS a terminal, so proving it needs a real one. Unix only,
+# same as the code it tests.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
 
 [[bench]]
 name = "throughput"

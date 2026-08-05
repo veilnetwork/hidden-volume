@@ -21,7 +21,13 @@
 //! for quick command-line scripting. There is intentionally no env-var
 //! fallback: env vars are visible to other UID processes via
 //! `/proc/PID/environ` and surface in `ps -e` on some kernels —
-//! incompatible with the compelled-key deniability story.
+//! incompatible with the compelled-key deniability story. For the same
+//! reason there is no `--password` flag: an argument is world-readable
+//! in `ps` for the life of the process.
+//!
+//! When stdin is a **terminal**, echo is suppressed while the password
+//! is typed (report6 P2) — on Unix; see `EchoOff`. A piped or
+//! redirected password takes exactly the path it always did.
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -174,16 +180,45 @@ fn run(cmd: Cmd) -> Result<()> {
 /// directly (no `Zeroize` impl), but the `String` lives only until
 /// the end-of-function and its bytes are moved (not copied) into the
 /// returned `Vec<u8>`.
+///
+/// **Echo is suppressed when stdin is a terminal** (report6 P2). It was
+/// a bare `read_line`, so a password typed at a prompt was printed back
+/// by the tty and stayed in the scrollback of whoever was looking at
+/// the screen — on a tool whose whole point is that a container's
+/// contents cannot be compelled out of you.
+///
+/// The branch is on `IsTerminal` and nothing else, so a piped or
+/// redirected password — `echo pw | hv …`, which is the documented
+/// scripting idiom and the one every test uses — takes byte-for-byte
+/// the same path it always did. There is no terminal to change the mode
+/// of in that case, and changing behaviour there would break scripts
+/// for no privacy gain.
 fn read_password(prompt: &str) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+    use std::io::IsTerminal as _;
+
     eprint!("{prompt}");
     std::io::stderr().flush().ok();
+
+    let interactive = std::io::stdin().is_terminal();
+    let echo_off = if interactive { EchoOff::engage() } else { None };
+
     let stdin = std::io::stdin();
     let mut line = String::new();
-    stdin.lock().read_line(&mut line).map_err(|e| {
+    let read = stdin.lock().read_line(&mut line);
+    // Restore the terminal BEFORE anything can return early, so a read
+    // error does not leave the user's shell with echo off.
+    drop(echo_off);
+    read.map_err(|e| {
         hidden_volume::Error::Io(std::io::Error::other(format!(
             "read password from stdin: {e}"
         )))
     })?;
+    if interactive {
+        // The Enter that ended the line was not echoed either, so
+        // without this the next thing written lands on the prompt's
+        // own line.
+        eprintln!();
+    }
     if line.ends_with('\n') {
         line.pop();
     }
@@ -191,6 +226,79 @@ fn read_password(prompt: &str) -> Result<zeroize::Zeroizing<Vec<u8>>> {
         line.pop();
     }
     Ok(zeroize::Zeroizing::new(line.into_bytes()))
+}
+
+/// Terminal echo, off for as long as this value lives.
+///
+/// A guard rather than a pair of calls so that every early return
+/// between engage and drop — a read error, a panic — still restores the
+/// caller's terminal. Leaving a shell with `ECHO` cleared is a bad way
+/// to fail.
+///
+/// **Unix only.** `IsTerminal` answers on every platform, but turning
+/// echo off does not: Windows needs `SetConsoleMode`, and this host
+/// cannot compile, let alone run, that branch, so shipping it would
+/// mean shipping code nobody has executed. On Windows `engage` answers
+/// `None` and the read behaves as it did before — stated here rather
+/// than papered over.
+///
+/// Not signal-safe: a SIGINT between engage and drop leaves the
+/// terminal with echo off until `stty sane`. That is the same hole
+/// `getpass(3)` and every password prompt built on `tcsetattr` has, and
+/// closing it means installing a handler this binary has no other
+/// reason to own.
+struct EchoOff {
+    #[cfg(unix)]
+    saved: libc::termios,
+}
+
+impl EchoOff {
+    /// Clear `ECHO` on stdin, returning the guard that restores it.
+    /// `None` when there is nothing to do or the attempt failed — the
+    /// caller then reads with echo on, which is what it did before, and
+    /// is a better outcome than refusing to read at all.
+    #[cfg(unix)]
+    fn engage() -> Option<Self> {
+        use std::os::fd::AsRawFd as _;
+        let fd = std::io::stdin().as_raw_fd();
+        // SAFETY: `fd` is stdin, open for the process's lifetime.
+        // `tcgetattr` writes a `termios` through the pointer and
+        // reports failure in its return value; `term` is only read
+        // after a success.
+        let mut term: libc::termios = unsafe { std::mem::zeroed() };
+        if unsafe { libc::tcgetattr(fd, &raw mut term) } != 0 {
+            return None;
+        }
+        let saved = term;
+        term.c_lflag &= !libc::ECHO;
+        // TCSAFLUSH, not TCSANOW: it discards input typed but not yet
+        // read, so characters entered before the prompt appeared are
+        // not silently taken as part of the password.
+        if unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &raw const term) } != 0 {
+            return None;
+        }
+        Some(Self { saved })
+    }
+
+    #[cfg(not(unix))]
+    fn engage() -> Option<Self> {
+        None
+    }
+}
+
+impl Drop for EchoOff {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd as _;
+            let fd = std::io::stdin().as_raw_fd();
+            // SAFETY: same fd, and `saved` is the exact struct
+            // `tcgetattr` produced for it.
+            unsafe {
+                libc::tcsetattr(fd, libc::TCSAFLUSH, &raw const self.saved);
+            }
+        }
+    }
 }
 
 fn read_all_passwords() -> Result<Vec<zeroize::Zeroizing<Vec<u8>>>> {

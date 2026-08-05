@@ -52,6 +52,36 @@ format.
   commit, which is the best evidence available that the mistake is an
   easy one to make.
 
+### Security — report6 P2
+
+- **`hv` no longer echoes a password typed at a terminal.**
+  `read_password` was a bare `read_line`, so at an interactive prompt
+  the tty printed every character back and the password stayed in the
+  scrollback of whoever was looking at the screen — on a tool whose
+  whole point is that a container's contents cannot be compelled out of
+  you.
+
+  The branch is on `IsTerminal` and nothing else, so a piped or
+  redirected password — `echo pw | hv …`, the documented scripting
+  idiom and the one every test uses — takes byte-for-byte the same path
+  it always did. Echo is cleared through a guard, so a read error or a
+  panic still restores the caller's shell; `TCSAFLUSH` discards
+  type-ahead so characters entered before the prompt are not silently
+  taken as part of the password.
+
+  **Unix only.** Windows needs `SetConsoleMode`, which this host cannot
+  compile or run — shipping it would mean shipping code nobody has
+  executed. On Windows the read behaves as before; `EchoOff` says so.
+
+  The audit also reported a command-line-argument leak here. That half
+  is **not correct**: there is no `--password` flag and never was, and
+  the CLI spawns no child processes.
+
+  `libc` moves from a `cfg(target_os = "android")` dependency to
+  `cfg(unix)` for `tcgetattr`/`tcsetattr`. Free in dependency terms —
+  it is already in the tree on every Unix via getrandom / zstd /
+  memmap2 / rayon.
+
 ### Documentation — report6 follow-through
 
 - **An interrupted `create_space` leaves a complete, empty space, and
