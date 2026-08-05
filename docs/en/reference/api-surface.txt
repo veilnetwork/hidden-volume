@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-05T04:52:51Z
+# Captured: 2026-08-05T05:26:47Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -116,7 +116,7 @@ crypto/aead.rs:  21:pub struct ChunkAead {
 crypto/aead.rs:  36:    pub fn new(key: &[u8; 32]) -> Self {
 crypto/aead.rs:  46:    pub fn seal(&self, plaintext: &[u8], aad: [u8; AAD_LEN]) -> Result<([u8; NONCE_LEN], Vec<u8>)> {
 crypto/aead.rs:  78:    pub fn open(
-crypto/aead.rs:  173:pub fn make_aad(container_id: &[u8; 32], slot: u64) -> [u8; AAD_LEN] {
+crypto/aead.rs:  210:pub fn make_aad(container_id: &[u8; 32], slot: u64) -> [u8; AAD_LEN] {
 crypto/derive.rs:  48:pub struct SpaceKeys {
 crypto/derive.rs:  72:    pub fn from_master(versioned_master: &Zeroizing<[u8; 32]>) -> Self {
 crypto/derive.rs:  142:pub fn derive_chunk_key(

@@ -120,19 +120,56 @@ impl ChunkAead {
 /// equalizer` is itself a tiny branch (~ns), which is negligible
 /// vs the µs-scale body work. The constant key/nonce avoids setup-
 /// time variability.
+///
+/// **The scratch buffer is thread-local and reused** (audit HV-12).
+/// It used to be a fresh `vec![0u8; body_len]` per call, and the only
+/// call site passes the compile-time constant [`PLAINTEXT_LEN`] — so
+/// every rejected chunk allocated and freed the same ~4 KiB. On a
+/// container near the format's 16 M-chunk ceiling that is tens of GB
+/// of allocator traffic for one unlock, on the path the FFI takes by
+/// default.
+///
+/// The audit filed this as a side channel; it is not, because a
+/// constant size costs a constant amount and so says nothing about the
+/// chunk, the key or the tag. If anything the reuse helps the property
+/// this function exists for: what it removes is the allocator, whose
+/// timing depends on the state of the heap — the one part of the cost
+/// nobody controls. What it leaves is the ChaCha20 pass, which is
+/// constant-time by construction and one to two orders of magnitude
+/// larger than the allocation it replaces.
+///
+/// Thread-local rather than a shared buffer because the parallel scan
+/// runs this on every rayon worker; a lock here would serialise the
+/// scan and add contention timing, which really would be a signal.
 pub(crate) fn equalize_timing_via_chacha20(body_len: usize) {
     use chacha20::cipher::{KeyIvInit, StreamCipher};
     // Constant key + nonce: operations are bit-identical regardless
     // of value, so this introduces no side-channel of its own.
     const EQ_KEY: [u8; 32] = [0u8; 32];
     const EQ_NONCE: [u8; 24] = [0u8; 24];
-    let mut dummy = vec![0u8; body_len];
-    let mut cipher = chacha20::XChaCha20::new(&EQ_KEY.into(), &EQ_NONCE.into());
-    cipher.apply_keystream(&mut dummy);
-    // Don't optimize the stream away. `dummy` is all-zeros input, so
-    // there's no key material to scrub — but we still want the
-    // compiler to keep the work.
-    std::hint::black_box(&dummy);
+
+    thread_local! {
+        /// Grown to the largest `body_len` this thread has been asked
+        /// for and kept. Contents carry no secret — the input is
+        /// whatever keystream the previous call left, and XChaCha20's
+        /// timing does not depend on the bytes it is XOR-ing.
+        static EQ_SCRATCH: core::cell::RefCell<Vec<u8>> =
+            const { core::cell::RefCell::new(Vec::new()) };
+    }
+
+    EQ_SCRATCH.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        if scratch.len() < body_len {
+            scratch.resize(body_len, 0);
+        }
+        let dummy = &mut scratch[..body_len];
+        let mut cipher = chacha20::XChaCha20::new(&EQ_KEY.into(), &EQ_NONCE.into());
+        cipher.apply_keystream(dummy);
+        // Don't optimize the stream away. There is no key material in
+        // here to scrub — the buffer never sees plaintext — but the
+        // work has to survive the optimizer.
+        std::hint::black_box(&dummy);
+    });
 }
 
 /// Build AAD = container_id || slot_le_u64.
