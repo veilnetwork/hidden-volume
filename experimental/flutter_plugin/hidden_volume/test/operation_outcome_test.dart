@@ -125,6 +125,66 @@ void main() {
         reason: 'a rejection has to be distinguishable from a success');
   });
 
+  test('a worker that DIES under a call is indeterminate, not failed',
+      () async {
+    // report7 P2. Both a refusal and a death end with the caller's future
+    // throwing an HvException, and until now both filed HvOpFailed —
+    // whose contract said "nothing was committed; safe to retry". For a
+    // dead worker that is an assertion nobody is in a position to make:
+    // the isolate can die AFTER the native commit reaches the disk and
+    // BEFORE its reply is sent, and from Dart the two are
+    // indistinguishable, because what would tell them apart is the reply
+    // that never came.
+    final space = await makeSpace();
+    addTearDown(space.close);
+
+    // A real kill, not `close()`. `close()` drains the in-flight call
+    // first, so a call cannot be caught mid-flight through it — the first
+    // draft of this test used it and watched the commit SUCCEED, which is
+    // the opposite of the situation under test.
+    final op = space.commitOperation([put('k', 'v')]);
+    space.debugKillWorker();
+
+    await expectLater(op.result, throwsA(isA<HvException>()));
+
+    final outcome = space.outcomeOf(op.id);
+    expect(
+      outcome,
+      isA<HvOpIndeterminate>(),
+      reason: 'the worker died under this call, so whether the commit '
+          'landed is unknown — filing it as HvOpFailed tells the caller '
+          '"nothing was committed", which nobody here can know. Got: $outcome',
+    );
+    // And explicitly NOT the variant whose contract promises no effect.
+    expect(outcome, isNot(isA<HvOpFailed>()));
+  });
+
+  test('a REFUSAL is still HvOpFailed, so the split is a split', () async {
+    // The control for the test above. If both a refusal and a death came
+    // back indeterminate, the new variant would have replaced the old one
+    // rather than divided it, and every ordinary rejection would have lost
+    // its "nothing was committed" guarantee — a strictly worse answer than
+    // the one being fixed.
+    final space = await makeSpace();
+    addTearDown(space.close);
+
+    // Namespace 0 is reserved; the worker is alive, runs the call, and the
+    // core refuses before writing anything.
+    final op = space.commitOperation([
+      HvWriteOpPut(
+        namespace: 0,
+        key: Uint8List.fromList('k'.codeUnits),
+        value: Uint8List.fromList('v'.codeUnits),
+      ),
+    ]);
+    await expectLater(op.result, throwsA(isA<HvException>()));
+
+    final outcome = space.outcomeOf(op.id);
+    expect(outcome, isA<HvOpFailed>());
+    expect(outcome, isNot(isA<HvOpIndeterminate>()),
+        reason: 'a worker that answered is not a worker that vanished');
+  });
+
   test('ids are monotonic and an unissued id is unknown, not pending',
       () async {
     final space = await makeSpace();
