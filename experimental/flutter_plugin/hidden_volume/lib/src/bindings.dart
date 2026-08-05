@@ -976,9 +976,54 @@ class HvException implements Exception {
   final String kind;
   final String message;
 
+  /// Whether the refused operation **may still have taken effect**
+  /// (report8 H-09).
+  ///
+  /// Most core refusals happen before a single byte is written, and for
+  /// those an error is a proof of no effect. Three are not:
+  ///
+  ///  * `PublishUncertain` — the commit burnt its `seq` and a Superblock
+  ///    replica may already be on the disk, so the file may hold an era
+  ///    this handle does not know about;
+  ///  * the two `RenameVisible*` kinds — the rewrite **applied**; the old
+  ///    container is gone and the new passwords are already in effect.
+  ///
+  /// For all three the remedy is to reopen and look. Retrying is what a
+  /// caller does when it believes nothing happened, and on a deniable
+  /// store a blind re-apply is not a free move.
+  ///
+  /// `false` is NOT "retry away". `UnreadableNewerState` and `Busy` are
+  /// effect-free and still want a reopen or a wait; this getter answers
+  /// what happened, not what to do next.
+  bool get mayHaveApplied => _kindsThatMayHaveApplied.contains(kind);
+
   @override
   String toString() => 'HvException.$kind: $message';
 }
+
+/// The kinds [HvException.mayHaveApplied] answers `true` for.
+///
+/// Every entry must also appear in [_hvErrorKinds] — a name that matches
+/// nothing is a predicate that is silently always-`false`, which is the
+/// failure mode this whole distinction exists to prevent. Pinned by
+/// `operation_outcome_test.dart`.
+const _kindsThatMayHaveApplied = <String>{
+  'PublishUncertain',
+  'RenameVisibleDurabilityUncertain',
+  'RenameVisibleContentUnverified',
+};
+
+/// The names an [HvException.kind] can carry, for the drift check above.
+/// Test-only reader — production code compares `kind` directly.
+Set<String> debugKnownErrorKinds() => _hvErrorKinds.skip(1).toSet();
+
+/// The real contents of [_kindsThatMayHaveApplied], for the same check.
+///
+/// Test-only, and it must be THIS set rather than a copy written out in the
+/// test: a test that lists the names again only proves its own list is
+/// spelled right. The first version of that check let a misspelled entry
+/// straight through.
+Set<String> debugKindsThatMayHaveApplied() => _kindsThatMayHaveApplied;
 
 /// Positional map from the uniffi `flat_error` ordinal to a name. The
 /// order MUST match `enum HvError` in `crates/hidden-volume-ffi/src/lib.rs`
