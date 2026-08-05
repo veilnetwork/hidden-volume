@@ -221,11 +221,26 @@ try {
   switch (space.outcomeOf(op.id)) {
     case HvOpPending():   /* still running */
     case HvOpSucceeded(): /* it landed; nothing to redo */
-    case HvOpFailed():    /* nothing was committed; safe to retry */
+    case HvOpFailed():    /* the worker answered and refused; safe to retry */
+    case HvOpIndeterminate(): /* the worker DIED under it — reopen and look */
     case HvOpUnknown():   /* never issued, or aged out of history */
   }
 }
 ```
+
+**`HvOpFailed` and `HvOpIndeterminate` are not the same answer**, and
+the difference is the one that matters when it matters. `HvOpFailed`
+means the worker was alive, ran the call, and the core refused: nothing
+was committed, and a retry is safe. `HvOpIndeterminate` means the worker
+*died* under the call — and an isolate can die after the native commit
+has reached the disk and before its reply is sent, so whether the write
+landed is genuinely unknown from Dart. Reopen the container and look.
+
+This mirrors the Rust core, which models a lost operation as one that
+**may have changed state**; only `Cancelled` there carries a proof of no
+effect. Until report7 P2 the Dart side filed a dead worker as
+`HvOpFailed`, i.e. asserted "nothing was committed" about an operation
+nobody watched finish, and this guide told you to retry on it.
 
 Same for `eraseNamespaceOperation`, `setPaddingPolicyOperation`,
 `vacuumDataBatchesOperation` and `vacuumAfterOpenOperation`. The

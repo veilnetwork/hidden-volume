@@ -12,6 +12,37 @@ format.
 
 ## [Unreleased]
 
+### Breaking — report7 P2 (Dart)
+
+- **A worker that died under a call is `HvOpIndeterminate`, not
+  `HvOpFailed`.** `HvOpFailed` documented itself as "the worker rejected
+  the operation, or the worker died under it. Nothing was committed" —
+  and `7e973f9` wrote that claim into the public API *and* into
+  `docs/{en,ru}/guide/flutter.md`, which advised retrying on it.
+
+  Nobody is in a position to make that claim about a dead worker. An
+  isolate can die **after** the native commit reaches the disk and
+  **before** its reply is sent — an FFI fault, an OOM kill and an
+  uncaught error all land in that window — and from Dart the two cases
+  are indistinguishable, because the thing that would tell them apart is
+  the reply that never came. The Rust core already models this honestly:
+  a lost operation *may have changed state*, and only `Cancelled` carries
+  a proof of no effect.
+
+  The remedy is a fifth outcome, not a flag, and the two sources are now
+  split along exactly the line Rust already draws: **worker alive and the
+  core refused** is a failure, **worker dead** is indeterminate. The
+  guidance changes with it — reopen the container and look, rather than
+  retry.
+
+  **Latent, correctly.** No mutating call in this API carries a timeout
+  today and all four are idempotent by key, so nothing observable was
+  wrong. But the shape was, and it had already spread into two guides.
+
+  `debugKillWorker()` is added for the test: `close()` drains the
+  in-flight call first, so a call cannot be caught mid-flight through it,
+  and the first draft of the test watched the commit succeed instead.
+
 ### Fixed — report7 P2 (Dart)
 
 - **Three counts crossed the Dart FFI boundary unchecked.** `_ns` and

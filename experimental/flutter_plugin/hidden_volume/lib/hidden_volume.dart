@@ -69,6 +69,7 @@ export 'src/async_bindings.dart'
         HvOpPending,
         HvOpSucceeded,
         HvOpFailed,
+        HvOpIndeterminate,
         HvOpUnknown,
         headerInfoAsync,
         changePasswordsAsync,

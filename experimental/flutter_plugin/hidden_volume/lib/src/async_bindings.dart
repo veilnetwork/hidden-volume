@@ -237,14 +237,51 @@ class HvOpSucceeded extends HvOpOutcome {
   String toString() => 'HvOpSucceeded($value)';
 }
 
-/// The worker rejected the operation, or the worker died under it.
-/// Nothing was committed.
+/// The worker answered, and the answer was a refusal. **Nothing was
+/// committed**, so the operation is safe to retry.
+///
+/// This is a claim about the CORE's answer, and it is only sound because
+/// there is one: the worker was alive, it ran the call, and the call
+/// returned an error. A worker that died under the call answers
+/// [HvOpIndeterminate] instead — it used to answer this, which said
+/// "nothing happened" about an operation nobody watched finish
+/// (report7 P2).
 class HvOpFailed extends HvOpOutcome {
   const HvOpFailed(this.error);
   final HvException error;
 
   @override
   String toString() => 'HvOpFailed(${error.kind}: ${error.message})';
+}
+
+/// The worker **died under this operation**, so whether it took effect
+/// is unknown.
+///
+/// Not a failure. The isolate can die *after* the native commit has
+/// reached the disk and *before* its reply is sent — an FFI fault, an
+/// OOM kill and an uncaught error all land in that window — and from
+/// Dart the two are indistinguishable, because the thing that would have
+/// told them apart is the answer that never came.
+///
+/// The Rust core models this honestly: a lost operation **may have
+/// changed state**, and only `Cancelled` carries a proof of no effect.
+/// This variant is the same boundary on the Dart side.
+///
+/// **What a caller should do.** Reopen the container and look, rather
+/// than retry blindly or report failure to the user. Every mutating call
+/// in this API is currently idempotent by key, so a blind retry happens
+/// to be harmless today — that is a property of today's call set, not a
+/// guarantee of this type, and it is exactly the kind of thing that stops
+/// being true quietly.
+class HvOpIndeterminate extends HvOpOutcome {
+  const HvOpIndeterminate(this.error);
+
+  /// Why the worker is gone. Diagnostic only — it describes the death,
+  /// not the fate of the operation, which is the whole point.
+  final HvException error;
+
+  @override
+  String toString() => 'HvOpIndeterminate(${error.kind}: ${error.message})';
 }
 
 /// No such id was ever issued by this handle, or its record has aged
@@ -599,9 +636,19 @@ class HvAsyncSpace {
     try {
       r = await Future.any<Object?>([reply.first, _death.future]);
     } on HvException catch (e) {
-      // The worker died under this call. Nothing was committed, and
-      // that is an answer worth filing rather than dropping.
-      _record(opId, HvOpFailed(e));
+      // The worker died under this call, and that is an answer worth
+      // filing rather than dropping. It is NOT the answer "nothing was
+      // committed" (report7 P2): the only thing that reaches here is
+      // `_death.future`, and the isolate can die after the native commit
+      // has landed on disk and before its reply is sent. From here the
+      // two are indistinguishable, because what would have told them
+      // apart is the reply that never arrived.
+      //
+      // A reply that carries an error is the other case entirely and is
+      // filed as `HvOpFailed` below — there the worker was alive, ran
+      // the call, and the core refused. That distinction is the one Rust
+      // already draws, and this is the same line on the Dart side.
+      _record(opId, HvOpIndeterminate(e));
       rethrow;
     } finally {
       reply.close();
@@ -762,6 +809,19 @@ class HvAsyncSpace {
   /// re-checking Merkle nodes.
   Future<HvIntegrityResult> verifyIntegrity() => _call<HvIntegrityResult>(
       (reply) => _VerifyIntegrityRequest(reply: reply));
+
+  /// **Test-only.** Kill the worker isolate outright, without the
+  /// orderly shutdown [close] performs.
+  ///
+  /// This is what an FFI fault, an uncaught error or an OOM kill does to
+  /// the worker, and it is the only way to produce that from a test:
+  /// [close] drains the in-flight call first, so a call cannot be caught
+  /// mid-flight through it. Exists so
+  /// `outcomeOf`'s [HvOpIndeterminate] branch is covered by an actual
+  /// death rather than by a simulation of one (report7 P2).
+  ///
+  /// Not part of the supported API. Production code wants [close].
+  void debugKillWorker() => _isolate.kill(priority: Isolate.immediate);
 
   /// Release the Rust handle and terminate the worker isolate.
   /// Idempotent; subsequent method calls throw [StateError].
