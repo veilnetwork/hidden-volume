@@ -52,6 +52,33 @@ format.
   commit, which is the best evidence available that the mistake is an
   easy one to make.
 
+### Documentation — report6 follow-through
+
+- **An interrupted `create_space` leaves a complete, empty space, and
+  the rustdoc now says so.** The call writes N Superblock replicas and
+  fsyncs; a crash partway through leaves some replicas and no return
+  value, but the space on disk owns no namespaces, no Commit chunk and
+  no data — there is nothing yet for a partial write to make
+  inconsistent. Reconciliation is therefore just opening it again with
+  the same password, and a repeated `create_space` answering
+  `SpaceAlreadyExists` is the truth rather than a symptom.
+
+  Deliberately **no third outcome** on the constructor: a caller cannot
+  act differently on "created-but-unconfirmed" than on either of the
+  two that exist, and every space this API can leave behind is openable.
+
+- **`v1` where the format is `v3`.** `docs/{en,ru}/reference/README.md`
+  called `format.md` "the spec for v1"; `docs/{en,ru}/guide/README.md`
+  called `migration.md` "an empty shell for the eventual v1 → v2
+  migration" (the format has bumped twice since, and that file now
+  documents the policy); and `docs/{en,ru}/reference/semver.md` pinned
+  the whole post-1.0 freeze policy to v1 — "`1.x.y` libraries MUST read
+  v1 containers", "a v1 container created by `1.0.0`" — both of which
+  `1.0.0` contradicts by shipping and requiring v3. The
+  hypothetical-future generation table moved up with them, and four
+  dead references to a `FORMAT_v1.md` that has been `format.md` for
+  some time now point at the real file.
+
 ### Fixed — report6 follow-through
 
 - **The post-rename inode check reported a post-rename failure as an
