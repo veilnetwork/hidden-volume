@@ -73,6 +73,110 @@ void main() {
     expect(space.get(1, key), value);
   });
 
+  test('create counts that would narrow are refused, not degraded', () {
+    // report7 P2. Two bare numbers reached the FFI unchecked, and the
+    // consequence is not an overrun — the core clamps both to what the
+    // container can hold. It is quieter than that, and worse for a format
+    // whose point is deniability: the caller asked for something and got
+    // LESS, silently.
+    //
+    //   superblockReplicas: 256 narrows to 0, and 0 means "the minimum" —
+    //   ONE replica, fewer than the default 3, for a caller who asked for
+    //   more. Replicas are what a torn write is recovered from.
+    //
+    //   initialGarbageChunks: Dart's int is 64-bit and SIGNED, and it wraps.
+    //   `1 << 64` is 0 in Dart. A decoy size that wraps to zero turns off
+    //   the padding the caller explicitly requested.
+    final tmp = Directory.systemTemp.createTempSync('hv_dart_counts_');
+    addTearDown(() => tmp.deleteSync(recursive: true));
+    final pwd = Uint8List.fromList('pwd'.codeUnits);
+
+    expect(
+      () => SpaceHandleBindings.create(
+        path: '${tmp.path}/replicas.bin',
+        password: pwd,
+        argon: ArgonPreset.light,
+        superblockReplicas: 256,
+      ),
+      throwsA(isA<ArgumentError>()),
+      reason: '256 would have narrowed to 0 and produced ONE replica',
+    );
+    expect(
+      () => SpaceHandleBindings.create(
+        path: '${tmp.path}/garbage.bin',
+        password: pwd,
+        argon: ArgonPreset.light,
+        initialGarbageChunks: -1,
+      ),
+      throwsA(isA<ArgumentError>()),
+      reason: 'a negative Dart int reinterprets as an enormous u64',
+    );
+
+    // Neither rejected call may leave a container behind: the guard has to
+    // fire BEFORE the FFI, not after a file exists.
+    expect(File('${tmp.path}/replicas.bin').existsSync(), isFalse);
+    expect(File('${tmp.path}/garbage.bin').existsSync(), isFalse);
+
+    // Control: in-range values on both still create a working container, so
+    // the guard rejects the value and not the operation.
+    final ok = SpaceHandleBindings.create(
+      path: '${tmp.path}/ok.bin',
+      password: pwd,
+      argon: ArgonPreset.light,
+      initialGarbageChunks: 4,
+      superblockReplicas: 2,
+    );
+    addTearDown(ok.close);
+    expect(ok.commitSeq(), isNotNull);
+  });
+
+  test('a range limit that would narrow is refused, not silently emptied', () {
+    // report7 P2, third bare number. `limit` crosses as u32, so 2^32 narrows
+    // to 0 — and a zero limit is a LEGAL request for an empty page. The
+    // caller reads "no entries" from a namespace that has them, which is
+    // indistinguishable from the end of the log.
+    //
+    // `kvKeysPage` took its limit bare through the same door and is guarded
+    // with it: it is the same defect one method along, and nothing would
+    // have caught it there either.
+    final tmp = Directory.systemTemp.createTempSync('hv_dart_limit_');
+    addTearDown(() => tmp.deleteSync(recursive: true));
+
+    final space = SpaceHandleBindings.create(
+      path: '${tmp.path}/store.bin',
+      password: Uint8List.fromList('pwd'.codeUnits),
+      argon: ArgonPreset.light,
+    );
+    addTearDown(space.close);
+    space.commit([
+      HvWriteOpAppendLog(
+          namespace: 3,
+          logId: 1,
+          payload: Uint8List.fromList('entry'.codeUnits)),
+    ]);
+
+    const tooWide = 0x100000000; // 2^32
+    expect(
+      () => space.iterLogRange(namespace: 3, start: null, end: null, limit: tooWide),
+      throwsA(isA<ArgumentError>()),
+      reason: '2^32 would have narrowed to 0 and returned an empty range',
+    );
+    expect(
+      () => space.kvKeysPage(1, null, tooWide),
+      throwsA(isA<ArgumentError>()),
+    );
+    expect(
+      () => space.iterLogRange(namespace: 3, start: null, end: null, limit: -1),
+      throwsA(isA<ArgumentError>()),
+    );
+
+    // Control: an in-range limit still returns the entry, so the guard is
+    // rejecting the value rather than breaking the call.
+    final got =
+        space.iterLogRange(namespace: 3, start: null, end: null, limit: 10);
+    expect(got, isNotEmpty);
+  });
+
   test('empty commit is no-op', () {
     final tmp = Directory.systemTemp.createTempSync('hv_dart_');
     final path = '${tmp.path}/store.bin';
