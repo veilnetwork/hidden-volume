@@ -12,6 +12,49 @@ format.
 
 ## [Unreleased]
 
+### Security — report7 P1
+
+- **`hv repack` echoed every password in the container, and the Windows
+  binary echoed all of them.** report6 P2 closed `read_password`, the
+  single-password prompt. It did not touch `read_all_passwords`, which
+  `repack` uses — and `repack` is the worse of the two: it prints
+  "Reading passwords from stdin (one per line, EOF to end)" and waits,
+  which *invites* interactive use, and what it collects is the password
+  to every space in the container. All of them went into the terminal
+  scrollback together. The existing pty test could not see it: every
+  case in it drives `create-space`, which goes through the other
+  function.
+
+  `read_all_passwords` now holds the same `EchoOff` guard across the
+  whole list, and restores the terminal before every early return.
+
+- **The Windows arm of `EchoOff` is written.** It was left out on the
+  stated grounds that this host could not compile or run it, so shipping
+  it would mean shipping unexecuted code. The premise did not hold:
+  `hv.exe` is built and published by `release.yml` and `ci.yml`, and
+  `windows-release-gate.yml` already ran this crate's tests on a Windows
+  runner. There was a place to compile and execute it. Meanwhile the
+  shipped binary printed passwords on screen.
+
+  `GetConsoleMode` / `SetConsoleMode` clearing `ENABLE_ECHO_INPUT`, with
+  `ENABLE_LINE_INPUT` deliberately left on so the prompt keeps its line
+  editing. Two things make it executed code rather than a claim: the
+  `hv` binary's unit tests now run on the Windows runner
+  (`cargo test -p hidden-volume --features cli --bins`, added to the
+  gate — `--test cli` selected one integration target and never built
+  them), and `CLAUDE.md` §4 gains a Windows cross-compile check via the
+  `-gnu` target and mingw-w64, which type-checks every `cfg(windows)`
+  arm on a darwin host in seconds.
+
+  `windows-sys` joins as a `cfg(windows)` dependency. It is already in
+  the tree there via getrandom / tempfile / zstd; this adds two feature
+  modules and no new crates.
+
+- **Stdin is bounded.** `MAX_PASSWORD_LINE` (1 KiB) and `MAX_PASSWORDS`
+  (256). Both were unbounded, so `hv repack < /dev/zero` grew a single
+  line until the machine gave out. Not a policy on password length — a
+  bound on what one process will allocate for input it has not validated.
+
 ### Fixed — report7 P1
 
 - **Four typed errors were erased at the FFI boundary.** The core has

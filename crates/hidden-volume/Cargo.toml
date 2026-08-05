@@ -85,6 +85,20 @@ memmap2 = { version = "0.9", optional = true }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# One direct use: `GetConsoleMode`/`SetConsoleMode` in the `hv` CLI, to
+# clear `ENABLE_ECHO_INPUT` while a password is typed (report7 P1) —
+# the Windows half of what `tcsetattr` does above. It was left unwritten
+# on the grounds that this host could not compile or run it, but `hv.exe`
+# ships in every release and `windows-release-gate.yml` already runs this
+# crate's tests on a Windows runner, so the shipped binary was printing
+# passwords on screen.
+#
+# Cheap in dependency terms: `windows-sys` is already in the tree on
+# Windows via getrandom / tempfile / zstd, and this pulls no new crates,
+# only two more of its feature modules.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
+
 [dev-dependencies]
 proptest = "1.4"
 hex-literal = "0.4"

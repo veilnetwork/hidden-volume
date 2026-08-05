@@ -210,6 +210,16 @@ scripts/regen-dart-checksums.py --check
 ANDROID_NDK_HOME="$HOME/Library/Android/sdk/ndk/26.3.11579264" \
   RUSTFLAGS="-D warnings" \
   cargo ndk -t aarch64-linux-android -- build -p hidden-volume
+# Windows cross-compile gate (report7 P1). `hv.exe` ships in every
+# release, and the `cfg(windows)` arms — `EchoOff`'s SetConsoleMode
+# among them — are invisible to every check above. The `-gnu` target
+# plus mingw-w64 type-check them on a darwin host in seconds, which is
+# the difference between shipping code nobody compiled and shipping
+# code nobody ran. `windows-release-gate.yml` covers the running half.
+#   rustup target add x86_64-pc-windows-gnu && brew install mingw-w64
+CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
+  cargo check --target x86_64-pc-windows-gnu \
+  -p hidden-volume --features cli --all-targets
 ```
 
 If any step fails, fix it before tagging — CI will fail
