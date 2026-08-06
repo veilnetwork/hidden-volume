@@ -497,7 +497,7 @@ impl<'f> Space<'f> {
 /// approach) breaks the hash of whatever node was edited, so the walk
 /// stops at "hash != parent's record" long before the structural check
 /// under test — and would leave a green test proving nothing. Building
-/// the forgery with the writer's own primitives (`append_chunk`,
+/// the forgery with the writer's own primitives (`place_chunk`,
 /// `compute_tx_root_hash`, `append_superblock`) produces a container
 /// that is Merkle-consistent end to end, so the *only* thing that can
 /// reject it is the gate being tested.
@@ -524,7 +524,7 @@ mod tests {
     /// Merkle-consistent with it.
     fn seal_node(s: &mut Space<'_>, node: &IndexNode, seq: u64) -> (u64, [u8; 32]) {
         let bytes = node.encode().unwrap();
-        let slot = s.append_chunk(ChunkKind::IndexNode, seq, &bytes).unwrap();
+        let slot = s.place_chunk(ChunkKind::IndexNode, seq, &bytes).unwrap();
         (slot, blake3_of(&bytes))
     }
 
@@ -551,14 +551,14 @@ mod tests {
             tx_root_hash,
         };
         let cp_bytes = cp.encode().unwrap();
-        let commit_slot = s.append_chunk(ChunkKind::Commit, seq, &cp_bytes).unwrap();
+        let commit_slot = s.place_chunk(ChunkKind::Commit, seq, &cp_bytes).unwrap();
         let sb = Superblock {
             seq,
             root_slot: commit_slot,
             root_hash: tx_root_hash,
             checkpoint_slot: s.state.superblock.checkpoint_slot,
         };
-        s.append_superblock(&sb).unwrap();
+        s.append_superblock(&sb, false).unwrap();
         s.state.superblock = sb;
         s.state.roots_payload_cache = None;
     }

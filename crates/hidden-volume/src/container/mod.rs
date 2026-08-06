@@ -441,7 +441,7 @@ impl Container {
         // Audit pass 7 (L4): fail fast on read-only. Without this
         // check, the call would burn ~100ms+ on Argon2id derivation
         // and run the collision-check scan, then fail inside
-        // `append_chunk → check_writable` with `Error::ReadOnly`.
+        // `place_chunk → check_writable` with `Error::ReadOnly`.
         // Slow on weak ARM and a minor timing side-channel (caller
         // can observe whether the password collided with an existing
         // space before getting `ReadOnly`).

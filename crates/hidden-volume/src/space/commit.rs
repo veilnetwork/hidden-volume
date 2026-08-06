@@ -233,6 +233,10 @@ impl<'f> Space<'f> {
         };
 
         let slots_before = self.file.slot_count();
+        // How many slots this commit takes out of the decoy pool decides
+        // how many decoys the churn re-randomizes afterwards. Sampled
+        // here, before the first chunk is placed.
+        let reuse_before = self.state.reuse_count;
 
         // Phase 0: Flush each non-empty log buffer to a DataBatch chunk,
         // then route resulting batch_slot pointers as KV puts. After
@@ -261,7 +265,7 @@ impl<'f> Space<'f> {
 
             let kv_ops = pending.entry(ns_byte).or_default();
             for (log_ids, batch_bytes) in batches {
-                let batch_slot = self.append_chunk(ChunkKind::DataBatch, new_seq, &batch_bytes)?;
+                let batch_slot = self.place_chunk(ChunkKind::DataBatch, new_seq, &batch_bytes)?;
                 for log_id in log_ids {
                     kv_ops.push(KvOp::Put {
                         key: log::log_id_key(log_id).to_vec(),
@@ -354,7 +358,7 @@ impl<'f> Space<'f> {
             tx_root_hash,
         };
         let cp_bytes = cp.encode()?;
-        let commit_slot = self.append_chunk(ChunkKind::Commit, new_seq, &cp_bytes)?;
+        let commit_slot = self.place_chunk(ChunkKind::Commit, new_seq, &cp_bytes)?;
         self.file.fsync()?;
 
         // 3. New Superblock — at this point the new commit is visible
@@ -412,18 +416,41 @@ impl<'f> Space<'f> {
         // multi-snapshot adversary), not a correctness invariant —
         // a single missed padding round just means this one commit's
         // size is observable, not that data is lost.
+        //
+        // **Decoy churn rides here too (DESIGN §9.1).** It is the same
+        // kind of thing as padding — a write that exists only to make the
+        // real writes ambiguous — with the same non-downgrade rule, so it
+        // shares this block and reports through the same field. It runs
+        // in the same post-publish window and under the same fsync as the
+        // padding, which is what makes churn and reuse land inside one
+        // snapshot interval rather than in two the adversary can order.
         let real_added = self.file.slot_count() - slots_before;
+        let pad_from = self.file.slot_count();
         let padding_outcome = self
             .file
             .padding_policy
-            .garbage_after_commit(self.file.slot_count(), real_added)
+            .garbage_after_commit(pad_from, real_added)
             .and_then(|pad_count| {
                 if pad_count > 0 {
                     self.file.append_garbage_chunks(pad_count)?;
-                    self.file.fsync()?;
                 }
-                Ok(())
+                // One churned decoy per slot this commit reused. Drawn
+                // from the pool the reuse drew from, uniformly, as the
+                // same commit — see `CHURN_PER_REUSE` for why the rate is
+                // tied to reuse and not to a clock.
+                let reused = self.state.reuse_count.saturating_sub(reuse_before) as usize;
+                self.churn_decoys(reused.saturating_mul(super::CHURN_PER_REUSE))?;
+                self.file.fsync()
             });
+        // Garbage THIS space appended, at a slot range this space watched
+        // itself write — the second of the two populations it can prove
+        // are decoys (DESIGN §9.1). Recorded outside the closure and from
+        // the slot count rather than from `pad_count`, so a run that
+        // failed part-way still hands over the chunks that did land:
+        // `append_garbage_chunks` advances the count per batch.
+        for slot in pad_from..self.file.slot_count() {
+            self.state.pool.insert(slot);
+        }
         // Replace (don't merge) — `last_padding_error` reflects only
         // the most recent commit's padding outcome. A successful
         // padding round clears any previously-stuck error.

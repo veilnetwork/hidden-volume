@@ -12,6 +12,108 @@ format.
 
 ## [Unreleased]
 
+### Breaking — slot reuse and decoy churn
+
+- **Retired slots are reused; the slot-reuse prohibition is gone.**
+  `Space::append_chunk` is now `Space::place_chunk`, and it allocates
+  from a **decoy pool** — slots this space retired (`vacuum_orphans` /
+  `vacuum_data_batches` orphans, superseded checkpoint chains) plus the
+  post-commit padding this space itself appended — before it grows the
+  file. `ContainerFile::rewrite_slot` is the single in-place writer;
+  `scrub_slot` is now one of its callers. `Inv-W1` is restated from "the
+  writer only appends" to "the writer only writes to a slot unreachable
+  from any superblock a reopen could select". DESIGN §9.1 replaces the
+  old "Slot-reuse prohibition" section in both languages.
+
+  Why the prohibition existed: a decoy chunk was written once and never
+  touched, so a **second** overwrite at one offset had no decoy
+  explanation and was a reliable "live data is here" oracle for a T2'
+  multi-snapshot adversary. Why it can go: the oracle is really "an
+  offset was rewritten AND no decoy is ever rewritten", and the second
+  half is now false. Decoys are re-randomized — **churn** — from the
+  same pool, drawn the same way, in the same commit.
+
+  Churn is deliberately **not on a timer**. A fixed-interval churn moves
+  the distinguisher from *whether* an offset is rewritten to *how often*,
+  which is no improvement at all. Instead: same event (inside
+  `commit_tx`, under the padding's `fsync`), same rate
+  (`CHURN_PER_REUSE` victims per slot the commit reused), same
+  distribution (uniform draws from one pool, without replacement within
+  a commit — `DecoyPool::take` for allocation, `sample_distinct` for
+  churn). Uniform draws also matter for a second reason: a FIFO
+  allocator would have given real writes an index-locality signature the
+  churn does not share.
+
+  **What is honestly not bought**, spelled out in DESIGN §9.1 rather
+  than only here: the anonymity set for a reused slot is the pool, not
+  the file — an offset that never changed is provably not in any pool;
+  write *volume* still leaks, at `k · (1 + CHURN_PER_REUSE)` dirty
+  offsets per commit, exactly as file growth leaked it before; and the
+  file still grows, because reuse recycles `IndexNode` / `DataBatch`
+  chunks and **not** the superseded `Commit` / `Superblock` chunks that
+  are the crash-recovery fallbacks and `commit_history` anchors.
+  Steady-state growth is `1 + superblock_replicas` per commit — measured
+  at one replica, 24 commits append 48 slots where append-only appended
+  72. `compact_known` is still the only thing that shrinks a container.
+
+  Crash safety adds no new argument: reuse rests on `vacuum_orphans`'
+  proof that a pool slot is unreachable from the era this handle names,
+  and therefore inherits vacuum's guards at the point of decision
+  (`Space::reuse_permitted` refuses under `PublishUncertain`-shaped
+  state and under `unreadable_newer_superblock`). The 3-fsync barrier is
+  untouched. Keys needed no change either, and the reason is in §9.1:
+  `derive_chunk_key` and the AAD bind to the slot **index**, while every
+  `ChunkAead::seal` draws a fresh random 192-bit nonce, so two seals into
+  one slot share a key and no keystream — the property XChaCha20-Poly1305
+  was chosen for in §10.
+
+- **`CheckpointChunk` carries a second slot list.** The chain that
+  records the owned set now records the decoy pool beside it: header
+  grows by a `pool_count: u32` (`CP_HEADER_LEN` 28 → 32).
+  `CP_ENTRIES_PER_CHUNK` stays 501 — the four extra header bytes came
+  out of the slack the integer division was already discarding — and the
+  two lists now share that budget rather than the owned list having it
+  all. One chain, one superblock pointer, published atomically with an
+  era. The decode-time capacity check is on the **sum** of the two
+  counts, since a pair that each pass a per-list bound can still describe
+  twice a chunk's worth of entries. Existing
+  containers decode as "no usable checkpoint" and fall back to a full
+  scan, which is the checkpoint's standing contract; the format version
+  is unchanged because a checkpoint has never been correctness-bearing
+  in either direction.
+
+  The recorded pool is a **hint**: the open path computes
+  `pool_effective = pool_recorded \ owned_slots`, so a slot a later
+  commit reused comes back as owned and leaves the pool whatever the
+  checkpoint said. Under-reporting leaks disk and never loses data,
+  which is what makes lazy refresh safe. Two consequences: the fast-open
+  scan must now trial-decrypt the recorded pool slots (they are the only
+  sub-high-water slots reuse can make newly owned — without this the
+  checkpoint's completeness induction is false), and a third refresh
+  trigger `CHECKPOINT_MIN_POOL_DRIFT = 256` exists because the existing
+  trigger measures tail growth, which is precisely what reuse suppresses.
+
+  `Checkpoint` chunks are the one kind that never allocates from the
+  pool. The self-heal retires the chain it supersedes into the pool and
+  only then publishes the superblock naming the new chain; a `Checkpoint`
+  landing on the old head would let a crash leave a chain that reads as
+  valid and is a suffix of the new one — a silently incomplete owned set.
+  Any other kind there decodes as the wrong kind and the reader falls
+  back to a full scan.
+
+- **`SpaceStats` gains `reusable_slot_count`.** How much writing costs
+  no disk right now, and equally the anonymity set a reused slot hides
+  in. `utilization_ratio()`'s documentation changed with it: a low ratio
+  no longer implies the file will keep growing, and must be read
+  together with this field.
+
+  The decoy pool is a bitmap over slot indices, not a `Vec<u64>`, for
+  the reason audit HV-03 gave for `SlotSet`: at
+  `MAX_OPEN_SCAN_CHUNKS` a `Vec` pool would be 128 MiB held for the
+  whole session on a phone, and a pool that cannot be allocated is a
+  container that cannot be opened. The `vacuum_peak_memory` regression
+  test caught the `Vec` version of this during development.
+
 ### Breaking — report8 H-09
 
 - **A publish that may have landed answers `PublishUncertain`, not `Io`.**

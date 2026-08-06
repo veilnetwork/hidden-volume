@@ -11,6 +11,9 @@ pub(crate) mod checkpoint;
 mod commit;
 mod integrity;
 mod log_iter;
+pub(crate) mod pool;
+#[cfg(test)]
+mod reuse_tests;
 mod tree;
 mod vacuum;
 mod walk;
@@ -30,8 +33,29 @@ use crate::tx::commit::{CommitPayload, IndexRoot};
 use crate::{CHUNK_SIZE, Error, NONCE_LEN, Result};
 
 use self::index::{IndexNode, Namespace};
+use self::pool::DecoyPool;
 use self::superblock::{NO_RECORD, Superblock};
 use self::walk::TreeWalk;
+
+/// How many decoy slots the churn re-randomizes per slot a commit
+/// *reuses*.
+///
+/// The rate is tied to reuse rather than to a clock, and that is the
+/// whole design (DESIGN §9.1). A churn on a timer re-randomizes decoys at
+/// its own frequency and real slots at the app's, so the distinguisher
+/// the churn exists to remove simply moves from "was this offset written
+/// twice?" to "how often is this offset written?". Driving churn from the
+/// same event, in the same fsync batch, drawing from the same pool with
+/// the same uniform distribution, means there is one write process, not
+/// two — the adversary's per-offset rewrite counts have the same law for
+/// decoys and for live data.
+///
+/// `1` gives an even split: a commit that reuses `k` slots dirties `2k`
+/// offsets, of which `k` hold real chunks. Raising it buys a larger
+/// anonymity ratio for a proportional cost in writes; see the cost note
+/// in DESIGN §9.1 before changing it, because this constant is paid on
+/// every commit on a phone.
+pub(crate) const CHURN_PER_REUSE: usize = 1;
 
 #[cfg(test)]
 thread_local! {
@@ -49,7 +73,7 @@ thread_local! {
     pub(crate) static CHUNK_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 
     /// Test-only write fault: `Some((kind, n))` fails the `n`-th
-    /// [`Space::append_chunk`] of `kind` counted from the moment it was armed.
+    /// [`Space::place_chunk`] of `kind` counted from the moment it was armed.
     ///
     /// The superblock-publish window cannot be entered from outside. It opens
     /// on a file the crate has just written to successfully and closes an
@@ -136,6 +160,28 @@ pub struct SpaceStats {
     /// trigger does not require a separate `Container::file_chunks()`
     /// call after dropping the `Space` handle.
     pub total_slot_count: u64,
+    /// Slots this space has retired and will reuse before it grows the
+    /// file again — the decoy pool (DESIGN §9.1).
+    ///
+    /// Two readings, and a host-app UI wants both:
+    ///
+    /// * **Headroom.** This many chunks of writing cost no disk at all.
+    ///   A container whose pool keeps up with its churn has stopped
+    ///   growing, which is the condition `compact_known` used to be the
+    ///   only answer to.
+    /// * **Anonymity set.** A reused slot is hidden among the pool's
+    ///   other slots and nowhere else. A pool of 4 means an adversary
+    ///   diffing snapshots has four candidates for each real write; a
+    ///   pool of 40 000 means forty thousand. Host-apps that care about
+    ///   the T2' posture should keep the padding policy generous enough
+    ///   that this number stays large — see DESIGN §9.1 on what churn
+    ///   does and does not buy.
+    ///
+    /// Zero on a handle opened through a scan that recovered no
+    /// checkpoint (a fresh space, a small container, the parallel / mmap
+    /// backends), which is not a defect: the pool is a hint, and its
+    /// absence costs disk rather than correctness.
+    pub reusable_slot_count: u64,
     /// Per-namespace `(namespace, entry_count)` pairs in ascending
     /// `Namespace.0` order. For KV namespaces `entry_count` is the
     /// KV pair count; for log namespaces it is the log-entry count
@@ -159,16 +205,22 @@ impl SpaceStats {
     /// padding + foreign hidden spaces); a single-space container
     /// approaches 1.0 minus padding overhead.
     ///
-    /// **Use as a `compact_known` trigger.** The append-only write
-    /// invariant (DESIGN §9) means scrubbed slots are NOT reused —
-    /// they remain on disk as uniform-random bytes. Over the lifetime
-    /// of a heavy-delete workload (e.g. a messenger that erases
-    /// expired conversations), the file's high-water mark drifts
-    /// upward while the "live" content shrinks. When this ratio drops
-    /// below a host-app-chosen threshold (e.g. `0.5`), it's time to
-    /// call [`crate::Container::compact_known`] to physically reclaim
-    /// the disk space and rotate the `container_id`. See
-    /// `docs/en/guide/operations.md` §3 "Reclaiming disk space".
+    /// **Use as a `compact_known` trigger.** Retired slots are recycled
+    /// (DESIGN §9.1), so a low ratio no longer means the file will keep
+    /// growing — read it together with [`Self::reusable_slot_count`].
+    /// Owned plus reusable is what this space actually has a use for;
+    /// the remainder is another space's, or garbage this space did not
+    /// write, and only [`crate::Container::compact_known`] can reclaim
+    /// that. A ratio that stays low while `reusable_slot_count` stays
+    /// high is a healthy recycling container and wants no compaction; a
+    /// ratio that stays low while `reusable_slot_count` is near zero is
+    /// the shape that does. See `docs/en/guide/operations.md` §3
+    /// "Reclaiming disk space".
+    ///
+    /// Compaction is still the only thing that shrinks the file, rotates
+    /// the `container_id`, and sweeps superseded Superblock and Commit
+    /// chunks — reuse never touches those, so they accumulate exactly as
+    /// they always did.
     ///
     /// Returns `0.0` for an empty container (no slots), avoiding
     /// division by zero.
@@ -315,6 +367,30 @@ pub(crate) struct SpaceState {
     /// fell back to an older one, and proceeded straight to destructive
     /// maintenance. A version gate stops one known case; this stops the class.
     pub unreadable_newer_superblock: Option<u64>,
+    /// Slots this space has retired and may rewrite — see
+    /// [`pool::DecoyPool`]. Both halves of the reuse/churn design draw from
+    /// it: [`Space::place_chunk`] allocates real chunks out of it, and the
+    /// post-commit churn re-randomizes slots left in it.
+    ///
+    /// Seeded at open from the checkpoint chain's recorded pool MINUS the
+    /// scan's owned set, which is what makes a stale recorded pool safe:
+    /// a slot a later commit reused decrypts under our key again, so the
+    /// subtraction removes it whatever the checkpoint said.
+    pub pool: DecoyPool,
+    /// Monotone count of slots this handle has taken out of the pool.
+    ///
+    /// `commit_tx` reads the delta across its own body to size the churn
+    /// — a per-commit counter would have to be reset somewhere, and the
+    /// somewhere is exactly where an early return would skip it. Runtime
+    /// only; never persisted.
+    pub reuse_count: u64,
+    /// Monotone count of decoy slots this handle has re-randomized.
+    /// Runtime only. Its whole job is to be checked against
+    /// [`Self::reuse_count`]: the two moving together is the observable
+    /// form of "one write process, not two" (DESIGN §9.1), and a churn
+    /// that silently stopped would leave every reuse standing alone in a
+    /// snapshot diff with nothing to say so.
+    pub churn_count: u64,
 }
 
 // `keys` redacts itself and `roots_payload_cache` is [`Redacted`], so both
@@ -351,6 +427,9 @@ impl SpaceState {
             last_publish_error: None,
             roots_payload_cache: None,
             attempted_seq: 0,
+            pool: DecoyPool::default(),
+            reuse_count: 0,
+            churn_count: 0,
         }
     }
 }
@@ -466,7 +545,9 @@ impl<'f> Space<'f> {
         };
         let replicas = space.file.superblock_replicas.max(1);
         for _ in 0..replicas {
-            space.append_superblock(&initial)?;
+            // A brand-new space has an empty pool, so `false` here is not a
+            // policy — it is the truth stated rather than recomputed.
+            space.append_superblock(&initial, false)?;
         }
         space.file.fsync()?;
         space.state.superblock = initial;
@@ -648,6 +729,7 @@ impl<'f> Space<'f> {
             commit_history_len: self.commit_history().len(),
             owned_chunk_count: self.audit_owned_chunk_count(),
             total_slot_count: self.file.slot_count(),
+            reusable_slot_count: self.state.pool.len() as u64,
             namespace_counts,
         })
     }
@@ -1286,11 +1368,12 @@ impl<'f> Space<'f> {
         Ok(node)
     }
 
-    /// Encode + append a Superblock chunk. Thin wrapper over
-    /// [`Self::append_chunk`] with the right `ChunkKind` and seq.
-    /// Used by `commit_tx` (writes one or more replicas per commit).
-    pub(super) fn append_superblock(&mut self, sb: &Superblock) -> Result<u64> {
-        self.append_chunk(ChunkKind::Superblock, sb.seq, &sb.encode())
+    /// Encode + place a Superblock chunk. Thin wrapper over
+    /// [`Self::place_chunk_with`] with the right `ChunkKind` and seq.
+    /// Used by `Space::create` and by `publish_superblock`, which decides
+    /// `allow_reuse` before it burns the seq.
+    pub(super) fn append_superblock(&mut self, sb: &Superblock, allow_reuse: bool) -> Result<u64> {
+        self.place_chunk_with(ChunkKind::Superblock, sb.seq, &sb.encode(), allow_reuse)
     }
 
     /// Publish `sb`: burn its seq, append every replica, make them durable.
@@ -1324,13 +1407,20 @@ impl<'f> Space<'f> {
     /// it knows what else belongs in the same era transition.
     pub(super) fn publish_superblock(&mut self, sb: &Superblock, what: &'static str) -> Result<()> {
         let replicas = self.file.superblock_replicas.max(1);
+        // Decided HERE, before the burn below makes `attempted_seq` exceed
+        // `superblock.seq` — which it does for every publisher, this one
+        // included. Read after the burn, the predicate would say "a publish
+        // may have landed and you are behind" about our own publish in
+        // progress, and the replicas — the chunks a commit writes most of —
+        // would append forever while everything else reused.
+        let allow_reuse = self.reuse_permitted();
         // Burn the number BEFORE the first replica can reach the disk: if one
         // lands and a later replica (or the fsync) fails, this seq must never
         // be handed out again.
         self.state.attempted_seq = sb.seq;
         let outcome = (|| -> Result<()> {
             for _ in 0..replicas {
-                self.append_superblock(sb)?;
+                self.append_superblock(sb, allow_reuse)?;
             }
             self.file.fsync()
         })();
@@ -1342,23 +1432,78 @@ impl<'f> Space<'f> {
         Ok(())
     }
 
-    /// AEAD-seal `payload` at the next free slot with the given kind
-    /// and seq, append the ciphertext chunk, and record the slot in
-    /// `state.owned_slots`. Returns the new slot index.
+    /// Whether this handle may allocate out of the decoy pool right now.
     ///
-    /// **Errors:** Any I/O error from `file.append_slot`; AEAD seal
-    /// failure (effectively impossible — XChaCha20-Poly1305 with
-    /// random nonce never errors on input).
+    /// Reuse inherits `vacuum_orphans`' discipline **exactly**, because it
+    /// rests on the same proof: a pool slot is a slot vacuum already
+    /// showed to be unreachable from the era this handle names. Where
+    /// vacuum must refuse, so must reuse — refusing costs nothing but an
+    /// append.
     ///
-    /// **Side effects:** appends to `state.owned_slots`. On caller
-    /// error mid-`commit_tx`, `state.owned_slots` may include slots
-    /// that aren't yet reachable from any committed Superblock —
-    /// the next `vacuum_orphans` reclaims them.
-    pub(super) fn append_chunk(
+    ///  * `attempted_seq > superblock.seq` — a publish got a replica onto
+    ///    the disk and then failed, so a reopen may select an era this
+    ///    handle has never seen. The proof "unreachable from the current
+    ///    era" is not a proof about that one. Falling back to append keeps
+    ///    every slot the unseen era could name untouched.
+    ///  * `unreadable_newer_superblock` — a writer we do not understand
+    ///    published after us, and vacuum already refuses to act on the
+    ///    stale view for the same reason.
+    ///
+    /// Evaluated at the point of *decision*, and by `publish_superblock`
+    /// **before** it burns the seq: inside the publish window the first
+    /// predicate is true of every publisher, including this one, and
+    /// reading it there would disable reuse for the superblock replicas —
+    /// the chunks a commit writes most of.
+    fn reuse_permitted(&self) -> bool {
+        self.state.unreadable_newer_superblock.is_none()
+            && self.state.attempted_seq <= self.state.superblock.seq
+    }
+
+    /// AEAD-seal `payload` into a slot with the given kind and seq, and
+    /// record the slot in `state.owned_slots`. Returns the slot index.
+    ///
+    /// The slot comes from the decoy pool when one is available (DESIGN
+    /// §9.1) and from the end of the grid otherwise. Both are the same
+    /// operation as far as the crypto is concerned: `derive_chunk_key` and
+    /// the AAD are bound to the slot INDEX, and every seal draws a fresh
+    /// random 192-bit nonce, so sealing a second plaintext into a slot
+    /// re-uses no nonce and no key stream. What must not happen is a
+    /// *live* slot being chosen, and that is the pool's invariant, not
+    /// the cipher's — see [`Self::reuse_permitted`] and [`pool`].
+    ///
+    /// **Checkpoint chunks never come from the pool.** A superseded
+    /// checkpoint chain's slots enter the pool, and the old chain's head
+    /// is still named by the on-disk superblock until the new one is
+    /// published. If a *checkpoint* chunk landed on that head, a crash in
+    /// between would leave a chain that reads as valid but is a suffix of
+    /// the new one — an owned set that is silently incomplete. Any other
+    /// kind landing there decodes as the wrong kind and the reader falls
+    /// back to a full scan, which is the behaviour that was always
+    /// intended. Appending checkpoints keeps that.
+    ///
+    /// **Errors:** any I/O error from the write; AEAD seal failure
+    /// (effectively impossible — XChaCha20-Poly1305 with a random nonce
+    /// never errors on input).
+    ///
+    /// **Side effects:** pushes to `state.owned_slots` and, on the reuse
+    /// path, removes the slot from the pool. On caller error mid-
+    /// `commit_tx` the slot holds an orphan chunk that no era names; it is
+    /// out of the pool until the next `vacuum_orphans` scrubs it and puts
+    /// it back — a leak of one slot, never a loss of one.
+    pub(super) fn place_chunk(&mut self, kind: ChunkKind, seq: u64, payload: &[u8]) -> Result<u64> {
+        let allow_reuse = kind != ChunkKind::Checkpoint && self.reuse_permitted();
+        self.place_chunk_with(kind, seq, payload, allow_reuse)
+    }
+
+    /// [`Self::place_chunk`] with the reuse decision supplied by the
+    /// caller — for `publish_superblock`, which must make it before it
+    /// burns the seq.
+    pub(super) fn place_chunk_with(
         &mut self,
         kind: ChunkKind,
         seq: u64,
         payload: &[u8],
+        allow_reuse: bool,
     ) -> Result<u64> {
         #[cfg(test)]
         if forced_append_failure(kind) {
@@ -1366,7 +1511,18 @@ impl<'f> Space<'f> {
                 "test hook: forced chunk append failure",
             )));
         }
-        let slot = self.file.slot_count();
+        let reused = if allow_reuse {
+            self.state.pool.take()?
+        } else {
+            None
+        };
+        let slot = match reused {
+            Some(s) => {
+                self.state.reuse_count = self.state.reuse_count.saturating_add(1);
+                s
+            },
+            None => self.file.slot_count(),
+        };
         let key = derive_chunk_key(
             &self.state.keys.aead_root,
             &self.state.keys.container_id,
@@ -1388,9 +1544,43 @@ impl<'f> Space<'f> {
         let mut chunk = [0u8; CHUNK_SIZE];
         chunk[..NONCE_LEN].copy_from_slice(&nonce);
         chunk[NONCE_LEN..].copy_from_slice(&ct);
-        self.file.append_slot(&chunk)?;
+        match reused {
+            Some(s) => {
+                // Put the slot back if the write fails: it is still a
+                // retired slot, and dropping it here would leak it for the
+                // life of the container.
+                if let Err(e) = self.file.rewrite_slot(s, &chunk) {
+                    self.state.pool.insert(s);
+                    return Err(e);
+                }
+            },
+            None => {
+                self.file.append_slot(&chunk)?;
+            },
+        }
         self.state.owned_slots.push(slot);
         Ok(slot)
+    }
+
+    /// Re-randomize `n` decoy slots, drawn uniformly from the pool.
+    ///
+    /// The other half of slot reuse. Called by `commit_tx` with `n` tied
+    /// to the number of slots the same commit reused, so the write that
+    /// hides and the write that is hidden happen together and look alike
+    /// — see [`CHURN_PER_REUSE`].
+    ///
+    /// Returns how many slots were actually rewritten (fewer than `n`
+    /// when the pool is smaller than that). Churned slots stay in the
+    /// pool: churn retires nothing, it only moves bytes.
+    pub(super) fn churn_decoys(&mut self, n: usize) -> Result<usize> {
+        let victims = self.state.pool.sample_distinct(n)?;
+        let mut done = 0;
+        for slot in victims {
+            self.file.scrub_slot(slot)?;
+            done += 1;
+            self.state.churn_count = self.state.churn_count.saturating_add(1);
+        }
+        Ok(done)
     }
 
     /// Read + AEAD-decrypt the chunk at `slot` under this space's

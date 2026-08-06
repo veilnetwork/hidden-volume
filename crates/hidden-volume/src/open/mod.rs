@@ -401,6 +401,13 @@ struct ScanAcc {
     /// chunk that AEAD-passed is ours, so failing to parse it means a writer
     /// we do not understand got here first.
     unparsable_sb_seq: Option<u64>,
+    /// Decoy-pool slots this scan recovered from the checkpoint chain,
+    /// before the owned set is subtracted. Empty on the full-scan path:
+    /// a full scan reads no checkpoint, so it has nothing to recover the
+    /// pool from and the space starts the session append-only. That is a
+    /// cost (a session's worth of reuse) and not a hazard — the pool is a
+    /// hint whose absence only leaks disk.
+    recorded_pool: Vec<u64>,
 }
 
 /// Fold one owned (AEAD-passing) slot's plaintext into the accumulator.
@@ -440,11 +447,19 @@ fn accumulate_owned_slot(acc: &mut ScanAcc, slot: u64, pt: Plaintext) {
 /// fall-through and the audit-pass-14 chunk-vs-decoded seq cross-check)
 /// and assemble the `SpaceState`. Shared by every scan path.
 fn finalize_scan(keys: SpaceKeys, acc: ScanAcc) -> Result<SpaceState> {
+    finalize_scan_at(keys, acc, u64::MAX)
+}
+
+/// [`finalize_scan`] with the file's slot count, so a recovered decoy
+/// pool can be clamped to slots that exist. The full-scan path recovers
+/// no pool and passes `u64::MAX`.
+fn finalize_scan_at(keys: SpaceKeys, acc: ScanAcc, total: u64) -> Result<SpaceState> {
     let ScanAcc {
         owned_slots,
         mut commit_history,
         sb_candidates,
         unparsable_sb_seq,
+        recorded_pool,
     } = acc;
 
     // Recoverable-commit anchors for host-app rollback / multi-device
@@ -482,10 +497,22 @@ fn finalize_scan(keys: SpaceKeys, acc: ScanAcc) -> Result<SpaceState> {
     // settled on is superseded history, not a writer that got ahead of us.
     let unreadable_newer_superblock = newer_unreadable_sb(undecodable_seq, superblock.seq);
 
+    // The pool as recorded, MINUS everything this scan found we own. This
+    // subtraction is what lets the recorded pool be as stale as the
+    // checkpoint refresh policy allows: a slot a later commit reused
+    // decrypts under our key again, so the scan reports it owned and it
+    // leaves the pool here, whatever the checkpoint said about it. Without
+    // this line a stale pool would hand a live slot to the allocator.
+    let mut pool = crate::space::pool::DecoyPool::from_recorded(recorded_pool, total);
+    pool.subtract_owned(&owned_slots);
+
     Ok(SpaceState {
         keys,
         superblock,
         owned_slots,
+        pool,
+        reuse_count: 0,
+        churn_count: 0,
         // Every Superblock chunk the scan decrypted contributed its seq here,
         // including replicas of a publish that never completed — so the max is
         // exactly "the highest number that may already be on disk".
@@ -539,15 +566,31 @@ fn find_latest_superblock_reverse(
     }))
 }
 
-/// Read the checkpoint chain rooted at `head`, returning
-/// `(cp_high_water, owned_below)` — the slot count at checkpoint-write
-/// time and the complete sorted owned-slot set below it. Returns `None`
-/// on ANY inconsistency (unreadable / wrong-kind / malformed chunk,
-/// inconsistent high-water across the chain, over-long chain, or a
-/// recorded owned set exceeding the open-scan budget), so the caller
-/// falls back to the full scan. Every read is trial-decrypted under
-/// this space's key, so an adversary without the key cannot drive this
-/// path. `constant_time` keeps the per-chunk timing equalizer engaged.
+/// What one checkpoint chain records, as [`read_checkpoint_chain`]
+/// hands it back. A named struct rather than a tuple because the two
+/// slot lists are the same type and mean opposite things: mixing them up
+/// hands the allocator a live slot, and `(u64, Vec<u64>, Vec<u64>)` at a
+/// call site says nothing about which is which.
+struct RecordedCheckpoint {
+    /// Slot count at checkpoint-write time. Recorded slots are below it;
+    /// the reader scans `[high_water, total)` fresh.
+    high_water: u64,
+    /// The complete sorted owned-slot set below the high-water.
+    owned: Vec<u64>,
+    /// The recorded decoy pool — a hint, corrected by subtracting the
+    /// scan's owned set. See [`crate::space::pool`].
+    pool: Vec<u64>,
+}
+
+/// Read the checkpoint chain rooted at `head`, returning the slot count
+/// at checkpoint-write time, the complete sorted owned-slot set below
+/// it, and the recorded decoy pool. Returns `None` on ANY inconsistency
+/// (unreadable / wrong-kind / malformed chunk, inconsistent high-water
+/// across the chain, over-long chain, or recorded sets exceeding the
+/// open-scan budget), so the caller falls back to the full scan. Every
+/// read is trial-decrypted under this space's key, so an adversary
+/// without the key cannot drive this path. `constant_time` keeps the
+/// per-chunk timing equalizer engaged.
 fn read_checkpoint_chain(
     container: &mut ContainerFile,
     keys: &SpaceKeys,
@@ -555,8 +598,9 @@ fn read_checkpoint_chain(
     head: u64,
     total: u64,
     constant_time: bool,
-) -> Result<Option<(u64, Vec<u64>)>> {
+) -> Result<Option<RecordedCheckpoint>> {
     let mut owned: Vec<u64> = Vec::new();
+    let mut pool: Vec<u64> = Vec::new();
     let mut high_water: Option<u64> = None;
     let mut cur = head;
     let mut hops: u64 = 0;
@@ -582,15 +626,28 @@ fn read_checkpoint_chain(
             Some(hw) if hw == cc.cp_high_water => {},
             Some(_) => return Ok(None),
         }
-        if owned.len().saturating_add(cc.owned.len()) > MAX_OPEN_SCAN_CHUNKS as usize {
+        // Both lists count against the same budget, and the budget is
+        // what stops a forged chain from making the reader allocate more
+        // than the file could hold.
+        let accumulated = owned
+            .len()
+            .saturating_add(pool.len())
+            .saturating_add(cc.owned.len())
+            .saturating_add(cc.pool.len());
+        if accumulated > MAX_OPEN_SCAN_CHUNKS as usize {
             return Ok(None);
         }
         owned.extend_from_slice(&cc.owned);
+        pool.extend_from_slice(&cc.pool);
         cur = cc.next_slot;
     }
     // `None` only if `head == NO_RECORD` (empty chain) — caller already
     // guards that, but be explicit: no high-water ⇒ no usable checkpoint.
-    Ok(high_water.map(|hw| (hw, owned)))
+    Ok(high_water.map(|high_water| RecordedCheckpoint {
+        high_water,
+        owned,
+        pool,
+    }))
 }
 
 /// Fast-open selective scan. Returns `Some(state)` when a checkpoint
@@ -629,8 +686,9 @@ fn try_fast_scan_inner(
         return Ok(None);
     }
 
-    // Phase B: read the checkpoint chain → (high_water, owned_below).
-    let (cp_high_water, owned_below) = match read_checkpoint_chain(
+    // Phase B: read the checkpoint chain → (high_water, owned_below,
+    // pool_below).
+    let recorded = match read_checkpoint_chain(
         container,
         keys,
         container_id,
@@ -641,24 +699,46 @@ fn try_fast_scan_inner(
         Some(x) => x,
         None => return Ok(None),
     };
+    let RecordedCheckpoint {
+        high_water: cp_high_water,
+        owned: owned_below,
+        pool: pool_below,
+    } = recorded;
     // A checkpoint can only summarize the past: its high-water must lie
     // within the current file. (Equal is fine — nothing appended since.)
     if cp_high_water > total {
         return Ok(None);
     }
 
-    // Phase C: selective scan over the recorded owned set (head) plus
-    // the fresh tail. Defensively clamp recorded entries to the head
-    // region and de-duplicate; the tail is scanned in full.
+    // Phase C: selective scan over the recorded owned set (head), the
+    // recorded pool, and the fresh tail. Defensively clamp recorded
+    // entries to the head region and de-duplicate; the tail is scanned in
+    // full.
+    //
+    // **The pool must be scanned, not merely carried.** The completeness
+    // induction in `crate::space::checkpoint` used to rest on "no slot
+    // below the high-water becomes newly owned after the checkpoint",
+    // which held because writes only appended. Reuse is exactly the
+    // operation that breaks it — and it breaks it in one place only:
+    // pool slots are the only sub-high-water slots a later commit can
+    // write to. Visiting them restores the induction with `owned ∪ pool`
+    // as the covered region, and hands `finalize_scan_at` the ownership
+    // facts it needs to subtract a stale pool entry that has since gone
+    // live.
     let mut head_owned: Vec<u64> = owned_below
         .into_iter()
+        .chain(pool_below.iter().copied())
         .filter(|&s| s < cp_high_water)
         .collect();
     head_owned.sort_unstable();
     head_owned.dedup();
 
-    let mut acc = ScanAcc::default();
-    // The selective set: recorded head-owned slots, then the fresh tail.
+    let mut acc = ScanAcc {
+        recorded_pool: pool_below,
+        ..ScanAcc::default()
+    };
+    // The selective set: recorded head-owned + pool slots, then the fresh
+    // tail.
     let selective = head_owned.iter().copied().chain(cp_high_water..total);
     for (i, slot) in selective.enumerate() {
         if let Some(token) = cancel
@@ -679,7 +759,7 @@ fn try_fast_scan_inner(
     if acc.sb_candidates.is_empty() {
         return Ok(None);
     }
-    finalize_scan(keys.clone(), acc).map(Some)
+    finalize_scan_at(keys.clone(), acc, total).map(Some)
 }
 
 /// Parallel variant of [`scan_and_recover`] using rayon's work-stealing
@@ -905,6 +985,13 @@ fn scan_and_recover_parallel_inner(
         keys,
         superblock,
         owned_slots,
+        // The parallel / mmap backends are full scans by construction —
+        // they read no checkpoint, so there is no recorded pool to
+        // recover and this session writes append-only. A cost, not a
+        // hazard: an absent pool leaks disk and nothing else.
+        pool: crate::space::pool::DecoyPool::default(),
+        reuse_count: 0,
+        churn_count: 0,
         // Every Superblock chunk the scan decrypted contributed its seq here,
         // including replicas of a publish that never completed — so the max is
         // exactly "the highest number that may already be on disk".
@@ -1075,6 +1162,13 @@ fn scan_and_recover_mmap_inner(
         keys,
         superblock,
         owned_slots,
+        // The parallel / mmap backends are full scans by construction —
+        // they read no checkpoint, so there is no recorded pool to
+        // recover and this session writes append-only. A cost, not a
+        // hazard: an absent pool leaks disk and nothing else.
+        pool: crate::space::pool::DecoyPool::default(),
+        reuse_count: 0,
+        churn_count: 0,
         // Every Superblock chunk the scan decrypted contributed its seq here,
         // including replicas of a publish that never completed — so the max is
         // exactly "the highest number that may already be on disk".

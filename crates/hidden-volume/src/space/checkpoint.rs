@@ -75,13 +75,14 @@ use crate::{Error, Result};
 use super::Space;
 use super::superblock::{NO_RECORD, Superblock};
 
-/// Fixed header bytes of a checkpoint chunk's payload, before the
-/// owned-slot list: `cp_seq (8) ‖ cp_high_water (8) ‖ next_slot (8) ‖
-/// count (4)`.
-const CP_HEADER_LEN: usize = 8 + 8 + 8 + 4;
+/// Fixed header bytes of a checkpoint chunk's payload, before the two
+/// slot lists: `cp_seq (8) ‖ cp_high_water (8) ‖ next_slot (8) ‖
+/// owned_count (4) ‖ pool_count (4)`.
+const CP_HEADER_LEN: usize = 8 + 8 + 8 + 4 + 4;
 
-/// Owned-slot entries (each a `u64` LE) that fit in one checkpoint
-/// chunk after its header.
+/// Slot entries (each a `u64` LE) that fit in one checkpoint chunk after
+/// its header. The owned list and the pool list share this budget — a
+/// chunk carries `owned.len() + pool.len() <= CP_ENTRIES_PER_CHUNK`.
 pub(crate) const CP_ENTRIES_PER_CHUNK: usize = (PAYLOAD_CAP - CP_HEADER_LEN) / 8;
 
 // Compile-time guarantees: at least one entry fits, and a full chunk's
@@ -101,6 +102,24 @@ pub(crate) const CHECKPOINT_MIN_TOTAL: u64 = 4096;
 /// CHECKPOINT_MIN_TAIL_REFRESH)`. The floor keeps tiny tails from
 /// triggering a rewrite on every open.
 pub(crate) const CHECKPOINT_MIN_TAIL_REFRESH: u64 = 2048;
+
+/// The self-heal writer also refreshes when the decoy pool's membership
+/// has drifted by this many slots since it was last recorded (DESIGN
+/// §9.1).
+///
+/// Without this trigger the reuse work would have shipped with a
+/// mechanism that cannot persist: reuse is what stops the file growing,
+/// the growth of the un-checkpointed tail is what the other trigger
+/// measures, and so the better reuse works the less often the pool that
+/// enables it gets written down. A container that reused perfectly would
+/// checkpoint exactly once and then lose every slot it freed on the next
+/// close.
+///
+/// `256` is one bucket of the recommended `BucketGrowth { 256 }` padding
+/// preset — the granularity the file already moves in — so a refresh
+/// costs a chain write about as often as the pre-reuse design paid for a
+/// megabyte of padding.
+pub(crate) const CHECKPOINT_MIN_POOL_DRIFT: u64 = 256;
 
 /// Upper bound on checkpoint-chain hops while reading or scrubbing,
 /// defending against an adversarial/buggy cyclic or over-long chain.
@@ -125,23 +144,37 @@ pub(crate) struct CheckpointChunk {
     pub next_slot: u64,
     /// This chunk's slice of the sorted owned-slot list.
     pub owned: Vec<u64>,
+    /// This chunk's slice of the sorted **decoy-pool** list — slots this
+    /// space has retired and may rewrite (DESIGN §9.1). Recorded here
+    /// rather than in its own structure because it needs exactly what the
+    /// owned list needs: one chain, published atomically with a
+    /// superblock, sealed under the same per-space key.
+    ///
+    /// The reader treats it as a hint and subtracts the scan's owned set
+    /// from it — see [`super::pool::DecoyPool`]. That is what lets this
+    /// list be refreshed as lazily as the rest of the checkpoint without
+    /// ever naming a slot that has since gone live.
+    pub pool: Vec<u64>,
 }
 
 impl CheckpointChunk {
-    /// Encode to the checkpoint payload bytes (header ‖ owned u64 LE
-    /// list). Errors if the slice exceeds [`CP_ENTRIES_PER_CHUNK`].
+    /// Encode to the checkpoint payload bytes (header ‖ owned u64 LE list
+    /// ‖ pool u64 LE list). Errors if the two lists together exceed
+    /// [`CP_ENTRIES_PER_CHUNK`].
     pub(crate) fn encode(&self) -> Result<Vec<u8>> {
-        if self.owned.len() > CP_ENTRIES_PER_CHUNK {
+        let entries = self.owned.len() + self.pool.len();
+        if entries > CP_ENTRIES_PER_CHUNK {
             return Err(Error::Internal("checkpoint chunk overfull"));
         }
-        let mut buf = Vec::with_capacity(CP_HEADER_LEN + self.owned.len() * 8);
+        let mut buf = Vec::with_capacity(CP_HEADER_LEN + entries * 8);
         let mut hdr = [0u8; CP_HEADER_LEN];
         LittleEndian::write_u64(&mut hdr[0..8], self.cp_seq);
         LittleEndian::write_u64(&mut hdr[8..16], self.cp_high_water);
         LittleEndian::write_u64(&mut hdr[16..24], self.next_slot);
         LittleEndian::write_u32(&mut hdr[24..28], self.owned.len() as u32);
+        LittleEndian::write_u32(&mut hdr[28..32], self.pool.len() as u32);
         buf.extend_from_slice(&hdr);
-        for &s in &self.owned {
+        for &s in self.owned.iter().chain(self.pool.iter()) {
             let mut b = [0u8; 8];
             LittleEndian::write_u64(&mut b, s);
             buf.extend_from_slice(&b);
@@ -149,11 +182,11 @@ impl CheckpointChunk {
         Ok(buf)
     }
 
-    /// Decode a checkpoint payload. Strict on length: the trailing
-    /// owned-list must be exactly `count * 8` bytes (no trailing
-    /// slack), `count` must fit one chunk. Errors as
-    /// [`Error::Malformed`] otherwise — the reader treats any error as
-    /// "no usable checkpoint" and falls back to the full scan.
+    /// Decode a checkpoint payload. Strict on length: the trailing slot
+    /// lists must be exactly `(owned_count + pool_count) * 8` bytes (no
+    /// trailing slack), and the two counts together must fit one chunk.
+    /// Errors as [`Error::Malformed`] otherwise — the reader treats any
+    /// error as "no usable checkpoint" and falls back to the full scan.
     pub(crate) fn decode(payload: &[u8]) -> Result<Self> {
         if payload.len() < CP_HEADER_LEN {
             return Err(Error::Malformed("checkpoint chunk shorter than header"));
@@ -161,26 +194,39 @@ impl CheckpointChunk {
         let cp_seq = LittleEndian::read_u64(&payload[0..8]);
         let cp_high_water = LittleEndian::read_u64(&payload[8..16]);
         let next_slot = LittleEndian::read_u64(&payload[16..24]);
-        let count = LittleEndian::read_u32(&payload[24..28]) as usize;
-        if count > CP_ENTRIES_PER_CHUNK {
+        let owned_count = LittleEndian::read_u32(&payload[24..28]) as usize;
+        let pool_count = LittleEndian::read_u32(&payload[28..32]) as usize;
+        // Checked as a SUM, and before it is used to size anything: the two
+        // counts share one chunk's budget, so a pair that each pass a
+        // per-list bound can still describe twice a chunk's worth of
+        // entries. `saturating_add` because both are attacker-supplied
+        // u32s widened to usize.
+        let entries = owned_count.saturating_add(pool_count);
+        if entries > CP_ENTRIES_PER_CHUNK {
             return Err(Error::Malformed(
                 "checkpoint count exceeds per-chunk capacity",
             ));
         }
-        let need = CP_HEADER_LEN + count * 8;
+        let need = CP_HEADER_LEN + entries * 8;
         if payload.len() != need {
             return Err(Error::Malformed("checkpoint chunk length mismatch"));
         }
-        let mut owned = Vec::with_capacity(count);
-        for i in 0..count {
-            let off = CP_HEADER_LEN + i * 8;
-            owned.push(LittleEndian::read_u64(&payload[off..off + 8]));
+        let read_at = |i: usize| LittleEndian::read_u64(&payload[i * 8..i * 8 + 8]);
+        let base = CP_HEADER_LEN / 8;
+        let mut owned = Vec::with_capacity(owned_count);
+        for i in 0..owned_count {
+            owned.push(read_at(base + i));
+        }
+        let mut pool = Vec::with_capacity(pool_count);
+        for i in 0..pool_count {
+            pool.push(read_at(base + owned_count + i));
         }
         Ok(Self {
             cp_seq,
             cp_high_water,
             next_slot,
             owned,
+            pool,
         })
     }
 }
@@ -226,7 +272,13 @@ impl<'f> Space<'f> {
         };
         let tail = total.saturating_sub(existing_high_water);
         let owned_count = self.state.owned_slots.len() as u64;
-        let refresh = old_head == NO_RECORD || tail > owned_count.max(CHECKPOINT_MIN_TAIL_REFRESH);
+        let refresh = old_head == NO_RECORD
+            || tail > owned_count.max(CHECKPOINT_MIN_TAIL_REFRESH)
+            // The pool's own trigger. Reuse suppresses tail growth, which
+            // is what the clause above measures, so on a container that
+            // reuses well this is the only clause that ever fires — see
+            // `CHECKPOINT_MIN_POOL_DRIFT`.
+            || self.state.pool.drift() >= CHECKPOINT_MIN_POOL_DRIFT;
         if !refresh {
             return Ok(false);
         }
@@ -270,6 +322,15 @@ impl<'f> Space<'f> {
             owned.last().map(|&s| s < cp_high_water).unwrap_or(true),
             "owned slots must be below the checkpoint high-water"
         );
+        // The pool travels with the owned set, and it must be recorded from
+        // the SAME moment: the two are complementary halves of "what this
+        // space has below the high-water", and a reader that mixed one
+        // era's owned set with another's pool could see a slot in neither.
+        let pool: Vec<u64> = self.state.pool.sorted();
+        debug_assert!(
+            pool.last().map(|&s| s < cp_high_water).unwrap_or(true),
+            "pool slots must be below the checkpoint high-water"
+        );
 
         // Same rule as `commit_tx`: never re-use a seq whose replica may
         // already be on disk from a failed publish. Publishing a checkpoint
@@ -282,7 +343,7 @@ impl<'f> Space<'f> {
             .checked_add(1)
             .ok_or(Error::Internal("checkpoint seq overflow"))?;
 
-        let head = self.write_checkpoint_chain(cp_seq, cp_high_water, &owned)?;
+        let head = self.write_checkpoint_chain(cp_seq, cp_high_water, &owned, &pool)?;
         self.file.fsync()?;
 
         // Publish: new superblock, bumped seq, unchanged root, pointing
@@ -302,6 +363,10 @@ impl<'f> Space<'f> {
         // correctness state like any other era transition.
         self.publish_superblock(&new_sb, "checkpointing")?;
         self.state.superblock = new_sb;
+        // The recorded pool is now current. Cleared only after the publish
+        // succeeded: a failed publish leaves the on-disk chain unnamed, so
+        // the drift that motivated this write is still owed.
+        self.state.pool.clear_drift();
         // cp_seq is strictly greater than every prior entry (bumped from
         // the max), so push preserves sort + uniqueness.
         self.state.commit_history.push(cp_seq);
@@ -325,37 +390,50 @@ impl<'f> Space<'f> {
             .map(|c| c.cp_high_water)
     }
 
-    /// Write `owned` (sorted, all `< cp_high_water`) as a fresh
-    /// checkpoint chain, returning the head slot. The chain is written
-    /// tail-first so each chunk's `next_slot` is known before it is
-    /// sealed. An empty `owned` still writes one (empty) chunk so the
+    /// Write `owned` and `pool` (both sorted, all `< cp_high_water`) as a
+    /// fresh checkpoint chain, returning the head slot. The chain is
+    /// written tail-first so each chunk's `next_slot` is known before it
+    /// is sealed. Empty lists still write one (empty) chunk so the
     /// pointer is always valid.
+    ///
+    /// The two lists share each chunk's entry budget and are packed
+    /// end-to-end — owned first, then pool — so a chain holding `N` slots
+    /// in total costs the same chunks whichever list they came from.
     fn write_checkpoint_chain(
         &mut self,
         cp_seq: u64,
         cp_high_water: u64,
         owned: &[u64],
+        pool: &[u64],
     ) -> Result<u64> {
-        // Groups of CP_ENTRIES_PER_CHUNK, in forward order. Empty owned
-        // ⇒ a single empty group.
-        let groups: Vec<&[u64]> = if owned.is_empty() {
-            vec![&[][..]]
-        } else {
-            owned.chunks(CP_ENTRIES_PER_CHUNK).collect()
-        };
+        // Groups of at most CP_ENTRIES_PER_CHUNK entries, in forward
+        // order. Empty lists ⇒ a single empty group.
+        let mut groups: Vec<(&[u64], &[u64])> = Vec::new();
+        let (mut o, mut p) = (owned, pool);
+        loop {
+            let take_o = o.len().min(CP_ENTRIES_PER_CHUNK);
+            let take_p = (CP_ENTRIES_PER_CHUNK - take_o).min(p.len());
+            groups.push((&o[..take_o], &p[..take_p]));
+            o = &o[take_o..];
+            p = &p[take_p..];
+            if o.is_empty() && p.is_empty() {
+                break;
+            }
+        }
         let mut next = NO_RECORD;
         // Write last group first so `next` always points at an
         // already-written successor; after the reverse walk `next` is
         // the first group's slot = the chain head.
-        for group in groups.iter().rev() {
+        for (group_owned, group_pool) in groups.iter().rev() {
             let cc = CheckpointChunk {
                 cp_seq,
                 cp_high_water,
                 next_slot: next,
-                owned: group.to_vec(),
+                owned: group_owned.to_vec(),
+                pool: group_pool.to_vec(),
             };
             let payload = cc.encode()?;
-            next = self.append_chunk(ChunkKind::Checkpoint, cp_seq, &payload)?;
+            next = self.place_chunk(ChunkKind::Checkpoint, cp_seq, &payload)?;
         }
         Ok(next)
     }
@@ -397,6 +475,14 @@ impl<'f> Space<'f> {
             self.file.fsync()?;
             let drop: std::collections::HashSet<u64> = scrubbed.into_iter().collect();
             self.state.owned_slots.retain(|s| !drop.contains(s));
+            // A superseded chain is retired the same way a vacuumed orphan
+            // is, so it joins the pool the same way (DESIGN §9.1). The
+            // chain the caller is about to write does NOT come out of the
+            // pool — see `Space::place_chunk` on why checkpoint chunks
+            // alone are append-only.
+            for slot in drop {
+                self.state.pool.insert(slot);
+            }
         }
         Ok(())
     }
@@ -413,6 +499,7 @@ mod tests {
             cp_high_water: 1000,
             next_slot: 42,
             owned: vec![1, 7, 9, 900],
+            pool: vec![2, 400],
         };
         let enc = cc.encode().unwrap();
         let dec = CheckpointChunk::decode(&enc).unwrap();
@@ -420,6 +507,38 @@ mod tests {
         assert_eq!(dec.cp_high_water, 1000);
         assert_eq!(dec.next_slot, 42);
         assert_eq!(dec.owned, vec![1, 7, 9, 900]);
+        assert_eq!(dec.pool, vec![2, 400]);
+    }
+
+    /// The two lists are packed end-to-end with only their counts to say
+    /// where the boundary is, so an off-by-one in either count silently
+    /// re-attributes slots from one list to the other — and a slot that
+    /// moves from `owned` to `pool` is a live slot offered to the
+    /// allocator. Asymmetric lengths and disjoint values pin the split.
+    #[test]
+    fn the_two_lists_do_not_bleed_into_each_other() {
+        let cc = CheckpointChunk {
+            cp_seq: 3,
+            cp_high_water: 100,
+            next_slot: NO_RECORD,
+            owned: vec![10, 11, 12, 13, 14],
+            pool: vec![90],
+        };
+        let dec = CheckpointChunk::decode(&cc.encode().unwrap()).unwrap();
+        assert_eq!(dec.owned, vec![10, 11, 12, 13, 14]);
+        assert_eq!(dec.pool, vec![90]);
+
+        // ...and with the lengths the other way round.
+        let cc = CheckpointChunk {
+            cp_seq: 3,
+            cp_high_water: 100,
+            next_slot: NO_RECORD,
+            owned: vec![7],
+            pool: vec![80, 81, 82, 83],
+        };
+        let dec = CheckpointChunk::decode(&cc.encode().unwrap()).unwrap();
+        assert_eq!(dec.owned, vec![7]);
+        assert_eq!(dec.pool, vec![80, 81, 82, 83]);
     }
 
     #[test]
@@ -429,11 +548,13 @@ mod tests {
             cp_high_water: 0,
             next_slot: NO_RECORD,
             owned: vec![],
+            pool: vec![],
         };
         let enc = cc.encode().unwrap();
         assert_eq!(enc.len(), CP_HEADER_LEN);
         let dec = CheckpointChunk::decode(&enc).unwrap();
         assert!(dec.owned.is_empty());
+        assert!(dec.pool.is_empty());
         assert_eq!(dec.next_slot, NO_RECORD);
     }
 
@@ -444,6 +565,7 @@ mod tests {
             cp_high_water: 10,
             next_slot: NO_RECORD,
             owned: vec![3],
+            pool: vec![4],
         }
         .encode()
         .unwrap();
@@ -458,11 +580,39 @@ mod tests {
             cp_high_water: 10,
             next_slot: NO_RECORD,
             owned: vec![3],
+            pool: vec![],
         }
         .encode()
         .unwrap();
         // Force count to a huge value without supplying the bytes.
         LittleEndian::write_u32(&mut enc[24..28], u32::MAX);
+        assert!(CheckpointChunk::decode(&enc).is_err());
+    }
+
+    /// The capacity check is on the SUM, so two counts that each look
+    /// sane must still be rejected together. Held to literals rather than
+    /// to `CP_ENTRIES_PER_CHUNK`: pinning the numbers to the constant
+    /// would let a change to the constant move the test with it, and the
+    /// point is that one chunk cannot describe two chunks' worth of
+    /// slots.
+    #[test]
+    fn checkpoint_chunk_rejects_two_counts_that_only_overflow_together() {
+        assert_eq!(
+            CP_ENTRIES_PER_CHUNK, 501,
+            "the payload budget moved; recheck the literals below"
+        );
+        let mut enc = CheckpointChunk {
+            cp_seq: 1,
+            cp_high_water: 10,
+            next_slot: NO_RECORD,
+            owned: vec![3],
+            pool: vec![],
+        }
+        .encode()
+        .unwrap();
+        // 300 + 300 = 600 > 501, but neither alone exceeds the budget.
+        LittleEndian::write_u32(&mut enc[24..28], 300);
+        LittleEndian::write_u32(&mut enc[28..32], 300);
         assert!(CheckpointChunk::decode(&enc).is_err());
     }
 

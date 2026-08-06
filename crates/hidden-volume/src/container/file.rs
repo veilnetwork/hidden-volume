@@ -608,27 +608,51 @@ impl ContainerFile {
         Ok(new_slot)
     }
 
+    /// Overwrite an EXISTING slot with `chunk`, leaving the file length
+    /// unchanged. Returns [`Error::Internal`] for `slot >= slot_count`.
+    ///
+    /// **This is the one in-place writer in the crate**, and every caller
+    /// owes the same proof before calling it: the slot must be one this
+    /// space wrote and has since retired — a scrubbed orphan or a garbage
+    /// chunk this space itself appended. Rewriting a slot belonging to a
+    /// foreign hidden space destroys that space, and a writer cannot tell
+    /// a foreign chunk from garbage by looking (DESIGN §9). The proof is
+    /// therefore never "it looked like garbage"; it is always
+    /// bookkeeping — the in-crate decoy pool (`crate::space::pool`) is
+    /// the only thing that supplies it.
+    ///
+    /// Until the churn/reuse work (DESIGN §9.1) this method existed only
+    /// as `scrub_slot`, and Inv-W1 said existing slots are never
+    /// rewritten *except* to scrub. Both halves are now the same
+    /// primitive because they must produce the same observable: a scrub
+    /// that an adversary can tell apart from a reuse is a scrub that
+    /// marks its offset as "this held real data".
+    pub fn rewrite_slot(&mut self, slot: u64, chunk: &[u8; CHUNK_SIZE]) -> Result<()> {
+        self.check_writable()?;
+        if slot >= self.slot_count {
+            return Err(Error::Internal("rewrite_slot beyond slot_count"));
+        }
+        let offset = FIRST_SLOT_OFFSET + slot * CHUNK_SIZE as u64;
+        self.file.seek(SeekFrom::Start(offset))?;
+        self.file.write_all(chunk)?;
+        Ok(())
+    }
+
     /// Overwrite a slot with `CHUNK_SIZE` bytes of uniform random.
     /// Externally indistinguishable from a fresh garbage chunk; reading
     /// later with any space's key will return AuthFailed.
     ///
-    /// Used by `Space::commit_tx` to scrub old IndexNode chunks after
-    /// they're replaced (prevents forensics with the space's password
-    /// from recovering "deleted" KV entries from orphan chunks).
+    /// Used by `Space::vacuum_orphans` to scrub old IndexNode chunks
+    /// after they're replaced (prevents forensics with the space's
+    /// password from recovering "deleted" KV entries from orphan
+    /// chunks), and by the decoy churn to re-randomize a retired slot.
     ///
     /// SAFETY (deniability): caller MUST own the slot. Scrubbing
     /// another space's chunk would corrupt that space.
     pub fn scrub_slot(&mut self, slot: u64) -> Result<()> {
-        self.check_writable()?;
-        if slot >= self.slot_count {
-            return Err(Error::Internal("scrub_slot beyond slot_count"));
-        }
         let mut buf = [0u8; CHUNK_SIZE];
         crate::crypto::rng::fill(&mut buf)?;
-        let offset = FIRST_SLOT_OFFSET + slot * CHUNK_SIZE as u64;
-        self.file.seek(SeekFrom::Start(offset))?;
-        self.file.write_all(&buf)?;
-        Ok(())
+        self.rewrite_slot(slot, &buf)
     }
 
     /// Force durability of all pending writes.

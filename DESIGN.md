@@ -296,20 +296,33 @@ Append-only. Writing to space A:
      namespaces touched in this Tx)
    - 1 Commit chunk (Merkle root over per-namespace IndexRoots)
    - 1+ new Superblock chunks (replicas, configurable; default 3)
-2. Get the current slot count `N` (from `file_size / CHUNK_SIZE - 1`).
-3. For each new chunk allocate the next free slot `N, N+1, ...`, encrypt
-   with `chunk_key(slot)`, write.
-4. **fsync** (3-fsync barrier protocol — DataBatch+Index → Commit → SB).
-5. Optionally — top up with garbage chunks (padding policy, see §8).
+2. For each new chunk allocate a slot: a uniformly-drawn slot from the
+   **decoy pool** if one is available, otherwise the next slot past the
+   end (`N, N+1, ...` from `file_size / CHUNK_SIZE - 1`). Encrypt with
+   `chunk_key(slot)`, write.
+3. **fsync** (3-fsync barrier protocol — DataBatch+Index → Commit → SB).
+4. Optionally — top up with garbage chunks (padding policy, see §8) and
+   churn the decoys (see §9.1).
 
-**Inv-W1 (final, v1.0)**: the writer **only appends**. New chunks land
-at slot indices `≥` current `N`; existing slot bytes are NEVER
-rewritten. Forward-secrecy — i.e. making "deleted" KV entries and
-"replaced" log entries unrecoverable — is achieved by a separate
-**vacuum + scrub-old-on-success** pass (see below), not by per-slot
-rewrite. This invariant is load-bearing for crash safety: a torn
-in-place write would corrupt a previously-committed chunk that the
-recovery path needs.
+**Inv-W1 (revised 2026-08-06)**: the writer only ever writes to a slot
+that is **not reachable from any superblock a reopen could select** —
+by appending past the end of the grid, or by allocating a slot the
+**decoy pool** vouches for. It is the unreachability that is
+load-bearing for crash safety, not the appending: a torn in-place write
+must not be able to corrupt a chunk the recovery path needs, and a slot
+`vacuum_orphans` has retired is one no recoverable era references. See
+§9.1 for the pool's accounting, the guards reuse inherits from vacuum,
+and the one chunk kind (`Checkpoint`) that is still append-only.
+
+Until 2026-08-06 this invariant read "the writer **only appends**", and
+the stronger form bought exactly one thing the revised form does not:
+it made the *forward* argument trivial. The revised form has to prove
+unreachability instead, which it does by making reuse rest on vacuum's
+existing proof rather than on a new one.
+
+Forward-secrecy — making "deleted" KV entries and "replaced" log
+entries unrecoverable — is still achieved by the separate **vacuum +
+scrub-old-on-success** pass (see below).
 
 (The v0.1 design sketch additionally proposed `Tx::update_slot` and
 `Tx::tombstone_slot` slot-level operations. Both were
@@ -462,40 +475,228 @@ cleartext header any more.
 There is no "compact in the background" and no
 `compact_with_open_space_only` for the same reason.
 
-### Slot-reuse prohibition (deniability constraint)
+### 9.1 Slot reuse and decoy churn
 
-**Scrubbed slots are NOT reused** by subsequent writes. Every
-successful Tx commit appends new chunks at the end of the slot
-grid; `vacuum_orphans` and `vacuum_data_batches` overwrite orphan
-slots with uniform-random bytes but **leave the file size
-unchanged**. Reclaiming disk space requires `compact_known` (§9
-above), which atomically rewrites the file with a fresh
-`container_id`.
+Retired slots **are** reused. This section replaces the "slot-reuse
+prohibition" that stood here until 2026-08-06, states the argument
+that prohibition rested on, says what replaces it, and — the part
+that matters most — says plainly what the replacement does not buy.
 
-This is **not a missed optimization** — it is load-bearing for
-the deniability invariant. A T2' multi-snapshot adversary
-diffing snapshots `S1, S2, S3, …` would observe:
+#### What the prohibition was protecting
+
+A T2' multi-snapshot adversary diffing `S1, S2, S3, …` used to see
+at most two distinct values at any one offset:
 
 ```
 offset 4096 * slot_K, S1: bytes_X     ← legitimate write
 offset 4096 * slot_K, S2: bytes_X'    ← scrub (overwrite #1)
-offset 4096 * slot_K, S3: bytes_Y     ← if we reused this slot: overwrite #2
 ```
 
-A second overwrite at the same offset is an unambiguous "this
-slot has live state" signal that cannot be explained away as
-decoy padding (decoy chunks are only ever appended, never
-mutated). Therefore `Tx::commit` does NOT search for free slots
-in the middle of the file; it always extends. The cost — file
-size monotonically grows until the host-app schedules a
-`compact_known` — is the price of T2' resistance.
+Decoy chunks were written once and never touched again, so a
+**third** value at one offset had no decoy explanation. "This
+offset was rewritten twice" was therefore a reliable "live data
+was here" oracle, and forbidding reuse was what kept the third
+value from ever existing.
+
+The prohibition worked and it cost the product its disk. Nothing
+but `compact_known` ever returned a byte, so a messenger store that
+deleted as much as it wrote grew without bound: on the reference
+deployment a container reached **7.0 GB** and compacted to
+**4.8 MB**.
+
+#### What replaces it
+
+The oracle is not "an offset was rewritten"; it is "an offset was
+rewritten **and no decoy is ever rewritten**". Remove the second
+half and the first says nothing. So decoy slots are re-randomized
+too — **churn** — and reuse becomes safe.
+
+The immediate objection is the right one: a churn on a timer moves
+the distinguisher from *whether* an offset is rewritten to *how
+often*. Real slots would change on every commit, decoys once an
+hour, and a snapshot series would separate them trivially. The
+churn is therefore **not on a timer**. It is defined by three rules,
+each closing one way the two populations could be told apart:
+
+1. **Same event.** Churn runs inside `commit_tx`, in the same
+   post-publish block as the padding and under the same `fsync`.
+   Reuse and churn land in one snapshot interval; there is no
+   interval in which one happens and not the other.
+2. **Same rate.** A commit that reuses `k` slots churns
+   `k · CHURN_PER_REUSE` decoys, and `CHURN_PER_REUSE` is `1` today.
+   The rate is a function of the workload, not of the clock, so it has
+   no frequency of its own to leak.
+3. **Same distribution.** Both draw uniformly at random from the
+   **same pool**, without replacement within a commit. Allocation
+   uses `DecoyPool::take`, churn uses `DecoyPool::sample_distinct`.
+   A FIFO or lowest-index-first allocator would have given real
+   writes an index-locality signature that a uniform churn does not
+   share, and the adversary would separate them by *where* instead
+   of by *how often*.
+
+#### The decoy pool, and why it is not "the garbage"
+
+A writer of space A **cannot** tell a garbage chunk from space B's
+live chunk — that is §9's whole premise, and it means "re-randomize
+the garbage" is not an operation this format can express. Every slot
+A did not write is a slot A must not touch.
+
+What A can prove it owns and has retired is exactly two things, and
+their union is the **decoy pool**:
+
+- slots A scrubbed: orphan `IndexNode` / `DataBatch` chunks retired
+  by `vacuum_orphans` / `vacuum_data_batches`, and superseded
+  checkpoint chains;
+- garbage A itself appended as post-commit padding (§8), whose slot
+  range A watched itself write.
+
+Cross-space disjointness is structural: a slot enters A's pool only
+by A scrubbing a slot A owned, or by A appending past the end of the
+file. Neither can name a slot another space ever wrote.
+
+#### Durable accounting
+
+The pool lives in the **checkpoint chain** (§5, `ChunkKind::Checkpoint`)
+alongside the owned-slot set: one chain, one pointer from the
+superblock, published atomically with an era, sealed under the same
+per-space key. It is not a separate structure because it needs
+nothing the owned set does not already have.
+
+The checkpoint is refreshed lazily, so a recorded pool is routinely
+**stale** — it may still name a slot a later commit already reused.
+That is safe because the open path does not trust it:
+
+```
+pool_effective = pool_recorded \ owned_slots
+```
+
+A reused slot AEAD-decrypts under this space's key again, so the
+scan reports it *owned*, so it leaves the pool whatever the
+checkpoint said. The recorded pool may therefore under-report (the
+cost is leaked disk, reclaimed by the next `compact_known`) and
+cannot over-report for an honest writer. **Crash consistency needs
+nothing else**: a pool entry lost to a crash is a leaked slot, never
+a lost one.
+
+Two consequences of putting it there:
+
+- The fast-open scan must trial-decrypt the recorded pool slots as
+  well as the recorded owned set. The completeness induction in
+  `space/checkpoint.rs` used to rest on "no slot below the
+  high-water becomes newly owned after the checkpoint", which held
+  because writes only appended; reuse breaks that premise in exactly
+  one place, and pool slots are that place. Visiting them restores
+  the induction with `owned ∪ pool` as the covered region.
+- Reuse is refreshed by a third trigger, `CHECKPOINT_MIN_POOL_DRIFT`.
+  The existing trigger measures growth of the un-checkpointed tail —
+  which is precisely what reuse suppresses, so without a pool-drift
+  trigger the better reuse worked the less often the pool that
+  enables it would be written down.
+
+#### Crash safety
+
+Reuse rests on **exactly** `vacuum_orphans`' proof and adds none of
+its own: a pool slot is one vacuum already showed unreachable from
+the era this handle names. It therefore inherits vacuum's
+discipline, at the point of decision (`Space::reuse_permitted`):
+
+- `attempted_seq > superblock.seq` — a publish got a replica onto
+  the disk and then failed, so a reopen may select an era this
+  handle has never seen, and "unreachable from the era I can see" is
+  not a statement about that one. Reuse falls back to appending, the
+  same way `vacuum_orphans` returns `Error::PublishUncertain`.
+- `unreadable_newer_superblock` — a writer we do not understand
+  published after us; same refusal, same reason.
+
+The 3-fsync barrier is unchanged. A crash between the chunk writes
+and the superblock publish leaves the previous era current, and that
+era provably does not reference any slot the commit reused.
+
+**Checkpoint chunks are the one kind that never comes from the
+pool.** `write_self_heal_checkpoint` retires the chain it supersedes
+into the pool and only then publishes the superblock naming the new
+chain; in between, the on-disk superblock still points at the old
+head. A `Checkpoint` chunk landing there would make a crash leave a
+chain that reads as valid and is a *suffix* of the new one — a
+silently incomplete owned set. Any other kind landing there decodes
+as the wrong kind and the reader falls back to a full scan, which is
+correct.
+
+#### Keys
+
+Reuse is sound for the cipher without any change to the key
+schedule, and the reason is worth stating because the opposite would
+be catastrophic. `derive_chunk_key(aead_root, container_id, slot)`
+and the AAD are bound to the slot **index**, not to a write
+generation, so a second chunk in slot K seals under the same key as
+the first. What makes that safe is the nonce: `ChunkAead::seal`
+draws a fresh random 192-bit XChaCha20 nonce per call, so two seals
+into one slot share a key and share no keystream. This is exactly
+the property §10 chose XChaCha20-Poly1305 for — a 96-bit nonce would
+have needed counter state, and counter state is what reuse would
+have broken.
+
+#### What this buys, and what it does not
+
+Stated honestly, because the prohibition it replaces was a real
+protection and this is weaker in ways that matter.
+
+**Preserved.** Within the pool, the number of times an offset has
+been rewritten carries no information about whether it holds live
+data. Reuse and churn are one write process — same event, same rate,
+same distribution — so the per-offset rewrite counts have the same
+law for decoys and for real chunks. This is strictly better than the
+old design *inside* the pool, where a scrubbed slot was permanently
+marked as an offset that had held real data and been retired.
+
+**Lost — the anonymity set is the pool, not the file.** An offset
+that has never changed is provably not in any pool. A T2' adversary
+partitions the file into "never changed" and "changed", and learns
+that this space's live data is somewhere in the second part. The
+anonymity set for a real write is `SpaceStats::reusable_slot_count`,
+not the container's size. A host-app that wants a large one must
+keep the padding policy generous; with `PaddingPolicy::None` the
+pool is only what vacuum retired.
+
+**Lost — volume still leaks, and always did.** A commit that reuses
+`k` slots dirties `k · (1 + CHURN_PER_REUSE)` offsets. The count is
+proportional to real activity, so an adversary still estimates how
+much happened between two snapshots. This is not a regression —
+under append-only the same estimate came from the file's growth,
+which is a cleaner signal — but the churn does not close it and
+cannot. Hiding write *volume* requires writing at a constant rate
+independent of activity, which is a battery and flash-wear cost this
+project has not accepted.
+
+**Unchanged — the file still grows.** Reuse recycles `IndexNode` and
+`DataBatch` chunks, because those are what `vacuum_orphans` retires.
+It does **not** recycle superseded `Commit` and `Superblock` chunks:
+those are the crash-recovery fallbacks and the `commit_history`
+anchors, and vacuum leaves them alone by design. Steady-state growth
+is therefore `1 + superblock_replicas` chunks per commit (4 at the
+default) instead of that plus the rebuilt index path. Measured on
+the `reuse_recycles_the_index_tree_and_nothing_else` fixture at one
+replica: 24 commits appended **48** slots where append-only appended
+**72**. Reuse reduces growth; only `compact_known` still stops it.
+Retiring old eras would close the rest and would bound
+`commit_history`, which is a published contract — a separate
+decision, not this one.
+
+**Cost.** One extra chunk write per reused slot per commit, in the
+`fsync` the padding already pays for. On a phone that is 4 KiB of
+extra I/O per reused slot — for a typical messenger commit reusing
+one or two slots, 4-8 KiB against the ~20 KiB the commit already
+writes. Flash wear rises by the same proportion. `CHURN_PER_REUSE`
+is the knob; raising it buys a larger anonymity ratio at a
+proportional cost, and it is paid on every commit.
 
 The host-app trigger for compaction is documented at
 [`docs/en/guide/operations.md`](docs/en/guide/operations.md) §5.4
-(live-ratio threshold, size budget, idle-time defer, privacy
-event). `SpaceStats::utilization_ratio()` returns the relevant
-metric; `Container::compact_known` is the only mechanism that
-turns scrubbed slots back into reclaimed disk bytes.
+(live-ratio threshold, size budget, idle-time defer, privacy event).
+`SpaceStats::utilization_ratio()` and
+`SpaceStats::reusable_slot_count` are the metrics; a low ratio with
+a healthy pool is a recycling container that wants no compaction,
+and a low ratio with an empty pool is one that does.
 
 ## 10. Format parameters
 
@@ -620,8 +821,11 @@ message stream = `MESSAGE_LOG` namespace via `append_log` / `delete_log`; contac
 `CONTACTS` KV namespace; media = `MEDIA` KV namespace with large values
 (possibly chunked by the host-app). Slot-level `update_slot` /
 `tombstone_slot` from the v0.1 sketch were superseded by `vacuum` +
-`scrub-old-on-success`; that path is incompatible with the append-only
-write invariant (Inv-W1) which is load-bearing for crash safety.
+`scrub-old-on-success`. Note that this is *not* because in-place writes
+are impossible — §9.1 reuses retired slots — but because those two
+operations let a caller rewrite a slot of its own choosing, with no
+proof that the slot is unreachable from a recoverable era. That proof is
+the whole content of Inv-W1, and the decoy pool exists to supply it.
 
 ## 13. Module layout (canonical)
 

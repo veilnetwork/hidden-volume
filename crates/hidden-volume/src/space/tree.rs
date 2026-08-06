@@ -242,7 +242,7 @@ impl<'f> Space<'f> {
         {
             return Ok((slot, hash));
         }
-        let slot = self.append_chunk(ChunkKind::IndexNode, b.seq, bytes)?;
+        let slot = self.place_chunk(ChunkKind::IndexNode, b.seq, bytes)?;
         b.emitted.insert(slot);
         Ok((slot, hash))
     }

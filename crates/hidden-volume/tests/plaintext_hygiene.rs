@@ -56,7 +56,7 @@ fn zeroizing_vec_derefs_to_slice() {
 
 #[test]
 fn zeroizing_array_derefs_to_array_slice() {
-    // Same for stack-array wraps used in `space::append_chunk`.
+    // Same for stack-array wraps used in `space::place_chunk`.
     fn takes_slice(_: &[u8]) {}
     let z: Zeroizing<[u8; 16]> = Zeroizing::new([0u8; 16]);
     takes_slice(&z[..]);

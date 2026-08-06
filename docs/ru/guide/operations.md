@@ -340,7 +340,7 @@ chunk'ов считается как `N = (file_size / CHUNK_SIZE) - 1` (с
 
 ## 5. Управление бюджетом хранилища
 
-### 5.1 Почему файл растёт монотонно
+### 5.1 Почему файл всё ещё растёт
 
 Контейнер мессенджера растёт из-за:
 
@@ -349,21 +349,37 @@ chunk'ов считается как `N = (file_size / CHUNK_SIZE) - 1` (с
 - Deletes (orphan IndexNode chunks до vacuum_orphans).
 - Padding / decoy chunks (size obfuscation).
 
-**Принципиально: scrub'нутые слоты НЕ переиспользуются** последующими
-записями. Это **load-bearing для deniability** (DESIGN §9 — см.
-подсекцию «slot-reuse prohibition»): in-place перезапись известного
-file offset дала бы multi-snapshot противнику (T2') однозначный
-сигнал «этот slot активен», который нельзя списать на decoy growth.
-Поэтому каждый Tx commit append'ит в конец файла; «дыры», оставшиеся
-после `vacuum_orphans` / `vacuum_data_batches`, остаются на диске
-как uniform-random байты.
+**Списанные слоты ПЕРЕИСПОЛЬЗУЮТСЯ** с 2026-08-06 (DESIGN §9.1 —
+«Slot reuse and decoy churn»). Слоты, списанные `vacuum_orphans` /
+`vacuum_data_batches`, плюс post-commit padding, который этот space
+дописал сам, образуют **decoy pool**, из которого последующие
+commit'ы выделяют слоты. Различитель T2', ради которого это раньше
+запрещалось («offset, переписанный дважды, содержит живые данные»),
+закрыт перерандомизацией приманок из того же пула, в том же
+commit'е, с частотой, привязанной к переиспользованию, а не к часам.
+Прочитайте §9.1 прежде чем полагаться на эту защиту: там прямо
+сказано, чего churn НЕ даёт.
 
-Единственный способ вернуть disk space — **L5: полная компакция**
-(`Container::compact_known`), которая переписывает файл с нуля под
-одним `LOCK_EX`-flock'ом и ротирует `container_id`. Audit pass 16
-(R-STREAMING-REPACK) сделал её memory-bounded (≈ 4 MiB working set
-на страницу), так что её можно безопасно запускать на слабом
-оборудовании даже с multi-GiB log namespaces.
+Переиспользование не останавливает рост, а уменьшает его. Списываются
+только `IndexNode` и `DataBatch`; вытесненные `Commit` и `Superblock`
+остаются на диске как crash-recovery fallbacks и якоря
+`commit_history`. Поэтому в установившемся режиме файл растёт на
+`1 + superblock_replicas` чанков за commit — 4 по умолчанию — вместо
+этого же плюс перестроенный путь индекса.
+
+Единственный способ реально вернуть disk space по-прежнему —
+**L5: полная компакция** (`Container::compact_known`), которая
+переписывает файл с нуля под одним `LOCK_EX`-flock'ом и ротирует
+`container_id`. Audit pass 16 (R-STREAMING-REPACK) сделал её
+memory-bounded (≈ 4 MiB working set на страницу), так что её можно
+безопасно запускать на слабом оборудовании даже с multi-GiB log
+namespaces.
+
+`SpaceStats::reusable_slot_count` — это сколько записи прямо сейчас
+не будет стоить диска, и одновременно размер множества анонимности,
+в котором прячется переиспользованный слот. Host-app, которому важна
+защита от T2', держит padding policy достаточно щедрой, чтобы это
+число оставалось большим.
 
 ### 5.2 Замер live-ratio: `Space::utilization_ratio`
 
