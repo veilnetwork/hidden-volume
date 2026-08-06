@@ -326,7 +326,7 @@ hex-editor truncation is needed; re-opening the file is sufficient.
 
 ## 5. Storage budget management
 
-### 5.1 Why the file grows monotonically
+### 5.1 Why the file still grows
 
 A messenger container grows because of:
 
@@ -335,21 +335,34 @@ A messenger container grows because of:
 - Deletes (orphan IndexNode chunks until vacuum_orphans).
 - Padding / decoy chunks (size obfuscation).
 
-**Crucially, scrubbed slots are NOT reused** by subsequent writes.
-This is **load-bearing for deniability** (DESIGN §9 — see the
-"slot-reuse prohibition" subsection): in-place re-writes of a known
-file offset would give a multi-snapshot adversary (T2') an
-unambiguous "this slot is active" signal that can't be explained
-away as decoy growth. Every Tx commit therefore appends to the end
-of the file; the holes left by `vacuum_orphans` /
-`vacuum_data_batches` stay on disk as uniform-random bytes.
+**Retired slots ARE reused** since 2026-08-06 (DESIGN §9.1 — "Slot
+reuse and decoy churn"). Slots that `vacuum_orphans` /
+`vacuum_data_batches` retired, plus the post-commit padding this
+space itself appended, form a **decoy pool** that later commits
+allocate out of. The T2' distinguisher that used to forbid this —
+"an offset rewritten twice holds live data" — is closed by
+re-randomizing decoys from the same pool, in the same commit, at a
+rate tied to reuse rather than to a clock. Read §9.1 before relying
+on the posture; it is explicit about what the churn does *not* buy.
 
-The only way to reclaim disk space is **L5 — full compaction**
-(`Container::compact_known`), which rewrites the file from scratch
-under one `LOCK_EX`-held flock and rotates the `container_id`.
-Audit pass 16 (R-STREAMING-REPACK) made this memory-bounded
-(≈ 4 MiB working set per page) so it's safe to run on weak hardware
-even with multi-GiB log namespaces.
+Reuse does **not** stop the growth, it reduces it. Only `IndexNode`
+and `DataBatch` chunks are retired; superseded `Commit` and
+`Superblock` chunks stay on disk as crash-recovery fallbacks and
+`commit_history` anchors. Steady-state growth is therefore
+`1 + superblock_replicas` chunks per commit — 4 at the default —
+instead of that plus the rebuilt index path.
+
+The only way to actually reclaim disk space is still **L5 — full
+compaction** (`Container::compact_known`), which rewrites the file
+from scratch under one `LOCK_EX`-held flock and rotates the
+`container_id`. Audit pass 16 (R-STREAMING-REPACK) made this
+memory-bounded (≈ 4 MiB working set per page) so it's safe to run on
+weak hardware even with multi-GiB log namespaces.
+
+`SpaceStats::reusable_slot_count` is how much writing costs no disk
+at all right now — and, equally, the anonymity set a reused slot
+hides in. A host-app that cares about the T2' posture keeps the
+padding policy generous enough for that number to stay large.
 
 ### 5.2 Measuring live-ratio: `Space::utilization_ratio`
 
