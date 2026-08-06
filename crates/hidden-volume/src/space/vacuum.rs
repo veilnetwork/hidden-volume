@@ -88,6 +88,20 @@ impl SlotSet {
     fn is_empty(&self) -> bool {
         self.len == 0
     }
+
+    /// The recorded slots, ascending. Used to hand the retired set to the
+    /// decoy pool after a vacuum pass.
+    fn iter(&self) -> impl Iterator<Item = u64> + '_ {
+        self.words.iter().enumerate().flat_map(|(w, &word)| {
+            (0..64u64).filter_map(move |b| {
+                if word & (1u64 << b) != 0 {
+                    Some(w as u64 * 64 + b)
+                } else {
+                    None
+                }
+            })
+        })
+    }
 }
 
 impl<'f> Space<'f> {
@@ -213,6 +227,17 @@ impl<'f> Space<'f> {
         }
         if !to_drop.is_empty() {
             self.state.owned_slots.retain(|s| !to_drop.contains(*s));
+            // Retired, therefore reusable AND churnable (DESIGN §9.1). This
+            // is the ONLY way a slot that once held real data enters the
+            // pool, and it enters carrying vacuum's own proof: unreachable
+            // from the current era, under the `PublishUncertain` /
+            // `UnreadableNewerState` guards this method already applies.
+            // The `AuthFailed` arm above feeds it too — a slot in
+            // `owned_slots` that no longer decrypts is one an earlier pass
+            // scrubbed, which is the same retirement by a different route.
+            for slot in to_drop.iter() {
+                self.state.pool.insert(slot);
+            }
         }
         Ok(scrubbed)
     }
@@ -420,6 +445,17 @@ impl<'f> Space<'f> {
         }
         if !to_drop.is_empty() {
             self.state.owned_slots.retain(|s| !to_drop.contains(*s));
+            // Retired, therefore reusable AND churnable (DESIGN §9.1). This
+            // is the ONLY way a slot that once held real data enters the
+            // pool, and it enters carrying vacuum's own proof: unreachable
+            // from the current era, under the `PublishUncertain` /
+            // `UnreadableNewerState` guards this method already applies.
+            // The `AuthFailed` arm above feeds it too — a slot in
+            // `owned_slots` that no longer decrypts is one an earlier pass
+            // scrubbed, which is the same retirement by a different route.
+            for slot in to_drop.iter() {
+                self.state.pool.insert(slot);
+            }
         }
         Ok(scrubbed)
     }
