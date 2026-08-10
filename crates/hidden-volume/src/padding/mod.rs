@@ -27,6 +27,24 @@
 //!   `bucket_chunks - 1` garbage chunks per commit.
 //! - [`PaddingPolicy::FixedRatio`] — append a fixed ratio of garbage
 //!   chunks per real chunk written. Smoother growth, less quantization.
+//!
+//! ## Padding covers appends; churn covers reuse
+//!
+//! "Real chunks written" above means chunks this commit APPENDED, and the
+//! threat statement is why: what a size delta leaks is a count of appends.
+//! A commit that placed every one of its chunks in reused slots (DESIGN §9.1)
+//! moves the file's size not at all, so `FixedRatio` pads it by nothing —
+//! which is not an omission but the absence of anything to hide. Padding it
+//! anyway would put growth back on exactly the commits reuse exists to keep
+//! flat.
+//!
+//! Those commits are not left uncovered. What a reused slot leaks is not size
+//! but WHICH offsets changed, and the cover for that is the churn — one
+//! re-randomized decoy per reused slot, in the same commit, under the same
+//! fsync. The two mitigations partition the leak: padding answers "how much
+//! was appended", churn answers "which of the rewritten offsets hold data".
+//! Neither is a substitute for the other, and neither is missing when the
+//! other does nothing (report9 HV-03).
 
 /// Post-commit padding policy. Marked `#[non_exhaustive]` because
 /// future versions may add new policies (e.g., exponential bucket
@@ -52,9 +70,13 @@ pub enum PaddingPolicy {
         bucket_chunks: u64,
     },
     /// Add `garbage_per_real_x100 / 100` garbage chunks per real chunk
-    /// written in the commit. `garbage_per_real_x100 = 100` means a
-    /// 1:1 ratio (file grows 2× actual data). Use for smoother growth
-    /// when bucket quantization is too lumpy.
+    /// APPENDED by the commit. `garbage_per_real_x100 = 100` means a
+    /// 1:1 ratio (file grows 2× the data it appended). Use for smoother
+    /// growth when bucket quantization is too lumpy.
+    ///
+    /// Appended, not written: chunks the commit placed in reused slots cost
+    /// no growth and are therefore padded by nothing. See the module docs for
+    /// why that is the whole answer and not half of one.
     FixedRatio {
         /// Garbage-to-real ratio in hundredths. `100` = 1:1 (file
         /// grows 2× actual data); `50` = 0.5:1; `200` = 2:1 etc.
