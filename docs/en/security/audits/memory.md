@@ -33,6 +33,8 @@ decisions. Update on every change to crypto / space / tx modules.
 | BLAKE3 keyed-hash subkey | `derive_subkey` return | `Zeroizing<[u8; 32]>` (fixed in this audit) |
 | `XChaCha20Poly1305` cipher state | inside `ChunkAead` | `Zeroize` impl on RustCrypto cipher state — automatic via the `cipher` crate's `ZeroizeOnDrop` (no explicit feature gate needed for this crate version) |
 | Internal `key32` buffer in `derive_subkey` | `crypto/derive.rs:42` | `Zeroizing<[u8; 32]>` (was `.zeroize()` call; cleaner now) |
+| Argon2 working memory | inside `hash_password_into` | `argon2` crate's `zeroize` feature. **Added 2026-08-10 (report9 HV-15):** this table accounted for the derived KEY and not for the buffer it was derived in — m_cost KiB, 64 MiB at the defaults, holding the password's expansion and freed as-is. |
+| Transient `blake3::Hash` / `Hasher` | `derive_master_key`, `derive_subkey`, `derive_chunk_key` | `blake3` crate's `zeroize` feature plus an explicit `.zeroize()`. **Added 2026-08-10 (report9 HV-15):** each `Zeroizing` return above was copied OUT of a `Hash` that is the key itself, and that copy was dropped without a wipe. The keyed `Hasher` in `derive_subkey` holds key-equivalent state for the same reason. |
 
 ### B. Public material — no obligation ✓
 

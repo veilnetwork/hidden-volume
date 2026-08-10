@@ -43,9 +43,16 @@ chacha20poly1305 = { version = "0.10", default-features = false, features = ["al
 # direct use explicit and version-aligned.
 chacha20 = { version = "0.9", default-features = false }
 # Password-based KDF.
-argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
+# `zeroize`: Argon2's working memory is m_cost KiB — 64 MiB at the default
+# parameters — and it is the password's expansion. Without this feature it is
+# freed as-is, so the claimed M1 memory-erasure contract held for the derived
+# key and not for the buffer it was derived in (report9 HV-15).
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash", "zeroize"] }
 # Fast keyed hash for per-chunk subkey derivation and Merkle nodes.
-blake3 = { version = "1.5", default-features = false }
+# `zeroize`: a keyed `Hasher`'s state and a `Hash` are key-equivalent — the
+# hash IS the derived key at every site here — and neither is wiped on drop
+# without this (report9 HV-15).
+blake3 = { version = "1.5", default-features = false, features = ["zeroize"] }
 # Zero-on-drop wrappers for key material.
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 # RNG. We use `getrandom` directly for nonce / salt / container_id

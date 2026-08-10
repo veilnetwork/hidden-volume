@@ -16,7 +16,7 @@
 
 use argon2::{Algorithm, Argon2, Version};
 use byteorder::{ByteOrder, LittleEndian};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{Error, HEADER_PARAMS_LEN, Result};
 
@@ -365,12 +365,17 @@ fn derive_master_key_unvalidated(
     let mut input = [0u8; 12 + 4];
     input[..12].copy_from_slice(b"hv/v3/master");
     input[12..].copy_from_slice(&params.version.to_le_bytes());
-    let h = blake3::keyed_hash(
+    // The `Hash` this returns IS the master key. `blake3::Hash` is a plain
+    // 32-byte value and was dropped as-is, so a copy of the key outlived every
+    // `Zeroizing` around it (report9 HV-15). The crate's `zeroize` feature —
+    // enabled in `Cargo.toml` for exactly this — makes the wipe possible.
+    let mut h = blake3::keyed_hash(
         argon_out.as_slice().try_into().expect("argon_out is 32 B"),
         &input,
     );
     let mut out = Zeroizing::new([0u8; 32]);
     out.copy_from_slice(h.as_bytes());
+    h.zeroize();
     Ok(out)
 }
 
