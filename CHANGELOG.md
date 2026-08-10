@@ -12,6 +12,31 @@ format.
 
 ## [Unreleased]
 
+### Measured — report9 HV-05: what a pool draw costs, and why the scan stays
+
+- `DecoyPool::select` is a linear scan from word zero, so a draw costs
+  O(capacity in words) — set by how WIDE the file is, not by how much is in
+  the pool. Measured, release build:
+
+  | slots (file size) | per draw | 64 draws |
+  |---|---|---|
+  | 100 K (≈400 MiB) | 2.6 µs | 0.17 ms |
+  | 1 M (≈4 GiB) | 6.8 µs | 0.43 ms |
+  | 16 M (64 GiB, `MAX_OPEN_SCAN_CHUNKS`) | 84 µs | 5.4 ms |
+
+  Sixty-four draws is a commit reusing thirty-two slots and churning
+  thirty-two. The worst case the format can be pushed to therefore costs a
+  commit about five milliseconds, on a container at the hard cap.
+
+  A hierarchical popcount index would cut that by roughly sixty, and would
+  put a second, derived copy of the membership beside the bitmap. This is the
+  structure where a wrong answer means the allocator hands out a LIVE slot —
+  silent data loss on the next commit. Five milliseconds on a 64 GiB
+  container does not buy that trade. The measurement is kept runnable as an
+  `#[ignore]`d `measure_select_cost` rather than only written down; timings
+  make bad gates, so it is not one.
+
+
 ### Fixed — report9 HV-04: a failed draw no longer costs the pool its decoys
 
 - **`DecoyPool::sample_distinct` restores what it drew on the error path too.**

@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-10T01:53:23Z
+# Captured: 2026-08-10T02:30:42Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -181,11 +181,11 @@ multi.rs:  198:    pub fn is_empty(&self) -> bool {
 multi.rs:  204:    pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
 multi.rs:  225:    pub fn with_space<R>(&mut self, id: usize, f: impl FnOnce(&mut Space<'_>) -> R) -> Result<R> {
 open/mod.rs:  121:pub const MAX_OPEN_SCAN_CHUNKS: u64 = 16 * 1024 * 1024;
-padding/mod.rs:  36:pub enum PaddingPolicy {
-padding/mod.rs:  69:    pub const DEFAULT: Self = Self::BucketGrowth { bucket_chunks: 256 };
-padding/mod.rs:  91:    pub fn from_persisted_index(idx: u8) -> Self {
-padding/mod.rs:  108:    pub fn to_persisted_index(&self) -> Option<u8> {
-padding/mod.rs:  133:    pub fn garbage_after_commit(
+padding/mod.rs:  54:pub enum PaddingPolicy {
+padding/mod.rs:  91:    pub const DEFAULT: Self = Self::BucketGrowth { bucket_chunks: 256 };
+padding/mod.rs:  113:    pub fn from_persisted_index(idx: u8) -> Self {
+padding/mod.rs:  130:    pub fn to_persisted_index(&self) -> Option<u8> {
+padding/mod.rs:  155:    pub fn garbage_after_commit(
 redact.rs:  61:pub struct SecretShape {
 redact.rs:  75:pub trait Secret {
 redact.rs:  90:pub struct Redacted<T: Secret> {
