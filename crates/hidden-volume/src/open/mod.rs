@@ -113,6 +113,29 @@ const CANCEL_POLL_PERIOD: u64 = 64;
 /// mmap variants). Diagnostic detail includes the observed chunk
 /// count.
 ///
+/// ## What the cap costs in memory (report9 HV-13)
+///
+/// The audit put the open scan's peak at "256+ MiB at this cap" from an
+/// assumed per-slot cost. Measured instead, by
+/// `tests/open_peak_memory.rs`: **27.5 bytes of peak heap per owned slot**,
+/// which is ≈ 440 MiB at this cap — worse than the estimate, and well above
+/// the 8 bytes per owned chunk the streaming-scan note claims is retained.
+/// The extra is transient: the parallel reduce holds a second copy of an
+/// `owned_slots` half while it merges, and `commit_history` costs 8 more per
+/// commit.
+///
+/// Read the extrapolation with its fixture in mind. That measurement commits
+/// once per iteration, so it is close to a worst case for slots-per-commit; a
+/// container that reached this cap by holding DATA rather than history has
+/// more slots per commit and a lower figure. What the number does establish is
+/// the order: tens of bytes per slot, hundreds of megabytes at the cap — so a
+/// device that can hold a 64 GiB container cannot necessarily open one.
+///
+/// Lowering it is a change of representation, not a tweak: `owned_slots` is a
+/// `Vec<u64>` in `SpaceState` itself, and the crate already has the structure
+/// that would replace it (`SlotSet`, one bit per slot, used by the vacuum).
+/// That touches commit, vacuum and reuse together and is its own pass.
+///
 /// **Override is intentionally not in the v1.0 public surface.**
 /// Integrators with use cases beyond 64 GiB per container should
 /// either partition into multiple containers (one per
