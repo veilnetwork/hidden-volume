@@ -1164,6 +1164,16 @@ impl Container {
                 Some(t) => src.open_space_cancellable(open_with, t)?,
                 None => src.open_space(open_with)?,
             };
+            // A writer we do not understand published after the era this open
+            // settled on (report9 HV-10). What follows copies what THIS build
+            // can read into a fresh container, and the in-place flows then
+            // rename that over the source — so proceeding would replace the
+            // container with a projection that is missing everything the newer
+            // writer wrote, irreversibly. Vacuum already refuses on this state;
+            // rewriting the whole file is the same act with no undo.
+            if src_space.unreadable_newer_state().is_some() {
+                return Err(Error::UnreadableNewerState);
+            }
             let namespaces_with_kind = src_space.list_namespaces_with_kind()?;
 
             // Open the dest space — must drop `src_space` first
@@ -1933,6 +1943,68 @@ mod hv06_tests {
         assert!(
             before == after,
             "the source was modified by a rewrite the caller cancelled"
+        );
+    }
+
+    /// Compaction must refuse a container whose space names a newer era this
+    /// build cannot parse, and must leave it byte-identical.
+    ///
+    /// Repack reads what THIS build can read into a fresh container and the
+    /// in-place flows then rename that over the source. With a writer we do not
+    /// understand having published after us, that projection is missing
+    /// everything they wrote — and the rename makes it permanent. Vacuum has
+    /// refused this state for a while; rewriting the whole file is the same act
+    /// with no undo (report9 HV-10).
+    ///
+    /// The state is forced rather than staged: producing it honestly takes a
+    /// superblock that AEAD-passes under our key and then fails to parse, which
+    /// means writing a FUTURE format — the one thing this build cannot do.
+    /// Setting the field on an open handle, the way the vacuum tests do, covers
+    /// nothing here, because these flows open the space themselves.
+    #[test]
+    fn compaction_refuses_a_container_a_newer_writer_got_ahead_of() {
+        let (_guard, path) = scratch("newer");
+        {
+            let mut c = Container::create_with_options(&path, options()).unwrap();
+            let mut s = c.create_space(b"pw").unwrap();
+            let mut tx = s.begin_tx();
+            tx.put(Namespace::CONTACTS, b"alice", b"a").unwrap();
+            tx.commit().unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+
+        let _forced = crate::open::ForcedUnreadableNewerState::arm();
+        let err = Container::compact_known(&path, &[b"pw"], RepackOptions::default())
+            .expect_err("compaction must refuse to project away an era it cannot read");
+        assert!(matches!(err, Error::UnreadableNewerState), "got {err:?}");
+
+        assert!(
+            before == std::fs::read(&path).unwrap(),
+            "the refusal still rewrote the source"
+        );
+    }
+
+    /// The other half: without that state the same call goes through. A guard
+    /// that refuses everything would pass the test above and break compaction.
+    #[test]
+    fn compaction_without_newer_state_still_runs() {
+        let (_guard, path) = scratch("newer-ok");
+        {
+            let mut c = Container::create_with_options(&path, options()).unwrap();
+            let mut s = c.create_space(b"pw").unwrap();
+            let mut tx = s.begin_tx();
+            tx.put(Namespace::CONTACTS, b"alice", b"a").unwrap();
+            tx.commit().unwrap();
+        }
+        Container::compact_known(&path, &[b"pw"], RepackOptions::default())
+            .expect("compaction must still work");
+
+        let mut c = Container::open(&path).unwrap();
+        let mut s = c.open_space(b"pw").unwrap();
+        assert_eq!(
+            s.get(Namespace::CONTACTS, b"alice").unwrap().as_deref(),
+            Some(&b"a"[..]),
+            "compaction lost the entry it was supposed to carry over"
         );
     }
 
