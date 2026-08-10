@@ -94,8 +94,10 @@ int _u32(int v, String name) {
 int _u64(int v, String name) {
   if (v < 0) {
     throw ArgumentError.value(
-        v, name, 'must be >= 0 (FFI is u64; a negative Dart int reinterprets '
-            'as an enormous count)');
+        v,
+        name,
+        'must be >= 0 (FFI is u64; a negative Dart int reinterprets '
+        'as an enormous count)');
   }
   return v;
 }
@@ -250,7 +252,8 @@ const Map<String, int> _methodChecksums = <String, int>{
   'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_add_space': 26649,
   'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_create': 32815,
   'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_open': 49007,
-  'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_open_with_keys': 38449,
+  'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_open_with_keys':
+      38449,
   'uniffi_hidden_volume_ffi_checksum_func_change_passwords': 12821,
   'uniffi_hidden_volume_ffi_checksum_func_compact_known': 9495,
   'uniffi_hidden_volume_ffi_checksum_func_header_info': 40142,
@@ -258,16 +261,22 @@ const Map<String, int> _methodChecksums = <String, int>{
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_commit_seq': 20495,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_count': 7841,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_get': 65186,
-  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_iter_log_range': 14894,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_iter_log_range':
+      14894,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_kv_keys': 32138,
-  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_kv_keys_page': 65359,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_kv_keys_page':
+      65359,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_open_space': 38306,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_read_log': 27036,
-  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_set_padding_policy': 49029,
-  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_space_count': 64423,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_set_padding_policy':
+      49029,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_space_count':
+      64423,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_space_keys': 15090,
-  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_vacuum_data_batches': 40066,
-  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_vacuum_space': 35449,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_vacuum_data_batches':
+      40066,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_vacuum_space':
+      35449,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_commit': 59696,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_commit_history': 13502,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_commit_seq': 53179,
@@ -279,12 +288,16 @@ const Map<String, int> _methodChecksums = <String, int>{
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_kv_keys_page': 45476,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_list_namespaces': 63954,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_read_log': 59826,
-  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_set_padding_policy': 6532,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_set_padding_policy':
+      6532,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_space_keys': 38453,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_stats': 53120,
-  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_vacuum_after_open': 23213,
-  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_vacuum_data_batches': 48307,
-  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_verify_integrity': 55085,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_vacuum_after_open':
+      23213,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_vacuum_data_batches':
+      48307,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_verify_integrity':
+      55085,
 };
 // END GENERATED CHECKSUMS
 
@@ -309,8 +322,8 @@ void _verifyChecksums(Map<String, int> table) {
   table.forEach((symbol, expected) {
     final int actual;
     try {
-      actual =
-          _dylib.lookupFunction<ffi.Uint16 Function(), int Function()>(symbol)();
+      actual = _dylib
+          .lookupFunction<ffi.Uint16 Function(), int Function()>(symbol)();
     } on ArgumentError {
       // dart:ffi throws ArgumentError when the symbol is absent — the method
       // this file calls does not exist in the loaded library at all.
@@ -575,6 +588,15 @@ RustBuffer _bufferFromBytes(Uint8List src) {
         calloc.free(fb);
       }
     } finally {
+      // Wiped before the free, because this buffer carries passwords and raw
+      // SpaceKeys on their way into Rust. `free` returns the bytes to the C
+      // allocator as they are, so a copy of the secret outlived every
+      // `Zeroizing` the Rust side puts around its own (report9 HV-16). The
+      // cost is a memset of at most a few dozen bytes on a call that has just
+      // crossed an FFI boundary.
+      if (src.isNotEmpty) {
+        tmp.asTypedList(src.length).fillRange(0, src.length, 0);
+      }
       calloc.free(tmp);
     }
   });
@@ -585,7 +607,16 @@ RustBuffer _bufferFromBytes(Uint8List src) {
 /// arg whose Rust type is `Vec<u8>` (passwords, KV keys/values).
 RustBuffer _bufferFromByteVec(Uint8List src) {
   final w = _Writer()..writeByteVec(src);
-  return _bufferFromBytes(w.toBytes());
+  // The framed copy is a SECOND copy of the secret, in the Dart heap this
+  // time, and handing it to the garbage collector unwiped is the same leak one
+  // layer up (report9 HV-16). Rust has copied it by the time
+  // `_bufferFromBytes` returns, so wiping here is safe.
+  final framed = w.toBytes();
+  try {
+    return _bufferFromBytes(framed);
+  } finally {
+    framed.fillRange(0, framed.length, 0);
+  }
 }
 
 /// Copy a Rust-owned buffer's contents into a fresh Dart byte list, then
@@ -1393,7 +1424,8 @@ class SpaceHandleBindings {
     _ensureOpen();
     final keyBuf = _bufferFromByteVec(key);
     final h = _cloneHandle();
-    final out = rustCall<RustBuffer>((s) => _spGet(h, _ns(namespace), keyBuf, s));
+    final out =
+        rustCall<RustBuffer>((s) => _spGet(h, _ns(namespace), keyBuf, s));
     final bytes = _bufferToBytes(out);
     if (bytes.isEmpty) {
       // uniffi encodes Option<Vec<u8>> as: u8 tag + (Some) bytes.
@@ -1422,9 +1454,8 @@ class SpaceHandleBindings {
     final startBuf = _optU64(start);
     final endBuf = _optU64(end);
     final h = _cloneHandle();
-    final out = rustCall<RustBuffer>(
-        (s) => _spIterLogRange(h, _ns(namespace), startBuf, endBuf,
-            _u32(limit, 'limit'), s));
+    final out = rustCall<RustBuffer>((s) => _spIterLogRange(
+        h, _ns(namespace), startBuf, endBuf, _u32(limit, 'limit'), s));
     return _readLogEntries(_bufferToBytes(out));
   }
 
@@ -1475,9 +1506,8 @@ class SpaceHandleBindings {
   List<Uint8List> kvKeysPage(int namespace, Uint8List? after, int limit) {
     _ensureOpen();
     final h = _cloneHandle();
-    final out = rustCall<RustBuffer>(
-        (s) => _spKvKeysPage(
-            h, _ns(namespace), _optByteVec(after), _u32(limit, 'limit'), s));
+    final out = rustCall<RustBuffer>((s) => _spKvKeysPage(
+        h, _ns(namespace), _optByteVec(after), _u32(limit, 'limit'), s));
     return _decodeFramedKeys(_Reader(_bufferToBytes(out)).readByteVec());
   }
 
@@ -1493,7 +1523,8 @@ class SpaceHandleBindings {
   Uint8List? readLog(int namespace, int logId) {
     _ensureOpen();
     final h = _cloneHandle();
-    final out = rustCall<RustBuffer>((s) => _spReadLog(h, _ns(namespace), logId, s));
+    final out =
+        rustCall<RustBuffer>((s) => _spReadLog(h, _ns(namespace), logId, s));
     return _readOptByteVec(_bufferToBytes(out));
   }
 
@@ -1797,8 +1828,8 @@ class MultiSpaceHandleBindings {
     _ensureOpen();
     final keyBuf = _bufferFromByteVec(key);
     final h = _clone();
-    final out =
-        rustCall<RustBuffer>((s) => _msGet(h, _sid(id), _ns(namespace), keyBuf, s));
+    final out = rustCall<RustBuffer>(
+        (s) => _msGet(h, _sid(id), _ns(namespace), keyBuf, s));
     return _decodeOptionBytes(out);
   }
 
@@ -1806,8 +1837,8 @@ class MultiSpaceHandleBindings {
   Uint8List? readLog(int id, int namespace, int logId) {
     _ensureOpen();
     final h = _clone();
-    final out =
-        rustCall<RustBuffer>((s) => _msReadLog(h, _sid(id), _ns(namespace), logId, s));
+    final out = rustCall<RustBuffer>(
+        (s) => _msReadLog(h, _sid(id), _ns(namespace), logId, s));
     return _decodeOptionBytes(out);
   }
 
@@ -1823,9 +1854,8 @@ class MultiSpaceHandleBindings {
     final startBuf = _optU64(start);
     final endBuf = _optU64(end);
     final h = _clone();
-    final out = rustCall<RustBuffer>(
-        (s) => _msIterLogRange(h, _sid(id), _ns(namespace), startBuf, endBuf,
-            _u32(limit, 'limit'), s));
+    final out = rustCall<RustBuffer>((s) => _msIterLogRange(h, _sid(id),
+        _ns(namespace), startBuf, endBuf, _u32(limit, 'limit'), s));
     return _readLogEntries(_bufferToBytes(out));
   }
 
@@ -1841,19 +1871,20 @@ class MultiSpaceHandleBindings {
   List<Uint8List> kvKeys(int id, int namespace) {
     _ensureOpen();
     final h = _clone();
-    final out = rustCall<RustBuffer>((s) => _msKvKeys(h, _sid(id), _ns(namespace), s));
+    final out =
+        rustCall<RustBuffer>((s) => _msKvKeys(h, _sid(id), _ns(namespace), s));
     return _decodeFramedKeys(_Reader(_bufferToBytes(out)).readByteVec());
   }
 
   /// One page of [kvKeys] for space [id] — the multi-space twin of
   /// [SpaceHandleBindings.kvKeysPage].
-  List<Uint8List> kvKeysPage(int id, int namespace, Uint8List? after, int limit) {
+  List<Uint8List> kvKeysPage(
+      int id, int namespace, Uint8List? after, int limit) {
     _ensureOpen();
     final afterBuf = _optByteVec(after);
     final h = _clone();
-    final out = rustCall<RustBuffer>(
-        (s) => _msKvKeysPage(h, _sid(id), _ns(namespace), afterBuf,
-            _u32(limit, 'limit'), s));
+    final out = rustCall<RustBuffer>((s) => _msKvKeysPage(
+        h, _sid(id), _ns(namespace), afterBuf, _u32(limit, 'limit'), s));
     return _decodeFramedKeys(_Reader(_bufferToBytes(out)).readByteVec());
   }
 

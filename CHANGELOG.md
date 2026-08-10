@@ -12,6 +12,26 @@ format.
 
 ## [Unreleased]
 
+### Fixed — report9 HV-16: the transport's own copies of a secret
+
+- **The Rust half was already done** (audit H-03): `decode_space_keys` takes
+  the buffer by value and wraps it in `Zeroizing`, and the neighbouring entry
+  points treat incoming passwords the same way. None of that reaches the copies
+  the DART side makes on the way in.
+
+- **Two copies, both released as they were.** `_bufferFromBytes` fills a
+  `calloc` buffer with the secret, hands it to `_rustbufferFromBytes` and frees
+  it — returning the bytes to the C allocator intact. `_bufferFromByteVec`
+  builds a length-prefixed copy first and hands that to the garbage collector.
+  Both are wiped now; Rust has copied by the time either returns, so wiping is
+  safe.
+
+- The guard is a source check for the reason the memory audit gives for its
+  own: proving a released buffer was scrubbed means reading it after release.
+  Its ORDER assertion is the one worth having — a wipe that drifts below the
+  `free` is not a weaker fix but a write into memory the allocator has taken
+  back, and moving it there turns the test red.
+
 ### Fixed — report9 HV-15: the key survived its own erasure
 
 - **Argon2's working memory was freed as-is.** m_cost KiB — 64 MiB at the
