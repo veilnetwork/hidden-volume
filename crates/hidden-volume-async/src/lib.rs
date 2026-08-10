@@ -471,48 +471,85 @@ impl AsyncSpace {
     }
 
     /// Run a closure with mutable access to the underlying [`Space`].
-    /// The closure executes on Tokio's blocking-thread pool; the
-    /// internal mutex is held for the closure's duration.
+    /// The closure executes on Tokio's blocking-thread pool. At most one
+    /// closure runs at a time across this handle and every clone of it — see
+    /// **What actually serializes**, because it is not what this warning
+    /// used to say.
     ///
     /// # ⚠ Reentrant-call deadlock — read this before capturing a handle clone
     ///
-    /// The internal `Mutex` is non-reentrant (`std::sync::Mutex`).
-    /// **DO NOT** capture a clone of this `AsyncSpace` inside the
-    /// closure and drive an async method on the clone via
-    /// `Handle::current().block_on(...)`. Concrete deadlock sketch:
+    /// **DO NOT** capture a clone of this `AsyncSpace` inside the closure and
+    /// drive an async method on the clone via `Handle::current().block_on`:
     ///
     /// ```ignore
     /// // BAD — deadlocks the entire blocking task:
     /// let clone = space.clone();
     /// space.run(move |s| {
-    ///     s.put(...)?;
+    ///     let mut tx = s.begin_tx();
+    ///     tx.put(Namespace::CONTACTS, b"k", b"v")?;
+    ///     tx.commit()?;
     ///     tokio::runtime::Handle::current().block_on(async {
-    ///         let _ = clone.get(...).await;  // blocks waiting for *our own lock*
+    ///         // Waits for the operation permit THIS call is holding.
+    ///         let _ = clone.run(|s| s.count(Namespace::CONTACTS)).await;
     ///     });
     ///     Ok(())
     /// }).await
     /// ```
     ///
-    /// The fix is structural, not runtime — use the typed `&self`
-    /// methods (`space.get(...)`, `space.put(...)`, `space.commit(...)`)
-    /// which serialize on their own outside the closure. They take
-    /// separate locks one-at-a-time and never nest. `run` is a
-    /// low-level escape hatch for "I need direct `&mut Space` access
-    /// for a multi-step op"; the closure body is meant to be straight
-    /// sync code, not a sub-async-runtime entry point.
+    /// # What actually serializes
     ///
-    /// **Why not a runtime guard?** Audit pass 19 round 6 considered
-    /// switching to `try_lock` so the reentrant case surfaces as a
-    /// typed `Error::Internal` instead of deadlocking. The change
-    /// would regress
-    /// `tests/async_basic.rs::concurrent_runs_serialize_via_mutex`
-    /// — 10 concurrent legit `run` calls from independent tasks
-    /// would fail-fast instead of serializing on the mutex. A
-    /// per-task reentrancy detector needs task-local tracking that
-    /// std doesn't surface (parking_lot's reentrant mutex would
-    /// make `&mut Space` reachable twice on the same task —
-    /// unsound). Decision: document the footgun loudly and steer
-    /// callers toward the typed-methods path.
+    /// Two layers, and the inner one is not the one that bites. This handle's
+    /// [`OpLedger`] holds a single permit, taken *before* `spawn_blocking`, so
+    /// dispatch admits one operation at a time — and clones share it, since
+    /// `Clone` copies the `Arc`. The non-reentrant `std::sync::Mutex` around
+    /// the space is a second layer that in practice is never contended.
+    ///
+    /// So a nested call blocks on the permit and never reaches the mutex at
+    /// all. It is a genuine hang, not a slow path, and no timeout unwinds it
+    /// (audit H-05).
+    ///
+    /// The fix is structural, not runtime: do the whole job in ONE closure.
+    /// `f` already holds `&mut Space`, so there is nothing a nested call could
+    /// reach that this one cannot — nesting buys nothing and costs the
+    /// deadlock above. `run` is the low-level entry point for "I need direct
+    /// `&mut Space` access for a multi-step op"; the closure body is meant to
+    /// be straight sync code, not a sub-async-runtime entry point.
+    ///
+    /// # Two things this warning got wrong
+    ///
+    /// Recorded rather than quietly dropped, because each sent a reader
+    /// somewhere:
+    ///
+    /// - It offered an escape that does not exist — "use the typed `&self`
+    ///   methods (`space.get(...)`, `space.put(...)`, `space.commit(...)`)
+    ///   which serialize on their own outside the closure". `AsyncSpace` has
+    ///   no such methods: `create`, `open`, `run`, the abandonment accessors
+    ///   and the log-page streams are the whole surface. A reader who trusted
+    ///   it went looking, found nothing, and came back to `run` with the
+    ///   warning's weight spent (report9 HV-07). The uniffi `Space` object
+    ///   does have `get` / `commit`, which is the likely source of the mix-up
+    ///   — a different type, in a different crate, reached from a different
+    ///   language.
+    /// - **Why not a runtime guard?** Audit pass 19 round 6 rejected
+    ///   `try_lock` — which would surface reentrancy as a typed
+    ///   `Error::Internal` instead of deadlocking — because it "would regress
+    ///   `concurrent_runs_serialize_via_mutex`: 10 concurrent legit `run`
+    ///   calls from independent tasks would fail-fast instead of serializing
+    ///   on the mutex". That was reasoned, not measured. Measured since: with
+    ///   the mutex swapped for a fail-fast `try_lock`, every test in
+    ///   `tests/async_basic.rs` still passes, because the one-permit ledger
+    ///   means those ten calls never contend for the mutex in the first place.
+    ///   The decision stands on a reason that holds: `try_lock` would not
+    ///   catch the reentrant case either — the nested call hangs on the permit
+    ///   one layer earlier — so it would give up a working second line of
+    ///   defence and detect nothing. A per-task reentrancy detector needs
+    ///   task-local tracking std does not surface, and parking_lot's reentrant
+    ///   mutex would make `&mut Space` reachable twice on one task, which is
+    ///   unsound.
+    ///
+    /// `tests/async_basic.rs::concurrent_space_runs_never_overlap` measures
+    /// the no-overlap property promised above; breaking either layer alone
+    /// leaves it green, since the survivor still serializes.
     ///
     /// # Dropping this future
     ///
