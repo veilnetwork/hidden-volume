@@ -1561,6 +1561,17 @@ impl<'f> Space<'f> {
     /// predicate is true of every publisher, including this one, and
     /// reading it there would disable reuse for the superblock replicas —
     /// the chunks a commit writes most of.
+    /// The seq of a superblock newer than this handle's era that decrypted
+    /// under our key and could not be parsed, if there is one.
+    ///
+    /// Exposed to the crate because the destructive CONTAINER flows — repack,
+    /// compaction, password rotation — open a space and then rewrite the file
+    /// from what they read out of it. They live in another module and could not
+    /// see this, so they could not refuse (report9 HV-10).
+    pub(crate) fn unreadable_newer_state(&self) -> Option<u64> {
+        self.state.unreadable_newer_superblock
+    }
+
     fn reuse_permitted(&self) -> bool {
         self.state.unreadable_newer_superblock.is_none()
             && self.state.attempted_seq <= self.state.superblock.seq

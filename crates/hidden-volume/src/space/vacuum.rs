@@ -346,6 +346,15 @@ impl<'f> Space<'f> {
     ///   `commit_history`, both of which `vacuum_data_batches`
     ///   leaves alone.
     pub fn vacuum_data_batches(&mut self) -> Result<usize> {
+        // Same refusal as `vacuum_orphans`, and it was missing here (report9
+        // HV-09). A superblock NEWER than the one we settled on decrypted under
+        // our key and could not be parsed: something we do not understand
+        // published state after us. This pass scrubs every owned DataBatch not
+        // referenced from OUR namespaces — and the batches that writer's
+        // entries point at are exactly the ones our tree does not reference.
+        if self.state.unreadable_newer_superblock.is_some() {
+            return Err(Error::UnreadableNewerState);
+        }
         if !self.file.lock_mode.allows_writes() {
             return Err(Error::ReadOnly);
         }
@@ -527,6 +536,14 @@ mod newer_state_guard_tests {
             matches!(s.vacuum_orphans(), Err(Error::UnreadableNewerState)),
             "vacuum would delete exactly the newer writer's chunks"
         );
+        // The batch pass had the publish-uncertain and read-only refusals and
+        // not this one (report9 HV-09), and it is the pass that scrubs by
+        // "not referenced from OUR namespaces" — which is precisely what the
+        // newer writer's batches are.
+        assert!(
+            matches!(s.vacuum_data_batches(), Err(Error::UnreadableNewerState)),
+            "the batch pass scrubs exactly the batches the newer era points at"
+        );
 
         let mut tx = s.begin_tx();
         tx.put(Namespace::SETTINGS, b"k2", b"v2").unwrap();
@@ -547,6 +564,7 @@ mod newer_state_guard_tests {
         tx.commit().unwrap();
         assert!(s.state.unreadable_newer_superblock.is_none());
         assert!(s.vacuum_orphans().is_ok());
+        assert!(s.vacuum_data_batches().is_ok());
     }
 }
 

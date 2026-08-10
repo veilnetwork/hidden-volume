@@ -388,7 +388,54 @@ fn note_unparsable_sb(cur: &mut Option<u64>, seq: u64) {
 /// superblock at or below it is superseded history, not a writer that got
 /// ahead of us.
 fn newer_unreadable_sb(undecodable: Option<u64>, chosen_seq: u64) -> Option<u64> {
+    #[cfg(test)]
+    if forced_unreadable_newer() {
+        return Some(chosen_seq + 1);
+    }
     undecodable.filter(|s| *s > chosen_seq)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: make every space opened on this thread report a newer
+    /// superblock it could not parse.
+    ///
+    /// The state cannot be produced honestly from a test: it takes a superblock
+    /// that AEAD-passes under our key and then fails to parse, which means
+    /// writing one with a future format — the very thing this build does not
+    /// know how to do. Setting the field on an already-open handle covers the
+    /// callers that take `&mut Space`, and covers NOTHING that opens the space
+    /// itself, which is exactly where the destructive container flows live.
+    ///
+    /// Thread-local rather than global, for the reason `FILL_FAILS_AT` records:
+    /// a process-global fires inside whatever unrelated open a parallel test
+    /// thread happens to be making.
+    static FORCE_UNREADABLE_NEWER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Arm [`FORCE_UNREADABLE_NEWER`] on this thread; disarms on drop so a
+/// panicking test cannot leak it into whatever runs next in the same thread.
+#[cfg(test)]
+pub(crate) struct ForcedUnreadableNewerState;
+
+#[cfg(test)]
+impl ForcedUnreadableNewerState {
+    pub(crate) fn arm() -> Self {
+        FORCE_UNREADABLE_NEWER.with(|c| c.set(true));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for ForcedUnreadableNewerState {
+    fn drop(&mut self) {
+        FORCE_UNREADABLE_NEWER.with(|c| c.set(false));
+    }
+}
+
+#[cfg(test)]
+fn forced_unreadable_newer() -> bool {
+    FORCE_UNREADABLE_NEWER.with(std::cell::Cell::get)
 }
 
 #[derive(Default)]

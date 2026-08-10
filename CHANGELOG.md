@@ -12,6 +12,40 @@ format.
 
 ## [Unreleased]
 
+### Fixed — report9 HV-09 / HV-10: the destructive flows now refuse an era they cannot read
+
+A superblock NEWER than the one an open settled on can decrypt under our key
+and still fail to parse — a writer we do not understand published after us. The
+rule is old and the refusals were only in some of the places that need them.
+
+- **`vacuum_data_batches` had the read-only and publish-uncertain refusals and
+  not this one** (HV-09). It scrubs every owned DataBatch chunk that is not
+  referenced from OUR namespaces, and the batches the newer era's entries point
+  at are precisely the ones our tree does not reference. `vacuum_orphans` has
+  refused this state since the 1.1.0 incident; the batch pass, which is the
+  destructive half for log data, did not.
+
+- **Repack — and therefore compaction and password rotation — did not refuse
+  at all** (HV-10). Repack copies what THIS build can read into a fresh
+  container and the in-place flows rename that over the source. With a newer
+  writer having published, the projection is missing everything they wrote, and
+  the rename makes that permanent. Vacuum refusing while the whole-file rewrite
+  proceeded was the gap: the rewrite is the same act with no undo.
+
+  `Space::unreadable_newer_state()` is `pub(crate)` for this: the container
+  flows live in another module and could not see the state they had to check.
+
+- Both are covered, and the container case needed a test seam. The state cannot
+  be staged honestly — it takes a superblock that AEAD-passes and then fails to
+  parse, which means writing a future format this build does not know how to
+  write. Setting the field on an open handle (what the vacuum tests do) reaches
+  nothing that opens the space ITSELF, which is where these flows live. So
+  `ForcedUnreadableNewerState` arms the single place the rule is decided
+  (`newer_unreadable_sb`), following the `ForcedRngFailure` idiom: thread-local,
+  disarmed on drop. The refusal test also asserts the source is left
+  byte-identical, and a second test asserts compaction still runs — and still
+  carries entries over — without the state.
+
 ### Fixed — report9 HV-07: the reentrancy warning pointed at an exit that was not there, and named the wrong lock
 
 - **`AsyncSpace::run`'s deadlock warning told the reader to "use the typed
