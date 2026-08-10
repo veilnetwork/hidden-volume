@@ -462,6 +462,23 @@ would be written down. Without a drift trigger of its own a container
 that reused perfectly would checkpoint once and lose every slot it had
 freed at the next close.
 
+**A writer that has no pool must not record that.** The pool is
+recoverable only from this chain, so a session that never read one —
+the constant-time open takes the full scan by design, because a fast
+path's chunk count is exactly what distinguishes a right password from
+a wrong one — holds nothing. Recording its emptiness over the
+accumulated set destroys the only copy that exists, and every later
+open then starts append-only with nothing to rebuild from. Measured on
+a fixture: 39 recorded slots became 1 (report9 HV-14).
+
+So the writer reads the chain it is about to supersede BEFORE scrubbing
+it, and merges that pool with its own whenever it did not load one.
+Merged, not substituted: a pool-less session still frees slots (every
+commit's garbage padding lands there). Both halves are filtered against
+this era's owned set and high-water, so the two halves of the record
+stay complementary — a reader subtracts its scan's owned set from the
+recorded pool anyway, but the record should be true on its own terms.
+
 The chain head is pointed to by `Superblock.checkpoint_slot` (§4.1).
 A later open recovers the pointer from a recent superblock, reads the
 chain to get `(cp_high_water, owned_below)`, then trial-decrypts only
