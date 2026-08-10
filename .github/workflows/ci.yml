@@ -220,6 +220,23 @@ jobs:
           python-version: "3.12"
       - name: Build FFI cdylib (release)
         run: cargo build -p hidden-volume-ffi --release
+      - name: UniFFI checksum table (Dart bindings)
+        # The one place this runs automatically. It lived only in the local release checklist's
+        # pre-tag list, which is to say it ran when someone remembered — and a
+        # stale table fails the app CLOSED at launch (audit HV-05).
+        #
+        # It drifts more easily than a signature check suggests: uniffi hashes
+        # the metadata with the DOCSTRING in it, so editing a doc comment on an
+        # exported method moves its checksum. That is exactly how the table
+        # went stale on 2026-08-10, caught by the host app's tests rather than
+        # by anything here.
+        #
+        # macOS leg only, and not as a hedge: the table is the FFI surface's
+        # checksums, identical on every platform, so one host answers for all.
+        # Running it twice would only double the chance of an environment
+        # failure being read as drift.
+        if: matrix.os == 'macos-latest'
+        run: python3 scripts/regen-dart-checksums.py --check
       - name: Regenerate Python bindings
         shell: bash
         run: |
