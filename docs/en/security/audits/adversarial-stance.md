@@ -511,11 +511,15 @@ pass commit.
 
 - **Tier.** T-cooperative-cancel.
 - **Method.** Cancel during the post-commit garbage-padding step.
-- **Outcome.** Pass-18 M1 hardening: padding failures stash to
-  `last_padding_error` and `Ok(new_seq)` is returned. Durability
+- **Outcome.** Pass-18 M1 hardening: the failure stashes to
+  `last_hardening_error` and `Ok(new_seq)` is returned. Durability
   is not downgraded. Privacy-padding loss is bounded to that one
   commit, observable to multi-snapshot adversaries (T2'); same as
-  F-PAD-tamper outcome for that commit.
+  F-PAD-tamper outcome for that commit. The record names WHICH
+  step failed (report9 HV-06): a cancel during padding costs that
+  commit its size privacy, a cancel during churn costs it the
+  §9.1 cover for the slots it reused, and a host cannot weigh
+  either against the other from one undifferentiated error.
 - **Verdict.** **Defended** at the durability layer; bounded
   privacy degradation acknowledged.
 - **Severity.** INFO.

@@ -57,6 +57,66 @@ use self::walk::TreeWalk;
 /// every commit on a phone.
 pub(crate) const CHURN_PER_REUSE: usize = 1;
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only switch that fails the churn step.
+    ///
+    /// Churn draws from the CSPRNG and rewrites slots, and neither fails on a
+    /// machine a test runs on. Reaching its failure through the RNG hook is
+    /// not practical either: every chunk this commit sealed drew a nonce
+    /// first, so "the n-th draw" is not a number a test can name.
+    ///
+    /// What it is armed for is the CLASSIFICATION — that a churn failure is
+    /// reported as a churn failure while padding succeeded beside it.
+    static CHURN_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Arm [`CHURN_FAILS`] on this thread; restores on drop so a panicking test
+/// cannot leak the fault into whatever runs next in the same thread.
+#[cfg(test)]
+pub(crate) struct ForcedChurnFailure;
+
+#[cfg(test)]
+impl ForcedChurnFailure {
+    pub(crate) fn arm() -> Self {
+        CHURN_FAILS.with(|c| c.set(true));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for ForcedChurnFailure {
+    fn drop(&mut self) {
+        CHURN_FAILS.with(|c| c.set(false));
+    }
+}
+
+/// Which post-commit hardening step failed, and why.
+///
+/// The three run after the superblock is already durable, and each protects a
+/// different thing — see [`Space::last_hardening_error`] for the table. A host
+/// that is told only "hardening failed" cannot act on any of them.
+#[derive(Debug)]
+pub struct HardeningFailure {
+    /// The step that failed. The first one to, if more than one did: they are
+    /// all attempted regardless of each other, and reporting a list would
+    /// oblige every caller to handle a case that says nothing extra.
+    pub step: HardeningStep,
+    /// Why it failed.
+    pub error: crate::Error,
+}
+
+/// The post-commit hardening steps, in the order `commit_tx` attempts them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HardeningStep {
+    /// Appending garbage so the commit's size is not readable (DESIGN §8).
+    Padding,
+    /// Re-randomizing one decoy per slot the commit reused (DESIGN §9.1).
+    Churn,
+    /// Putting both on the platter.
+    Sync,
+}
+
 /// Pool size at which a write episode must stop reusing, given the pool it
 /// started with — see [`SpaceState::reuse_floor`].
 ///
@@ -302,13 +362,22 @@ pub(crate) struct SpaceState {
     /// new seq. Exposed via [`Space::commit_history`] for host-app
     /// rollback / multi-device anchor logic.
     pub commit_history: Vec<u64>,
-    /// Audit M1 (2026-05-10). Last error encountered in the post-
-    /// commit padding step (DESIGN §8). Does NOT affect durability of
-    /// the commit itself — see [`commit_tx`](crate::space::Space::commit_tx)
-    /// docs. Exposed read-only via [`Space::last_padding_error`] so
-    /// host-apps can surface a privacy-hardening warning without
-    /// confusing it with a commit failure.
-    pub last_padding_error: Option<crate::Error>,
+    /// Audit M1 (2026-05-10). Last failure in the post-commit hardening
+    /// steps (DESIGN §8, §9.1). Does NOT affect durability of the commit
+    /// itself — see [`commit_tx`](crate::space::Space::commit_tx) docs.
+    /// Exposed read-only via [`Space::last_hardening_error`] so host-apps can
+    /// surface a privacy-hardening warning without confusing it with a commit
+    /// failure.
+    ///
+    /// It records WHICH step failed, and that is the point of the type
+    /// (report9 HV-06). It used to be a bare error called
+    /// `last_padding_error`, and all three steps reported through it, so a
+    /// host could not tell "the file grew by a size an adversary can read"
+    /// from "the reuse this commit made was never covered by churn" from
+    /// "none of it is on the platter yet". Those are a size leak, a
+    /// deniability break and a durability gap, and they do not deserve one
+    /// warning between them.
+    pub last_hardening_error: Option<HardeningFailure>,
     /// Why the last superblock publish failed, if one did (report8 H-09).
     ///
     /// [`Space::publish_superblock`] answers [`Error::PublishUncertain`] for
@@ -430,7 +499,7 @@ redacted_debug!(SpaceState {
     keys,
     superblock,
     commit_history,
-    last_padding_error,
+    last_hardening_error,
     last_publish_error,
     roots_payload_cache,
     attempted_seq,
@@ -453,7 +522,7 @@ impl SpaceState {
             },
             owned_slots: Vec::new(),
             commit_history: Vec::new(),
-            last_padding_error: None,
+            last_hardening_error: None,
             last_publish_error: None,
             roots_payload_cache: None,
             attempted_seq: 0,
@@ -700,16 +769,23 @@ impl<'f> Space<'f> {
         self.file.padding_policy
     }
 
-    /// Last error from the post-commit padding step, if any. Audit M1
-    /// (2026-05-10): padding failures DO NOT downgrade a durable
-    /// commit — `Tx::commit` returns `Ok(seq)` even if this field is
-    /// `Some(_)`. Host-apps may surface this as a privacy-hardening
-    /// warning (the affected commit's size is observable to a
-    /// multi-snapshot adversary) without confusing it with a commit
-    /// failure. Cleared on every successful padding round.
+    /// Last failure from the post-commit hardening steps, if any, and which
+    /// step it was. Audit M1 (2026-05-10): these DO NOT downgrade a durable
+    /// commit — `Tx::commit` returns `Ok(seq)` even when this is `Some(_)`.
+    ///
+    /// What a host does about it depends entirely on
+    /// [`HardeningFailure::step`], which is why the step is here:
+    ///
+    /// | Step | What is no longer true |
+    /// |---|---|
+    /// | [`HardeningStep::Padding`] | the commit's SIZE is readable by a multi-snapshot adversary |
+    /// | [`HardeningStep::Churn`] | the slots this commit REUSED stand alone in a snapshot diff (DESIGN §9.1) |
+    /// | [`HardeningStep::Sync`] | the padding and churn writes are not on the platter yet |
+    ///
+    /// Cleared on every round where all three succeed.
     #[must_use]
-    pub fn last_padding_error(&self) -> Option<&crate::Error> {
-        self.state.last_padding_error.as_ref()
+    pub fn last_hardening_error(&self) -> Option<&HardeningFailure> {
+        self.state.last_hardening_error.as_ref()
     }
 
     /// Why the last superblock publish failed, if one did (report8 H-09).
@@ -1621,6 +1697,10 @@ impl<'f> Space<'f> {
     /// when the pool is smaller than that). Churned slots stay in the
     /// pool: churn retires nothing, it only moves bytes.
     pub(super) fn churn_decoys(&mut self, n: usize) -> Result<usize> {
+        #[cfg(test)]
+        if CHURN_FAILS.with(std::cell::Cell::get) {
+            return Err(Error::Internal("test hook: forced churn failure"));
+        }
         let victims = self.state.pool.sample_distinct(n)?;
         let mut done = 0;
         for slot in victims {

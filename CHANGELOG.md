@@ -12,6 +12,39 @@ format.
 
 ## [Unreleased]
 
+### Fixed — report9 HV-04: a failed draw no longer costs the pool its decoys
+
+- **`DecoyPool::sample_distinct` restores what it drew on the error path too.**
+  It clears each drawn bit as its sampling device and puts every one back at
+  the end, because churn retires nothing — but a `?` on the CSPRNG returned
+  between those halves, so the slots drawn before the failure stayed cleared.
+  Gone from `len`, never allocated, never churned again: decoys that stop
+  existing because a draw failed. The pool is also what the reuse budget is
+  sized from. Covered by `a_failed_draw_leaves_the_pool_whole`, which reaches
+  the path through a new thread-local CSPRNG fault (`ForcedRngFailure`) —
+  eight slots in, one drawn, and the broken version comes back with seven.
+
+### Changed — report9 HV-06: the hardening record names the step that failed
+
+- **`SpaceState::last_padding_error` is now `last_hardening_error:
+  Option<HardeningFailure>`**, carrying a `HardeningStep` of `Padding`,
+  `Churn` or `Sync`. `Space::last_padding_error()` becomes
+  `Space::last_hardening_error()`.
+
+  All three steps reported through one field named for the first of them, so
+  a host was told "padding" whichever broke. They are not the same news:
+  padding failing means the commit's SIZE is readable by a multi-snapshot
+  adversary; churn failing means the slots it reused stand alone in a
+  snapshot diff with no decoy moved beside them, which is the oracle DESIGN
+  §9.1 exists to deny; the fsync failing means neither is on the platter yet.
+  One of those is a warning and one is worth stopping for.
+
+  `a_churn_failure_is_not_filed_as_a_padding_failure` provokes a churn
+  failure while padding succeeds beside it (new thread-local
+  `ForcedChurnFailure` — the CSPRNG hook cannot reach churn by count, because
+  every chunk the commit sealed drew a nonce first).
+
+
 ### Fixed — report9 #1: reuse is budgeted so the churn can always be funded
 
 - **A write episode reuses at most the share of the pool whose churn the
