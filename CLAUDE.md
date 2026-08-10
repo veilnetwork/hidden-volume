@@ -188,39 +188,22 @@ Because branch CI does not run, the pre-tag local gate is the
 primary fast-feedback mechanism before pushing a tag:
 
 ```sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-default-features --no-deps
-cargo test --workspace --all-features --no-fail-fast
-scripts/dump-public-api.sh --check
-scripts/check-docs-version-drift.sh
-# Per-method UniFFI checksum table in the hand-written Dart bindings
-# (audit HV-05). Needs the cdylib built first; a stale table fails
-# closed at app launch, so this drift check belongs with the others.
-cargo build -p hidden-volume-ffi --release
-scripts/regen-dart-checksums.py --check
-# Android cross-compile gate (catches the `target_os = "android"`
-# branch — std `try_lock` Err(Unsupported) on Android meant the v1.x
-# Android-flock hardening (commit 7e4bf4a) routed through libc
-# instead, and a cfg-gating regression escaped the v1.0.0 release
-# push because the darwin host has no NDK. Local NDK r26d install
-# (~1 GB) matches `flutter-build.yml`'s pinned version; see
-# `temp.md` for ANDROID_NDK_HOME wiring on this host.
-ANDROID_NDK_HOME="$HOME/Library/Android/sdk/ndk/26.3.11579264" \
-  RUSTFLAGS="-D warnings" \
-  cargo ndk -t aarch64-linux-android -- build -p hidden-volume
-# Windows cross-compile gate (report7 P1). `hv.exe` ships in every
-# release, and the `cfg(windows)` arms — `EchoOff`'s SetConsoleMode
-# among them — are invisible to every check above. The `-gnu` target
-# plus mingw-w64 type-check them on a darwin host in seconds, which is
-# the difference between shipping code nobody compiled and shipping
-# code nobody ran. `windows-release-gate.yml` covers the running half.
-#   rustup target add x86_64-pc-windows-gnu && brew install mingw-w64
-CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
-  cargo check --target x86_64-pc-windows-gnu \
-  -p hidden-volume --features cli --all-targets
+scripts/pre-tag-gate.sh
 ```
+
+That script IS the list — fmt, clippy, both rustdoc passes, the full
+test matrix, the API-surface and docs-drift checks, the UniFFI
+checksum table, and the Android + Windows cross-compiles. It used to
+live here as fifteen commands a person copied by hand, which fails two
+ways: a step gets skipped because the block is long, and the block
+drifts from what is actually run. One source now; this file points at
+it rather than repeating it.
+
+Two gates need a toolchain that is not on every host (the Android NDK,
+mingw-w64). The script reports those under **NOT CHECKED** rather than
+passing over them silently — a skipped gate is a question nobody
+asked, and the Android one exists precisely because a cfg-gating
+regression escaped the v1.0.0 push on a darwin host with no NDK.
 
 If any step fails, fix it before tagging — CI will fail
 identically.
