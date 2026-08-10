@@ -173,6 +173,38 @@ pub use multi::MultiSpace;
 pub use open::MAX_OPEN_SCAN_CHUNKS;
 pub use space::Space;
 
+/// How many commit eras a space keeps behind the current one.
+///
+/// Every commit leaves two chunks that nothing later reaches: the Superblock
+/// of that era and the Commit chunk it points at. Old IndexNodes are already
+/// collected — the orphan vacuum walks from the CURRENT root — but these two
+/// were kept forever, one as a decode fallback and one as what that fallback
+/// points at. Measured on a fixture that rewrites a single key: 21 MB of file
+/// for an eight-byte value after 1200 rewrites, with no plateau.
+///
+/// A horizon bounds it. `vacuum_orphans` retires the pair for every era below
+/// `current_seq - ANCHOR_HORIZON`, so the steady cost is
+/// `2 * ANCHOR_HORIZON * CHUNK_SIZE` — **8 MiB at this value** — instead of
+/// growing with the number of commits a container has ever taken.
+///
+/// ## Why 1024 and not less
+///
+/// Two things read old eras, and the horizon has to clear both:
+///
+///  * **The decode fallback (audit D2).** An open picks the highest-seq
+///    superblock that decodes and falls back down the list. That list is
+///    capped at 64 candidates by the scan itself, so any horizon at or above
+///    64 leaves the fallback depth exactly as it was.
+///  * **The host's rollback anchors** ([`Space::commit_history`]). This is the
+///    binding constraint: a host that stored an anchor and comes back to
+///    compare must still find it. 1024 commits is the budget for how far
+///    behind a device may be before its anchor stops being evidence — see
+///    `docs/en/guide/multi-device.md`, which spells out what a host must do
+///    when an anchor is older than this.
+///
+/// Raising it costs 8 KiB of steady file size per era and nothing else.
+pub const ANCHOR_HORIZON: u64 = 1024;
+
 /// Size of a single chunk on disk, in bytes. Fixed by the format
 /// (DESIGN §10). Never change without a format-version bump.
 pub const CHUNK_SIZE: usize = 4096;

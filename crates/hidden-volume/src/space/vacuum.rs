@@ -9,7 +9,7 @@ use crate::{Error, Result};
 
 use super::Space;
 use super::index::IndexNode;
-use super::superblock::NO_RECORD;
+use super::superblock::{NO_RECORD, Superblock};
 use super::walk::TreeWalk;
 
 /// How many `(log_id_key, batch_slot)` entries
@@ -192,6 +192,23 @@ impl<'f> Space<'f> {
         // (2026-05-03): matters for heavy-history containers (100K
         // owned + 1K to-scrub = 100M comparisons with Vec::contains).
         let mut to_drop = SlotSet::with_capacity(self.file.slot_count());
+        // Eras older than the anchor horizon are retired here, superblock and
+        // Commit chunk together. See [`crate::ANCHOR_HORIZON`] for why the two
+        // travel as a pair and what the horizon costs.
+        //
+        // Both sets are bitmaps over the file, so the bookkeeping is a bit per
+        // slot rather than a list of eras — a container that has never been
+        // vacuumed can hold a very large number of them.
+        let threshold = self
+            .state
+            .superblock
+            .seq
+            .saturating_sub(crate::ANCHOR_HORIZON);
+        let mut kept_roots = SlotSet::with_capacity(self.file.slot_count());
+        let mut doomed_roots = SlotSet::with_capacity(self.file.slot_count());
+        // Explicit, though the loop would also reach it: the current era's
+        // Commit chunk is the one thing that must survive whatever else does.
+        kept_roots.insert(self.state.superblock.root_slot);
         // Walked one bitmap word at a time, because the body holds `&mut
         // self` to read and scrub. A borrowed iterator cannot survive that,
         // and materializing the slot list is the whole-list copy audit HV-03
@@ -202,9 +219,10 @@ impl<'f> Space<'f> {
                 if walk.has_visited(slot) {
                     continue;
                 }
-                // Inspect kind — only scrub IndexNode orphans. Old
-                // Superblocks / Commits / DataBatch chunks are left alone
-                // (fallbacks / shared batches respectively).
+                // Inspect kind. IndexNode orphans go unconditionally;
+                // Superblocks are judged against the horizon and take their
+                // Commit chunk with them; DataBatch chunks belong to
+                // `vacuum_data_batches` and are left alone here.
                 let pt = match self.read_owned_chunk(slot) {
                     Ok(p) => p,
                     Err(Error::AuthFailed) => {
@@ -214,12 +232,57 @@ impl<'f> Space<'f> {
                     },
                     Err(other) => return Err(other),
                 };
+                if pt.kind == ChunkKind::Superblock {
+                    // A superblock this build cannot decode is left where it
+                    // is. `unreadable_newer_superblock` above already refuses
+                    // the whole pass for a NEWER one; an older unreadable one
+                    // is superseded history we still decline to destroy,
+                    // because we cannot read which Commit chunk it holds and
+                    // would orphan that chunk silently.
+                    let Ok(sb) = Superblock::decode(&pt.payload) else {
+                        continue;
+                    };
+                    if pt.seq >= threshold {
+                        kept_roots.insert(sb.root_slot);
+                        continue;
+                    }
+                    doomed_roots.insert(sb.root_slot);
+                    self.file.scrub_slot(slot)?;
+                    to_drop.insert(slot);
+                    scrubbed += 1;
+                    continue;
+                }
                 if pt.kind != ChunkKind::IndexNode {
                     continue;
                 }
                 self.file.scrub_slot(slot)?;
                 to_drop.insert(slot);
                 scrubbed += 1;
+            }
+        }
+        // The Commit chunks the retired eras pointed at, minus any a KEPT era
+        // still points at.
+        //
+        // A second phase rather than inline, because a Commit chunk can only
+        // be judged once every superblock has been seen: an era below the
+        // horizon is walked before the reader knows whether some era above it
+        // shares the same root. They do not share by construction — each
+        // commit writes its own — but the subtraction makes that a property of
+        // the code rather than of a belief about it.
+        for root in doomed_roots.iter() {
+            if kept_roots.contains(root) || to_drop.contains(root) {
+                continue;
+            }
+            match self.read_owned_chunk(root) {
+                Ok(pt) if pt.kind == ChunkKind::Commit => {
+                    self.file.scrub_slot(root)?;
+                    to_drop.insert(root);
+                    scrubbed += 1;
+                },
+                // Not ours, not a Commit, or already gone. A superblock whose
+                // root does not read back as a Commit chunk is a shape this
+                // writer never produced; leaving it is the safe half.
+                _ => {},
             }
         }
         // fsync only when bytes actually changed, but drop the slots whenever
@@ -243,6 +306,14 @@ impl<'f> Space<'f> {
             // scrubbed, which is the same retirement by a different route.
             for slot in to_drop.iter() {
                 self.state.pool.insert(slot);
+            }
+            // The anchor list is DERIVED from the owned superblocks at open,
+            // so a retired era has to leave it here too. Without this, this
+            // session keeps answering `commit_history()` with anchors that no
+            // longer exist on disk while the next open answers differently —
+            // and a host comparing the two reads a fork where there is none.
+            if threshold > 0 {
+                self.state.commit_history.retain(|seq| *seq >= threshold);
             }
         }
         Ok(scrubbed)

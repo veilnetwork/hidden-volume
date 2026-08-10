@@ -167,13 +167,32 @@ On `Container::open_space`:
      do NOT silently accept new writes (you would lose anchored data).
    - `current_seq >= anchor_seq` AND `anchor_seq` is in
      `space.commit_history()` → **clean continuation**. Accept.
-   - `current_seq >= anchor_seq` AND `anchor_seq` is NOT in
-     `space.commit_history()` → **fork**. The file's timeline diverges
-     from your anchor. Treat as adversarial.
+   - `current_seq - anchor_seq > hidden_volume::ANCHOR_HORIZON` →
+     **out of range**. The anchor is older than the window the file
+     keeps; its absence from `commit_history()` says nothing either
+     way. Re-anchor from the current state and, if the host has another
+     way to check (a server counter, a second device), use that. Do NOT
+     treat this as a fork.
+   - `current_seq >= anchor_seq`, within the horizon, AND `anchor_seq`
+     is NOT in `space.commit_history()` → **fork**. The file's timeline
+     diverges from your anchor. Treat as adversarial.
 
 The `commit_history()` membership test is the part that distinguishes
 "someone reset the file to an even *newer* state I never committed"
 from "I just opened a file I haven't touched in a while".
+
+**The out-of-range case is new, and the order of the three tests
+matters.** Anchors used to be kept forever, so absence meant fork and
+nothing else. Keeping them forever also meant every commit left two
+chunks that nothing ever collected — a container rewriting a single
+key grew by ~17 KB per commit with no plateau. `ANCHOR_HORIZON` bounds
+that at 1024 eras, and the cost is exactly this: an anchor further back
+than the horizon is no longer on disk to compare against.
+
+A host that checks membership without the range test first will read
+every long-offline device as an adversary. If your devices can be
+offline for more than `ANCHOR_HORIZON` commits, anchor more often than
+that, or carry a second anchor source for the gap.
 
 ### What anchors expose
 

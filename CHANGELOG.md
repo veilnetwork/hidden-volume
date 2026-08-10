@@ -12,6 +12,51 @@ format.
 
 ## [Unreleased]
 
+### Breaking — a space now keeps a bounded window of commit anchors
+
+- **The growth this removes.** Every commit left two chunks nothing later
+  reaches: the Superblock of that era and the Commit chunk it points at. Old
+  IndexNodes were already collected — the orphan vacuum walks from the CURRENT
+  root — but those two were kept forever, one as a decode fallback (audit D2)
+  and one as what that fallback points at. Measured: a container rewriting a
+  single eight-byte value grew ~17 KB per commit with no plateau, 21 MB for one
+  key after 1200 rewrites and rising. That is the shape of the reference case
+  this project already carried in its own comments, 7.0 GB of file against
+  4.8 MB of content.
+
+- **`ANCHOR_HORIZON = 1024`.** `vacuum_orphans` now retires the pair for every
+  era below `current_seq - ANCHOR_HORIZON`, so the steady cost is
+  `2 * ANCHOR_HORIZON * CHUNK_SIZE` — 8 MiB — instead of growing with the
+  number of commits a container has ever taken. Measured on the same fixture:
+  the owned set plateaus and per-commit growth falls from ~17 KB to ~0.5 KB.
+  The superblock and its Commit chunk travel as a PAIR: a fallback superblock
+  whose Commit chunk is gone is worse than no fallback at all.
+
+- **The decode fallback is unchanged.** An open picks the highest-seq
+  superblock that decodes and falls back down a list the scan caps at
+  `MAX_SB_CANDIDATES = 64`. Any horizon at or above 64 leaves that depth
+  exactly as it was; 1024 is chosen for the anchors, not for the fallback.
+
+- **BREAKING for host apps: the rollback procedure gains a third answer.**
+  `docs/{en,ru}/guide/multi-device.md` used to say that an anchor absent from
+  `commit_history()` means **fork — treat as adversarial**. With a bounded
+  window that is wrong for any device that has been offline longer than the
+  horizon. The range test now comes FIRST: an anchor further back than
+  `ANCHOR_HORIZON` is **out of range** — its absence says nothing either way,
+  and the host must re-anchor rather than accuse. A host that keeps the old
+  order will read every long-offline device as an attacker.
+
+- **The in-memory anchor list is pruned with the retirement**, so a session
+  does not keep answering `commit_history()` with eras it has just scrubbed
+  while the next open answers differently.
+
+- **Tested by the plateau, across two consecutive session boundaries**, plus a
+  data-survival pass (every key readable, `verify_integrity` clean, after the
+  retirement and again after a reopen) and both edges of the window. A
+  break-check that disabled the retirement first PASSED the anchor test,
+  because it read the list from the session that had just pruned it in memory;
+  the test reads read-only now, which is what the disk actually holds.
+
 ### Fixed — report9 HV-13: opening a large container cost 440 MiB
 
 - **Measured, not estimated.** The audit put the open scan's peak at "256+ MiB
