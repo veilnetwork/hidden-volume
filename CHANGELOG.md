@@ -12,6 +12,26 @@ format.
 
 ## [Unreleased]
 
+### Fixed — report9 HV-12: a fast open could not be interrupted while it ran
+
+- **Neither fast-open phase polled the cancel token.** `try_fast_scan_inner`
+  takes one and passed it to neither the reverse superblock scan nor the
+  checkpoint-chain walk, so a caller who cancelled waited out up to
+  `REVERSE_SCAN_BUDGET` reads plus a `MAX_CHECKPOINT_CHAIN` walk — each a read
+  and a trial-decrypt — before the selective scan's own poll surfaced it. The
+  full scan's documentation promises a check every `CANCEL_POLL_PERIOD` slots;
+  the fast path quietly did not keep it.
+
+  The reverse scan now polls at the same cadence. The chain walk polls every
+  hop rather than every 64: a hop is far more expensive than a slot read and
+  the chain is short, so the check costs nothing.
+
+- The guard is a SOURCE check and says why. Cancelling produced the same
+  outcome either way — only the wait changed — and on the machine that runs
+  this suite that wait is milliseconds, so a timing assertion would measure
+  nothing and be flaky when it did. What can rot is the wiring: a phase that
+  stops taking the token, or takes it and never looks.
+
 ### Measured — report9 HV-13: what the open-scan cap costs in memory
 
 - **27.5 bytes of peak heap per owned slot**, so ≈ 440 MiB at
