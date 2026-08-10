@@ -12,6 +12,48 @@ format.
 
 ## [Unreleased]
 
+### Fixed — report9 HV-07: the reentrancy warning pointed at an exit that was not there, and named the wrong lock
+
+- **`AsyncSpace::run`'s deadlock warning told the reader to "use the typed
+  `&self` methods (`space.get(...)`, `space.put(...)`, `space.commit(...)`)
+  which serialize on their own outside the closure".** `AsyncSpace` has no such
+  methods — `create`, `open`, `run`, the abandonment accessors and the log-page
+  streams are the whole surface. The one escape route the warning offered did
+  not exist, so a reader who took it seriously went looking, found nothing, and
+  came back with the warning's weight spent. (The uniffi `Space` object does
+  have `get` / `commit`; a different type in a different crate is the likely
+  source of the mix-up.) It now says the true fix: do the whole job in one
+  closure — `f` already holds `&mut Space`.
+
+- **The same block claimed the mutex is what serializes concurrent calls, and
+  it is not.** `OpLedger::default()` is a ONE-permit semaphore acquired before
+  `spawn_blocking`, shared across clones; the non-reentrant mutex inside the
+  closure is a second layer that in practice is never contended. This matters
+  to a reader, not only to a pedant: a nested call hangs on the permit and
+  never reaches the mutex, so the mechanism the warning describes is not the
+  one that traps them.
+
+- **The recorded reason for rejecting a `try_lock` guard was never measured,
+  and does not hold.** Audit pass 19 round 6 wrote that `try_lock` "would
+  regress `concurrent_runs_serialize_via_mutex` — 10 concurrent legit `run`
+  calls would fail-fast instead of serializing". Measured now: with the mutex
+  swapped for a fail-fast `try_lock`, every test in `async_basic.rs` still
+  passes, because those ten calls never contend for the mutex. The decision
+  stands on a reason that survives — `try_lock` would not detect reentrancy
+  either, since the nested call hangs one layer earlier — and the false
+  reasoning is corrected in place rather than dropped.
+
+- **`concurrent_runs_serialize_via_mutex` did not check what its name said.**
+  It counted that ten calls returned and ten keys landed, both of which a
+  fully parallel implementation also satisfies. Renamed
+  `concurrent_container_runs_never_overlap` and given the measurement:
+  peak concurrency observed inside the closure, asserted to be one. Its new
+  `AsyncSpace` twin `concurrent_space_runs_never_overlap` does the same for
+  the handle whose warning is the loud one, and
+  `the_overlap_detector_sees_overlap_when_it_is_there` is the positive control
+  — two unsynchronized blocking tasks that must register as concurrent, so a
+  green peak reading means "serialized" and not "the instrument is blind".
+
 ### Fixed — report9 HV-08: the format reference described a checkpoint nobody writes
 
 - **`docs/{en,ru}/reference/format.md` carried the pre-pool 28-byte checkpoint
