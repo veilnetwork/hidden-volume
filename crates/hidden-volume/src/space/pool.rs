@@ -246,6 +246,28 @@ impl DecoyPool {
     }
 
     /// The `rank`-th set bit (0-based), or `None` if there are fewer.
+    ///
+    /// A linear scan from word zero, so a draw costs O(capacity in words) and
+    /// not O(pool size) — the cost is set by how WIDE the file is, not by how
+    /// much is in the pool. report9 HV-05 reads that as a denial-of-service
+    /// surface; it is bounded, and the bound is small enough to leave alone:
+    ///
+    /// | slots (file size) | per draw | 64 draws |
+    /// |---|---|---|
+    /// | 100 K (≈400 MiB) | 2.6 µs | 0.17 ms |
+    /// | 1 M (≈4 GiB) | 6.8 µs | 0.43 ms |
+    /// | 16 M (64 GiB, `MAX_OPEN_SCAN_CHUNKS`) | 84 µs | 5.4 ms |
+    ///
+    /// Sixty-four draws is a commit that reuses thirty-two slots and churns
+    /// thirty-two. So the worst case this format can be pushed to costs a
+    /// commit about five milliseconds, on a container at the hard cap.
+    ///
+    /// A hierarchical popcount index would cut that by a factor of sixty, and
+    /// it would put a second, derived copy of the membership beside the
+    /// bitmap. This is the structure where a wrong answer means the allocator
+    /// hands out a LIVE slot — data loss, silently, on the next commit. Five
+    /// milliseconds on a 64 GiB container is not worth that trade. Re-measure
+    /// with `measure_select_cost` before revisiting.
     fn select(&self, mut rank: usize) -> Option<u64> {
         for (w, &word) in self.words.iter().enumerate() {
             let count = word.count_ones() as usize;
@@ -323,6 +345,43 @@ mod tests {
              gone from the pool for the life of the container"
         );
         assert_eq!(p.len(), slots.len(), "len disagrees with membership");
+    }
+
+    /// What a draw costs at the capacities this format allows — the evidence
+    /// behind the table on [`DecoyPool::select`], kept runnable rather than
+    /// only written down.
+    ///
+    /// `#[ignore]`d because it is a measurement and not an assertion: timings
+    /// on a shared CI runner make terrible gates, and a flaky red is worse
+    /// than a number nobody reads. Run it with
+    /// `cargo test -p hidden-volume --release measure_select_cost -- --ignored --nocapture`
+    /// before changing the cap, the bitmap, or the draw.
+    #[test]
+    #[ignore]
+    fn measure_select_cost() {
+        for (capacity, entries) in [
+            (100_000u64, 5_000usize),
+            (1_000_000, 20_000),
+            (16_000_000, 20_000),
+            (16_000_000, 1_000_000),
+        ] {
+            let step = capacity / entries as u64;
+            let slots: Vec<u64> = (0..entries as u64).map(|i| i * step).collect();
+            let mut p = DecoyPool::from_recorded(slots, capacity);
+            let t = std::time::Instant::now();
+            // 64 draws: a commit reusing 32 slots and churning 32.
+            let mut sink = 0u64;
+            for _ in 0..64 {
+                sink ^= p.sample_distinct(1).unwrap()[0];
+            }
+            let dt = t.elapsed();
+            println!(
+                "capacity={capacity} entries={entries} words={} 64 draws in {:?} ({:?}/draw) sink={sink}",
+                (capacity / 64) as usize,
+                dt,
+                dt / 64
+            );
+        }
     }
 
     #[test]
