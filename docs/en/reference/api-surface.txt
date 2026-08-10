@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-10T11:35:37Z
+# Captured: 2026-08-10T13:35:50Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -163,12 +163,13 @@ lib.rs:  171:pub use error::{Error, Result};
 lib.rs:  172:pub use multi::MultiSpace;
 lib.rs:  173:pub use open::MAX_OPEN_SCAN_CHUNKS;
 lib.rs:  174:pub use space::Space;
-lib.rs:  178:pub const CHUNK_SIZE: usize = 4096;
-lib.rs:  204:pub const HEADER_PARAMS_OFFSET: usize = 32;
-lib.rs:  207:pub const HEADER_PARAMS_LEN: usize = 16;
-lib.rs:  213:pub const NONCE_LEN: usize = 24;
-lib.rs:  216:pub const TAG_LEN: usize = 16;
-lib.rs:  219:pub const PLAINTEXT_LEN: usize = CHUNK_SIZE - NONCE_LEN - TAG_LEN;
+lib.rs:  206:pub const ANCHOR_HORIZON: u64 = 1024;
+lib.rs:  210:pub const CHUNK_SIZE: usize = 4096;
+lib.rs:  236:pub const HEADER_PARAMS_OFFSET: usize = 32;
+lib.rs:  239:pub const HEADER_PARAMS_LEN: usize = 16;
+lib.rs:  245:pub const NONCE_LEN: usize = 24;
+lib.rs:  248:pub const TAG_LEN: usize = 16;
+lib.rs:  251:pub const PLAINTEXT_LEN: usize = CHUNK_SIZE - NONCE_LEN - TAG_LEN;
 multi.rs:  30:pub struct MultiSpace {
 multi.rs:  50:    pub fn new(container: Container) -> Self {
 multi.rs:  60:    pub fn derive_space_keys(&self, password: &[u8]) -> Result<SpaceKeys> {
@@ -277,8 +278,8 @@ space/superblock.rs:  84:    pub fn is_valid_encoded_len(len: usize) -> bool {
 space/superblock.rs:  100:    pub fn encode(&self) -> Vec<u8> {
 space/superblock.rs:  130:    pub fn decode(bytes: &[u8]) -> Result<Self> {
 space/vacuum.rs:  135:    pub fn vacuum_orphans(&mut self) -> Result<usize> {
-space/vacuum.rs:  291:    pub fn vacuum_after_open(&mut self) -> Result<usize> {
-space/vacuum.rs:  354:    pub fn vacuum_data_batches(&mut self) -> Result<usize> {
+space/vacuum.rs:  358:    pub fn vacuum_after_open(&mut self) -> Result<usize> {
+space/vacuum.rs:  421:    pub fn vacuum_data_batches(&mut self) -> Result<usize> {
 tx/commit.rs:  39:pub const MAX_NAMESPACES_PER_TX: usize = (PAYLOAD_CAP - 2 - 32) / (1 + 1 + 8 + 32);
 tx/commit.rs:  54:pub enum NamespaceKind {
 tx/commit.rs:  68:    pub fn as_u8(self) -> u8 {
