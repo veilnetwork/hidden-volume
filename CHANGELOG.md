@@ -12,6 +12,36 @@ format.
 
 ## [Unreleased]
 
+### Measured — report9 HV-13: what the open-scan cap costs in memory
+
+- **27.5 bytes of peak heap per owned slot**, so ≈ 440 MiB at
+  `MAX_OPEN_SCAN_CHUNKS`. The audit estimated "256+ MiB" from an assumed
+  per-slot cost; measured, it is worse than that, and well above the 8 bytes
+  per owned chunk the streaming-scan note says is retained. The extra is
+  transient — the parallel reduce holds a second copy of an `owned_slots` half
+  while it merges, and `commit_history` adds 8 per commit.
+
+  Read with its fixture: that measurement commits once per iteration, close to
+  a worst case for slots-per-commit. A container that reached the cap by
+  holding DATA rather than history has more slots per commit and a lower
+  figure. What it establishes is the order — tens of bytes per slot, hundreds
+  of megabytes at the cap — so a device that can hold a 64 GiB container
+  cannot necessarily open one. Recorded on the constant.
+
+- `tests/open_peak_memory.rs` keeps it honest, with an upper bound of 128
+  bytes per slot (an order below retaining one payload per chunk) and a
+  non-vacuity floor of 4. The floor is the part worth having: measured through
+  `open_space`, Argon2's eight-mebibyte buffer dominates both fixtures and the
+  slope comes out at 0.0 bytes per slot — a green proving only that the KDF is
+  bigger than the thing under test. The first version of this test did exactly
+  that. Keys are now derived outside the measured region, and the floor fails
+  if anything masks the per-slot term again.
+
+- Not changed: lowering it means replacing `SpaceState::owned_slots`
+  (`Vec<u64>`) with the bitmap the crate already has for the vacuum
+  (`SlotSet`, one bit per slot). That touches commit, vacuum and reuse
+  together, and it is its own pass rather than a rider on a measurement.
+
 ### Fixed — report9 HV-09 / HV-10: the destructive flows now refuse an era they cannot read
 
 A superblock NEWER than the one an open settled on can decrypt under our key
