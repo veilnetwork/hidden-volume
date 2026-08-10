@@ -610,6 +610,7 @@ fn find_latest_superblock_reverse(
     keys: &SpaceKeys,
     container_id: &[u8; 32],
     total: u64,
+    cancel: Option<&CancelToken>,
     constant_time: bool,
 ) -> Result<Option<Superblock>> {
     if total == 0 {
@@ -619,8 +620,21 @@ fn find_latest_superblock_reverse(
     let mut sb_candidates: std::collections::BTreeMap<u64, Vec<u8>> =
         std::collections::BTreeMap::new();
     let mut slot = total;
+    let mut examined: u64 = 0;
     while slot > lo {
         slot -= 1;
+        // Same cadence as the full scan. This phase reads and trial-decrypts
+        // up to `REVERSE_SCAN_BUDGET` slots, and it used to do so with no
+        // cancel check at all — so a caller who cancelled during a fast open
+        // waited out the whole budget, which is precisely the promise the
+        // scan's own documentation makes and the fast path quietly broke
+        // (report9 HV-12).
+        if let Some(token) = cancel
+            && examined.is_multiple_of(CANCEL_POLL_PERIOD)
+        {
+            token.check()?;
+        }
+        examined += 1;
         let chunk = container.read_slot(slot)?;
         let pt = match try_decrypt_with_options(keys, container_id, slot, &chunk, constant_time) {
             Some(pt) => pt,
@@ -668,6 +682,7 @@ fn read_checkpoint_chain(
     container_id: &[u8; 32],
     head: u64,
     total: u64,
+    cancel: Option<&CancelToken>,
     constant_time: bool,
 ) -> Result<Option<RecordedCheckpoint>> {
     let mut owned: Vec<u64> = Vec::new();
@@ -676,6 +691,13 @@ fn read_checkpoint_chain(
     let mut cur = head;
     let mut hops: u64 = 0;
     while cur != NO_RECORD {
+        // Every hop is a read plus a trial-decrypt, and the chain may run to
+        // `MAX_CHECKPOINT_CHAIN` of them (report9 HV-12). Checked per hop
+        // rather than every 64: a hop is far more expensive than a slot read,
+        // and the chain is short enough that the check costs nothing.
+        if let Some(token) = cancel {
+            token.check()?;
+        }
         hops += 1;
         if hops > MAX_CHECKPOINT_CHAIN || cur >= total {
             return Ok(None);
@@ -748,6 +770,7 @@ fn try_fast_scan_inner(
         keys,
         container_id,
         total,
+        cancel,
         constant_time,
     )? {
         Some(sb) => sb,
@@ -765,6 +788,7 @@ fn try_fast_scan_inner(
         container_id,
         head_sb.checkpoint_slot,
         total,
+        cancel,
         constant_time,
     )? {
         Some(x) => x,
@@ -1442,5 +1466,48 @@ mod hv13_budget_tests {
             "read side said {read_side:?}, write side said {write_side:?}"
         );
         assert_eq!(format!("{read_side}"), format!("{write_side}"));
+    }
+}
+
+#[cfg(test)]
+mod hv12_cancel_reach_tests {
+    /// Both fast-open phases must take the cancel token and poll it.
+    ///
+    /// A SOURCE check, and the reason is worth stating. Cancelling during a
+    /// fast open produced the same OUTCOME either way — phase A returned, and
+    /// the selective scan's own poll surfaced the cancel a moment later. What
+    /// changed was how long the caller waited: up to `REVERSE_SCAN_BUDGET`
+    /// reads plus a `MAX_CHECKPOINT_CHAIN` walk, each a read and a
+    /// trial-decrypt. On the machine that runs this suite that is
+    /// milliseconds, so a timing assertion here would measure nothing and
+    /// would be flaky when it did; the promise is about a phone with a slow
+    /// disk (report9 HV-12).
+    ///
+    /// What can rot is the wiring: a phase that stops taking the token, or
+    /// takes it and never looks. That is a fact about this file.
+    #[test]
+    fn the_fast_open_phases_take_and_poll_the_cancel_token() {
+        let source = include_str!("mod.rs");
+        for name in [
+            "fn find_latest_superblock_reverse(",
+            "fn read_checkpoint_chain(",
+        ] {
+            let start = source
+                .find(name)
+                .unwrap_or_else(|| panic!("{name} moved — this guard no longer watches it"));
+            let body = &source[start..];
+            let end = body[1..].find("\nfn ").map_or(body.len(), |i| i + 1);
+            let body = &body[..end];
+            assert!(
+                body.contains("cancel: Option<&CancelToken>"),
+                "{name} no longer takes a cancel token, so a fast open cannot \
+                 be interrupted while it runs"
+            );
+            assert!(
+                body.contains("token.check()?"),
+                "{name} takes a cancel token and never polls it — the caller \
+                 waits out the whole phase"
+            );
+        }
     }
 }
