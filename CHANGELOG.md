@@ -12,6 +12,38 @@ format.
 
 ## [Unreleased]
 
+### Fixed — report9 #1: reuse is budgeted so the churn can always be funded
+
+- **A write episode reuses at most the share of the pool whose churn the
+  rest can fund**, `pool - pool / (1 + CHURN_PER_REUSE)` (`reuse_floor_for`),
+  declared per episode in `SpaceState::reuse_floor`. Reuse and churn draw
+  from the same pool and reuse goes first: `take` removes, then
+  `sample_distinct` samples what is left — and it returns `n.min(len)`, so
+  it truncates in silence. A commit that reused the pool down to nothing
+  churned nothing, returned `Ok`, and `churn_count` simply stopped tracking
+  `reuse_count`. A small pool is not exotic; it is what a container has
+  right after its first `vacuum_orphans`.
+
+- **The budget is checked where a slot leaves the pool, not in
+  `reuse_permitted`.** That predicate answers a question about the ERA, which
+  is why `publish_superblock` reads it once before it burns the seq and hands
+  one answer to every replica. The budget is a resource the placements spend
+  as they go, and the same snapshot spent it once too often — measured at
+  five reuses against four churns on a pool of nine. `reuse_budget_available`
+  is therefore separate and lives in `place_chunk_with`.
+
+- **`write_self_heal_checkpoint` declares its own budget: none.** `commit_tx`
+  is the only caller of `churn_decoys`, so the pool slots that path took for
+  its Superblock replicas were reuse no churn ever covered — three of them in
+  one round of the new guard. It now leaves the pool alone and pays an append
+  per replica. Not in report9; found while fixing #1.
+
+- New `every_write_path_churns_what_it_reuses` guards the invariant behind
+  all three — and behind report9 #2 — structurally: it drives commits,
+  `vacuum_orphans` and checkpoints, and checks `churn_count == reuse_count`
+  after every step, so a future path that reuses without churning fails
+  whether or not anyone writes a test for it.
+
 ### Fixed — report9 #2: a padding failure no longer costs a commit its churn
 
 - **`commit_tx` attempts padding and churn on independent error paths.**

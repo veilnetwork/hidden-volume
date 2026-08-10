@@ -237,6 +237,17 @@ impl<'f> Space<'f> {
         // how many decoys the churn re-randomizes afterwards. Sampled
         // here, before the first chunk is placed.
         let reuse_before = self.state.reuse_count;
+        // And how many it is ALLOWED to take, which is not the whole pool.
+        // Reuse and churn draw from the same pool and reuse goes first, so an
+        // unbudgeted commit could `take` the pool down to nothing and then ask
+        // `sample_distinct` for victims that are no longer there — and that
+        // call truncates in silence. The commit still returned `Ok`; the churn
+        // simply did not happen. Reserving the churn's share before the first
+        // chunk is placed is what keeps "one write process, not two" true on a
+        // small pool, which is what a container has right after its first
+        // `vacuum_orphans`. Past the budget the commit appends instead, and
+        // pays the growth DESIGN §9.1 already prices.
+        self.state.reuse_floor = super::reuse_floor_for(self.state.pool.len());
 
         // Phase 0: Flush each non-empty log buffer to a DataBatch chunk,
         // then route resulting batch_slot pointers as KV puts. After

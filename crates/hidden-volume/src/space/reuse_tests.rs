@@ -22,7 +22,7 @@ use crate::container::ContainerOptions;
 use crate::crypto::kdf::Argon2Params;
 use crate::padding::PaddingPolicy;
 use crate::space::index::Namespace;
-use crate::{Container, Error};
+use crate::{Container, Error, Space};
 
 fn scratch() -> std::path::PathBuf {
     let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -414,6 +414,113 @@ fn a_padding_failure_does_not_cost_the_commit_its_churn() {
         churned, reused,
         "padding failed and took the churn with it: {reused} slots reused, \
          {churned} decoys churned"
+    );
+}
+
+/// A pool too small to fund the churn must bound the reuse, not the churn.
+///
+/// Reuse and churn draw from the SAME pool, and reuse goes first: it `take`s
+/// slots out, the churn then samples what is left. `sample_distinct` returns
+/// `n.min(len)` — it truncates in silence — so a commit that reused the pool
+/// down to nothing churned nothing, `commit_tx` returned `Ok`, and
+/// `churn_count` simply stopped tracking `reuse_count` with nothing to say so.
+///
+/// The end state is the same disk the padding-failure case leaves: real writes
+/// in reused slots, no decoy moved, every changed offset below the tail live.
+/// A small pool is not an exotic condition either — it is what a container has
+/// right after its first `vacuum_orphans`.
+///
+/// So the budget is reserved before the reuse: a commit reuses at most the
+/// share of the pool whose churn the rest can still fund, and appends past
+/// that. Growing the file slightly is the cost; DESIGN §9.1 already prices it
+/// ("the anonymity set for a reused slot is the pool, not the file").
+#[test]
+fn a_small_pool_bounds_the_reuse_and_not_the_churn() {
+    let path = scratch();
+    let _c = Cleanup(path.clone());
+    build_with_pool(&path, 40);
+
+    let mut c = Container::open(&path).unwrap();
+    let mut s = c.open_space(b"pw").unwrap();
+
+    // Starve the pool down to two slots. Taken rather than staged by a
+    // smaller fixture so the size is exact: at two, one reuse is fundable
+    // and a second is not, which is the boundary the budget has to find.
+    while s.state.pool.len() > 2 {
+        s.state.pool.take().unwrap().unwrap();
+    }
+    assert_eq!(s.state.pool.len(), 2);
+
+    let mut tx = s.begin_tx();
+    tx.put(Namespace::SETTINGS, b"k0", b"changed").unwrap();
+    tx.commit().unwrap();
+
+    let reused = s.state.reuse_count;
+    let churned = s.state.churn_count;
+    // Not vacuous: a budget that simply banned reuse on a small pool would
+    // satisfy the equality below while giving up the feature entirely.
+    assert!(
+        reused > 0,
+        "the budget stopped reuse altogether on a pool of two"
+    );
+    assert_eq!(
+        churned, reused,
+        "the pool could not fund the churn and the reuse went ahead anyway: \
+         {reused} slots reused, {churned} decoys churned"
+    );
+}
+
+/// The invariant behind both of the cases above, guarded structurally: after
+/// every write this space can be asked to do, the churn matches the reuse.
+///
+/// The two cases each found one way to break it — a padding failure that took
+/// the churn with it, a pool too small to fund one — and a third was sitting
+/// in `write_self_heal_checkpoint`, which reused pool slots for its Superblock
+/// replicas while `commit_tx` remained the only caller of `churn_decoys`. All
+/// three leave the same disk. Rather than add a fourth test the next time,
+/// this one drives a mixed workload and checks the equality after every step,
+/// so any new path that reuses without churning fails here whether or not
+/// anyone thought to test it.
+#[test]
+fn every_write_path_churns_what_it_reuses() {
+    let path = scratch();
+    let _c = Cleanup(path.clone());
+    build_with_pool(&path, 40);
+
+    let mut c = Container::open(&path).unwrap();
+    let mut s = c.open_space(b"pw").unwrap();
+
+    let check = |s: &Space<'_>, step: &str| {
+        assert_eq!(
+            s.state.churn_count, s.state.reuse_count,
+            "after {step}: {} slots reused, {} decoys churned",
+            s.state.reuse_count, s.state.churn_count
+        );
+    };
+
+    for round in 0..6 {
+        for i in 0..4 {
+            let mut tx = s.begin_tx();
+            tx.put(
+                Namespace::SETTINGS,
+                format!("r{round}k{i}").as_bytes(),
+                b"v",
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            check(&s, &format!("commit r{round}i{i}"));
+        }
+        s.vacuum_orphans().unwrap();
+        check(&s, &format!("vacuum_orphans r{round}"));
+        s.write_self_heal_checkpoint().unwrap();
+        check(&s, &format!("checkpoint r{round}"));
+    }
+
+    // Non-vacuous: an equality between two counters that both stayed at zero
+    // would hold against a writer that stopped reusing entirely.
+    assert!(
+        s.state.reuse_count > 0,
+        "nothing was reused, so the equality proves nothing"
     );
 }
 
