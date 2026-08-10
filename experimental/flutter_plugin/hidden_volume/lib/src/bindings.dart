@@ -252,8 +252,7 @@ const Map<String, int> _methodChecksums = <String, int>{
   'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_add_space': 26649,
   'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_create': 32815,
   'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_open': 49007,
-  'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_open_with_keys':
-      38449,
+  'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_open_with_keys': 38449,
   'uniffi_hidden_volume_ffi_checksum_func_change_passwords': 12821,
   'uniffi_hidden_volume_ffi_checksum_func_compact_known': 9495,
   'uniffi_hidden_volume_ffi_checksum_func_header_info': 40142,
@@ -261,24 +260,18 @@ const Map<String, int> _methodChecksums = <String, int>{
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_commit_seq': 20495,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_count': 7841,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_get': 65186,
-  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_iter_log_range':
-      14894,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_iter_log_range': 14894,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_kv_keys': 32138,
-  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_kv_keys_page':
-      65359,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_kv_keys_page': 65359,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_open_space': 38306,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_read_log': 27036,
-  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_set_padding_policy':
-      49029,
-  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_space_count':
-      64423,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_set_padding_policy': 49029,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_space_count': 64423,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_space_keys': 15090,
-  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_vacuum_data_batches':
-      40066,
-  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_vacuum_space':
-      35449,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_vacuum_data_batches': 40066,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_vacuum_space': 35449,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_commit': 59696,
-  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_commit_history': 13502,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_commit_history': 53412,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_commit_seq': 53179,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_count': 3982,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_erase_namespace': 7530,
@@ -288,16 +281,12 @@ const Map<String, int> _methodChecksums = <String, int>{
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_kv_keys_page': 45476,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_list_namespaces': 63954,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_read_log': 59826,
-  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_set_padding_policy':
-      6532,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_set_padding_policy': 6532,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_space_keys': 38453,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_stats': 53120,
-  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_vacuum_after_open':
-      23213,
-  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_vacuum_data_batches':
-      48307,
-  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_verify_integrity':
-      55085,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_vacuum_after_open': 23213,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_vacuum_data_batches': 48307,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_verify_integrity': 55085,
 };
 // END GENERATED CHECKSUMS
 
