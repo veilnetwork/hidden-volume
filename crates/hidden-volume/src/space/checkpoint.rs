@@ -498,6 +498,59 @@ impl<'f> Space<'f> {
     }
 }
 
+/// The on-disk checkpoint header, and the documents that describe it.
+///
+/// report9 HV-08: `docs/{en,ru}/reference/format.md` carried a 28-byte header
+/// with one list long after the pool list and `pool_count` had arrived with
+/// slot reuse. Nothing was wrong with the code; the format reference is the
+/// contract an independent implementation is written against, and an
+/// implementation written against that one mis-parsed every checkpoint this
+/// writer produces.
+///
+/// Checked against the docs rather than only stated here, because a comment
+/// beside the constant is exactly what was already there while the reference
+/// said something else.
+#[cfg(test)]
+mod format_doc_agreement_tests {
+    use super::CP_HEADER_LEN;
+
+    fn doc(path: &str) -> String {
+        let full = format!("{}/../../{path}", env!("CARGO_MANIFEST_DIR"));
+        std::fs::read_to_string(&full).unwrap_or_else(|e| panic!("{full}: {e}"))
+    }
+
+    #[test]
+    fn the_header_is_thirty_two_bytes() {
+        assert_eq!(
+            CP_HEADER_LEN, 32,
+            "the header changed size — every offset in format.md moved with it"
+        );
+    }
+
+    #[test]
+    fn both_format_references_describe_the_header_that_is_written() {
+        for path in ["docs/en/reference/format.md", "docs/ru/reference/format.md"] {
+            let text = doc(path);
+            for needle in [
+                "offset 24..28   owned_count",
+                "offset 28..32   pool_count",
+                "offset 32..",
+            ] {
+                assert!(
+                    text.contains(needle),
+                    "{path} does not describe `{needle}` — an implementation \
+                     written from it will mis-parse every checkpoint this \
+                     writer produces (report9 HV-08)"
+                );
+            }
+            assert!(
+                !text.contains("offset 28..     owned["),
+                "{path} still carries the pre-pool 28-byte header"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -12,6 +12,32 @@ format.
 
 ## [Unreleased]
 
+### Fixed — report9 HV-08: the format reference described a checkpoint nobody writes
+
+- **`docs/{en,ru}/reference/format.md` carried the pre-pool 28-byte checkpoint
+  header**, with one `count` and one `owned[]` list, long after `pool_count`
+  and the pool list arrived with slot reuse. The real header is 32 bytes and
+  the chunk carries two lists sharing one budget. Nothing was wrong with the
+  code; the format reference is the contract an independent implementation is
+  written against, and one written from it mis-parsed every checkpoint this
+  writer produces.
+
+  Also documented there now: the pool-drift refresh trigger (the tail alone
+  cannot carry the pool — the better reuse works, the less the tail grows),
+  and that a Checkpoint chunk never comes from the pool.
+
+- **The threat model still opened with "append-only"**, in both languages,
+  which DESIGN §9.1 lifted. Restated as `Inv-W1` says it: the writer touches
+  only a slot unreachable from any superblock a reopen could select — not
+  only the end of the file. The same wording in the superblock-recovery
+  section is gone with it; last-wins within a seq holds on slot order, not on
+  slots being append-only.
+
+- `format_doc_agreement_tests` reads both references and fails if either
+  stops describing the header that is written. A comment beside the constant
+  is exactly what was already there while the reference said something else.
+
+
 ### Measured — report9 HV-05: what a pool draw costs, and why the scan stays
 
 - `DecoyPool::select` is a linear scan from word zero, so a draw costs

@@ -31,7 +31,12 @@ If anything here conflicts with `DESIGN.md`, **`DESIGN.md` wins**.
 
 ### 1.1 What `hidden-volume` is
 
-A single-file, append-only, encrypted, multi-space storage primitive.
+A single-file, encrypted, multi-space storage primitive. It was
+append-only until DESIGN §9.1 lifted that: the writer now also reuses
+slots it has retired, and re-randomizes an equal number of decoys beside
+them so the two are one kind of event on disk. `Inv-W1` is the current
+statement of what the writer may touch — "only a slot unreachable from
+any superblock a reopen could select", not "only the end of the file".
 The core is sync, std-only Rust. An optional tokio wrapper
 (`hidden-volume-async`, currently feature-gated) and a `parallel-scan`
 feature exist but are not part of the security boundary — they call
@@ -249,8 +254,8 @@ state is exposed; no panic; no UB.
   default 3). Single-chunk corruption survives via remaining
   replicas.
 - Open path picks max-seq Superblock that AEAD-decrypts and ignores
-  the rest. Within one `seq` the LAST writer wins (highest slot; slots
-  are append-only). Two different payloads under one seq should not
+  the rest. Within one `seq` the LAST writer wins (highest slot). Two
+  different payloads under one seq should not
   exist — a publisher burns its `seq` before the first replica reaches
   the disk (`SpaceState::attempted_seq`), so a partially-published
   commit never hands that number out again — but a container written by
