@@ -440,9 +440,27 @@ offset 0..8     cp_seq         u64 LE   (superblock seq this checkpoint
 offset 8..16    cp_high_water  u64 LE   (slot_count at write time; every
                                          recorded owned slot is < this)
 offset 16..24   next_slot      u64 LE   (next Checkpoint chunk, or u64::MAX)
-offset 24..28   count          u32 LE   (owned-slot entries in THIS chunk)
-offset 28..     owned[count]   u64 LE each (sorted ascending)
+offset 24..28   owned_count    u32 LE   (owned-slot entries in THIS chunk)
+offset 28..32   pool_count     u32 LE   (decoy-pool entries in THIS chunk)
+offset 32..     owned[owned_count] u64 LE each (sorted ascending)
+                pool[pool_count]   u64 LE each (sorted ascending)
 ```
+
+The two lists share one per-chunk budget:
+`owned_count + pool_count <= (PAYLOAD_CAP - 32) / 8`.
+
+The `pool_count` field and the pool list arrived with slot reuse
+(DESIGN §9.1) and this document described the 28-byte header for longer
+than it was true, so an implementation written from it mis-parsed every
+checkpoint this writer produces (report9 HV-08).
+
+The **decoy pool** is the set of slots this space has retired and may
+allocate from again. It is recorded here for a reason worth stating: the
+un-checkpointed tail's growth is what triggers a refresh, reuse is what
+stops the file growing, and so the better reuse works the less often it
+would be written down. Without a drift trigger of its own a container
+that reused perfectly would checkpoint once and lose every slot it had
+freed at the next close.
 
 The chain head is pointed to by `Superblock.checkpoint_slot` (§4.1).
 A later open recovers the pointer from a recent superblock, reads the
@@ -477,6 +495,14 @@ amortized):
   **bumped seq** (same `root_slot` / `root_hash`, new
   `checkpoint_slot`) — a "checkpoint commit" — and scrubs the chain it
   supersedes.
+- It is also refreshed when the decoy pool's membership has drifted far
+  enough since it was last recorded, independently of the tail — see
+  above for why the tail alone cannot carry it.
+- The chain is built from APPENDED slots only. A Checkpoint chunk never
+  comes from the pool: a superseded chain's slots enter the pool, the
+  on-disk superblock still names the old chain's head until the new one
+  is published, and a checkpoint chunk landing on that head would make a
+  crash in between unrecoverable.
 
 **No `format_version` bump.** The checkpoint is an additive, optional
 v3 structure, not a new generation: the version is cryptographically
