@@ -296,6 +296,16 @@ impl<'f> Space<'f> {
         if !self.file.lock_mode.allows_writes() {
             return Err(Error::ReadOnly);
         }
+        // This episode reuses nothing. `commit_tx` is the only caller of
+        // `churn_decoys`, so a slot this path took out of the pool — the
+        // Superblock replicas below; the chain itself is `Checkpoint` and
+        // never reuses — would be a reused slot no churn ever covered, which
+        // is the snapshot oracle DESIGN §9.1 denies. The budget is declared
+        // here rather than inherited: `commit_tx` leaves its own floor
+        // standing, and a floor a later, growing pool has climbed back over
+        // would quietly re-permit exactly that.
+        self.state.reuse_floor = usize::MAX;
+
         let total = self.file.slot_count();
         let old_head = self.state.superblock.checkpoint_slot;
 

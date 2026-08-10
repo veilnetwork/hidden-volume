@@ -57,6 +57,18 @@ use self::walk::TreeWalk;
 /// every commit on a phone.
 pub(crate) const CHURN_PER_REUSE: usize = 1;
 
+/// Pool size at which a write episode must stop reusing, given the pool it
+/// started with — see [`SpaceState::reuse_floor`].
+///
+/// `pool - pool / (1 + CHURN_PER_REUSE)`: the episode reuses at most
+/// `pool / (1 + CHURN_PER_REUSE)` slots and leaves the rest to fund their
+/// churn. At `CHURN_PER_REUSE = 1` that is an even split, which is the same
+/// split the constant already describes on disk — `k` reused offsets and `k`
+/// churned ones. A pool of one funds nothing and reuses nothing.
+pub(crate) fn reuse_floor_for(pool_len: usize) -> usize {
+    pool_len - pool_len / (1 + CHURN_PER_REUSE)
+}
+
 #[cfg(test)]
 thread_local! {
     /// Chunks this thread has AEAD-opened through [`Space`], ever.
@@ -391,6 +403,24 @@ pub(crate) struct SpaceState {
     /// that silently stopped would leave every reuse standing alone in a
     /// snapshot diff with nothing to say so.
     pub churn_count: u64,
+    /// Pool size at which the current write episode must stop reusing, so
+    /// that what it reuses can still be churned. See [`reuse_floor_for`].
+    ///
+    /// A threshold, not a per-commit counter, for the reason
+    /// [`Self::reuse_count`] gives: a counter has to be reset somewhere, and
+    /// the somewhere is exactly where an early return skips it. A threshold an
+    /// early return leaves stale is re-derived by the next episode before it
+    /// reuses anything.
+    ///
+    /// `usize::MAX` — no reuse — is the default, and it is the answer for
+    /// every path that is not a commit. `commit_tx` is the only caller of
+    /// `churn_decoys`, so reuse anywhere else is reuse nothing churns: the
+    /// checkpoint publish used to take pool slots for its Superblock replicas
+    /// and leave them standing alone in a snapshot diff. Failing closed here
+    /// costs those replicas an append each and closes that with the budget.
+    ///
+    /// Runtime only; never persisted.
+    pub reuse_floor: usize,
 }
 
 // `keys` redacts itself and `roots_payload_cache` is [`Redacted`], so both
@@ -430,6 +460,7 @@ impl SpaceState {
             pool: DecoyPool::default(),
             reuse_count: 0,
             churn_count: 0,
+            reuse_floor: usize::MAX,
         }
     }
 }
@@ -1459,6 +1490,23 @@ impl<'f> Space<'f> {
             && self.state.attempted_seq <= self.state.superblock.seq
     }
 
+    /// Whether the churn budget still has room for one more reuse.
+    ///
+    /// Deliberately NOT part of [`Self::reuse_permitted`], and the difference
+    /// is the whole reason this is a separate predicate. That one answers a
+    /// question about the ERA, which is why `publish_superblock` reads it once
+    /// before it burns the seq and hands the same answer to every replica.
+    /// This one answers a question about a RESOURCE the placements are
+    /// spending as they go, and a snapshot of it goes stale the moment the
+    /// next chunk lands: it read `true` at the fourth reuse and was still
+    /// being honoured at the fifth, one past what the pool could churn.
+    ///
+    /// So it lives at the single point where a slot actually leaves the pool,
+    /// where there is nothing to snapshot.
+    fn reuse_budget_available(&self) -> bool {
+        self.state.pool.len() > self.state.reuse_floor
+    }
+
     /// AEAD-seal `payload` into a slot with the given kind and seq, and
     /// record the slot in `state.owned_slots`. Returns the slot index.
     ///
@@ -1511,7 +1559,7 @@ impl<'f> Space<'f> {
                 "test hook: forced chunk append failure",
             )));
         }
-        let reused = if allow_reuse {
+        let reused = if allow_reuse && self.reuse_budget_available() {
             self.state.pool.take()?
         } else {
             None
