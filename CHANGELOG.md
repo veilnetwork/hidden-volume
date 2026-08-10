@@ -12,6 +12,31 @@ format.
 
 ## [Unreleased]
 
+### Fixed — report9 #2: a padding failure no longer costs a commit its churn
+
+- **`commit_tx` attempts padding and churn on independent error paths.**
+  They were one `and_then` chain — padding first, churn nested inside
+  it — so any padding failure skipped the churn entirely. `commit_tx`
+  deliberately does not fail after the superblock is durable (audit
+  pass 18), so the caller saw `Ok`, only `last_padding_error` recorded
+  anything, and nothing said the churn had not run.
+
+  Why it matters beyond tidiness: that state is exactly the snapshot
+  pair DESIGN §9.1 exists to deny. The commit's real writes landed in
+  reused slots and no decoy moved, so every offset that changed below
+  the tail holds live data — the "live data is here" oracle the
+  slot-reuse prohibition used to prevent, back for one commit. And
+  padding fails on a full disk, so an adversary who can fill one can
+  ask for that commit rather than wait for it.
+
+  Both steps now run whatever the other did, one `fsync` still covers
+  them (the shared snapshot interval was the reason they were chained),
+  and the first failure is the one reported. Covered by
+  `a_padding_failure_does_not_cost_the_commit_its_churn`, which
+  provokes the failure through a new thread-local
+  `GARBAGE_APPEND_FAILS` — on the chained code it reports 5 slots
+  reused against 0 decoys churned.
+
 ### Breaking — slot reuse and decoy churn
 
 - **Retired slots are reused; the slot-reuse prohibition is gone.**
