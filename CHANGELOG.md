@@ -12,6 +12,51 @@ format.
 
 ## [Unreleased]
 
+### Fixed — report9 HV-13: opening a large container cost 440 MiB
+
+- **Measured, not estimated.** The audit put the open scan's peak at "256+ MiB
+  at the 64 GiB cap" from an assumed per-slot cost. `tests/open_peak_memory.rs`
+  measured it at **27.5 bytes of peak heap per owned slot** — 440 MiB at the
+  cap, worse than the estimate. A device that could hold a 64 GiB container
+  could not open one. It is **0.16 bytes per owned slot** now, ≈2.5 MiB at the
+  cap.
+
+- **`owned_slots` is a bitmap** (`space::slots::OwnedSet`), one bit per slot in
+  the file rather than eight bytes per owned chunk, and retained for the life
+  of the handle either way. It is smaller than the vector at any density above
+  one owned slot in sixty-four; an open that found almost nothing owned had
+  almost nothing to hold either. Deliberately NOT vacuum's `SlotSet`, which
+  refuses a slot beyond the file it was sized to: `place_chunk` writes to this
+  one as the file grows, and refusing there would forget a live chunk — the
+  failure mode that ends in a vacuum scrubbing data. Vacuum walks it one
+  bitmap word at a time, so the whole-list copy audit HV-03 removed does not
+  come back.
+
+- **Commit anchors collapse before the list doubles.** The list takes a push
+  per owned Superblock CHUNK and a commit publishes several replicas, so it
+  inflated several-fold over the distinct anchors it ends up holding: 4096
+  entries of capacity for 801 anchors on a fixture.
+
+- **The backward superblock hunt was the actual peak.** It kept every
+  distinct-seq candidate in its window — up to `REVERSE_SCAN_BUDGET` payloads
+  — while the three other candidate loops route through the capped helper.
+  This is the gap its own neighbouring comment warns about ("that duplication
+  is what let the audit's candidate cap ship in one backend only"), with a
+  fourth loop nobody counted. It runs on EVERY open, before the fast path
+  decides it cannot proceed, so every open paid it.
+
+- **The measurement now proves it can see.** An upper bound is satisfied by a
+  measurement that sees nothing, and an earlier version of this test reported
+  "0.0 bytes per slot" because Argon2's working buffer dominated it. The test
+  runs a second pass that deliberately holds eight bytes per owned slot — the
+  representation this removes — and requires the harness to report it.
+
+- **A gap closed on the way.** Replacing the anchor collapse with one that
+  DROPS anchors passed the entire workspace suite: every other fixture is too
+  small to reach the threshold. `tests/commit_history_reach.rs` now crosses it
+  and requires every commit on disk to leave an anchor — the host-app's
+  rollback evidence (DESIGN §11.2).
+
 ### Fixed — report9 HV-14: a checkpoint refresh recorded an empty decoy pool over the accumulated one
 
 - **The pool exists in one place only.** Nothing on disk but the checkpoint

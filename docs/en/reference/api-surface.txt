@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-10T11:02:23Z
+# Captured: 2026-08-10T11:35:37Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -180,7 +180,7 @@ multi.rs:  192:    pub fn len(&self) -> usize {
 multi.rs:  198:    pub fn is_empty(&self) -> bool {
 multi.rs:  204:    pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
 multi.rs:  225:    pub fn with_space<R>(&mut self, id: usize, f: impl FnOnce(&mut Space<'_>) -> R) -> Result<R> {
-open/mod.rs:  144:pub const MAX_OPEN_SCAN_CHUNKS: u64 = 16 * 1024 * 1024;
+open/mod.rs:  143:pub const MAX_OPEN_SCAN_CHUNKS: u64 = 16 * 1024 * 1024;
 padding/mod.rs:  54:pub enum PaddingPolicy {
 padding/mod.rs:  91:    pub const DEFAULT: Self = Self::BucketGrowth { bucket_chunks: 256 };
 padding/mod.rs:  113:    pub fn from_persisted_index(idx: u8) -> Self {
@@ -242,32 +242,33 @@ space/log_iter.rs:  344:    pub fn read_log(&mut self, namespace: Namespace, log
 space/mod.rs:  3:pub mod index;
 space/mod.rs:  4:pub mod log;
 space/mod.rs:  5:pub mod superblock;
-space/mod.rs:  100:pub struct HardeningFailure {
-space/mod.rs:  111:pub enum HardeningStep {
-space/mod.rs:  216:pub struct SpaceStats {
-space/mod.rs:  270:    pub fn total_entries(&self) -> usize {
-space/mod.rs:  300:    pub fn utilization_ratio(&self) -> f64 {
-space/mod.rs:  322:pub struct IntegrityReport {
-space/mod.rs:  560:pub struct Space<'f> {
-space/mod.rs:  699:    pub fn commit_seq(&self) -> u64 {
-space/mod.rs:  715:    pub fn space_keys(&self) -> SpaceKeys {
-space/mod.rs:  753:    pub fn commit_history(&self) -> &[u64] {
-space/mod.rs:  773:    pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
-space/mod.rs:  784:    pub fn padding_policy(&self) -> crate::padding::PaddingPolicy {
-space/mod.rs:  803:    pub fn last_hardening_error(&self) -> Option<&HardeningFailure> {
-space/mod.rs:  818:    pub fn last_publish_error(&self) -> Option<&crate::Error> {
-space/mod.rs:  827:    pub fn audit_owned_chunk_count(&self) -> usize {
-space/mod.rs:  843:    pub fn stats(&mut self) -> Result<SpaceStats> {
-space/mod.rs:  862:    pub fn begin_tx<'s>(&'s mut self) -> Tx<'s, 'f> {
-space/mod.rs:  875:    pub fn get(&mut self, namespace: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>> {
-space/mod.rs:  917:    pub fn list(&mut self, namespace: Namespace) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-space/mod.rs:  943:    pub fn list_keys(&mut self, namespace: Namespace) -> Result<Vec<Vec<u8>>> {
-space/mod.rs:  969:    pub fn list_keys_after(
-space/mod.rs:  1014:    pub fn list_after(
-space/mod.rs:  1041:    pub fn count(&mut self, namespace: Namespace) -> Result<usize> {
-space/mod.rs:  1094:    pub fn erase_namespace(&mut self, namespace: Namespace) -> Result<usize> {
-space/mod.rs:  1131:    pub fn list_namespaces(&mut self) -> Result<Vec<Namespace>> {
-space/mod.rs:  1143:    pub fn list_namespaces_with_kind(
+space/mod.rs:  102:pub struct HardeningFailure {
+space/mod.rs:  113:pub enum HardeningStep {
+space/mod.rs:  218:pub struct SpaceStats {
+space/mod.rs:  272:    pub fn total_entries(&self) -> usize {
+space/mod.rs:  302:    pub fn utilization_ratio(&self) -> f64 {
+space/mod.rs:  324:pub struct IntegrityReport {
+space/mod.rs:  562:pub struct Space<'f> {
+space/mod.rs:  701:    pub fn commit_seq(&self) -> u64 {
+space/mod.rs:  717:    pub fn space_keys(&self) -> SpaceKeys {
+space/mod.rs:  755:    pub fn commit_history(&self) -> &[u64] {
+space/mod.rs:  775:    pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
+space/mod.rs:  786:    pub fn padding_policy(&self) -> crate::padding::PaddingPolicy {
+space/mod.rs:  805:    pub fn last_hardening_error(&self) -> Option<&HardeningFailure> {
+space/mod.rs:  820:    pub fn last_publish_error(&self) -> Option<&crate::Error> {
+space/mod.rs:  829:    pub fn audit_owned_chunk_count(&self) -> usize {
+space/mod.rs:  845:    pub fn stats(&mut self) -> Result<SpaceStats> {
+space/mod.rs:  864:    pub fn begin_tx<'s>(&'s mut self) -> Tx<'s, 'f> {
+space/mod.rs:  877:    pub fn get(&mut self, namespace: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>> {
+space/mod.rs:  919:    pub fn list(&mut self, namespace: Namespace) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+space/mod.rs:  945:    pub fn list_keys(&mut self, namespace: Namespace) -> Result<Vec<Vec<u8>>> {
+space/mod.rs:  971:    pub fn list_keys_after(
+space/mod.rs:  1016:    pub fn list_after(
+space/mod.rs:  1043:    pub fn count(&mut self, namespace: Namespace) -> Result<usize> {
+space/mod.rs:  1096:    pub fn erase_namespace(&mut self, namespace: Namespace) -> Result<usize> {
+space/mod.rs:  1133:    pub fn list_namespaces(&mut self) -> Result<Vec<Namespace>> {
+space/mod.rs:  1145:    pub fn list_namespaces_with_kind(
+space/slots.rs:  34:pub struct OwnedSet {
 space/superblock.rs:  30:pub const NO_RECORD: u64 = u64::MAX;
 space/superblock.rs:  37:pub struct Superblock {
 space/superblock.rs:  72:    pub const ENCODED_LEN: usize = 8 + 8 + 32;
@@ -276,8 +277,8 @@ space/superblock.rs:  84:    pub fn is_valid_encoded_len(len: usize) -> bool {
 space/superblock.rs:  100:    pub fn encode(&self) -> Vec<u8> {
 space/superblock.rs:  130:    pub fn decode(bytes: &[u8]) -> Result<Self> {
 space/vacuum.rs:  135:    pub fn vacuum_orphans(&mut self) -> Result<usize> {
-space/vacuum.rs:  285:    pub fn vacuum_after_open(&mut self) -> Result<usize> {
-space/vacuum.rs:  348:    pub fn vacuum_data_batches(&mut self) -> Result<usize> {
+space/vacuum.rs:  291:    pub fn vacuum_after_open(&mut self) -> Result<usize> {
+space/vacuum.rs:  354:    pub fn vacuum_data_batches(&mut self) -> Result<usize> {
 tx/commit.rs:  39:pub const MAX_NAMESPACES_PER_TX: usize = (PAYLOAD_CAP - 2 - 32) / (1 + 1 + 8 + 32);
 tx/commit.rs:  54:pub enum NamespaceKind {
 tx/commit.rs:  68:    pub fn as_u8(self) -> u8 {
