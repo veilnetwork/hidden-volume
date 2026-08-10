@@ -269,10 +269,14 @@ derivation на open.
 **Streaming memory** (v0.6): scan не аккумулирует расшифрованные plaintext'ы.
 За iteration живёт один ciphertext-чанк (4 KiB stack) и один Plaintext
 (≈4 KiB heap), оба умирают до следующей итерации. Из персистентного
-state'а копится только `owned_slots: Vec<u64>` (8 B/owned chunk),
-`commit_history: Vec<u64>` (8 B/Superblock после dedup), и payload
-текущего max-seq Superblock'а (~48 B). Итого — порядка 16 B на каждый
-owned chunk вне зависимости от размера контейнера. Это ~250× меньше,
+state'а копится только `owned_slots` (БИТОВАЯ КАРТА — один бит на слот
+файла, а не восемь байт на владеемый чанк; см. `space::slots`),
+`commit_history: Vec<u64>` (8 B на различающийся seq коммита, реплики
+схлопываются по ходу скана) и payload текущего max-seq Superblock'а
+(~48 B). Замерено сквозным тестом `tests/open_peak_memory.rs`: **0,16
+байта пика кучи на владеемый слот**, то есть ~2,5 МиБ на потолке в 16M
+слотов. Было 27,5 Б/слот — 440 МиБ на потолке, — пока `owned_slots`
+был `Vec<u64>` (report9 HV-13). Это ~250× меньше,
 чем хранить все Plaintext'ы во время сканирования; критично для слабых
 устройств с большими (мульти-GiB) контейнерами.
 
@@ -339,8 +343,15 @@ scrub. §12 API skeleton historical note фиксирует это вытесн�
   - Idempotent — повторный вызов без коммитов между ничего не делает.
   - **НЕ scrub'ит DataBatch chunks** (один batch может содержать ещё-живые записи,
     referenced by other log_ids — это домен v0.3 compaction который умеет batch repack).
-  - **НЕ scrub'ит старые Superblock/Commit chunks** — они нужны как fallback'и для
-    crash recovery в случае повреждения текущего Superblock'а. v0.3 compaction их сметает.
+  - **Отставляет пару «старый Superblock + его Commit chunk» для эр ниже
+    `commit_seq() - ANCHOR_HORIZON`** (1024). Внутри горизонта они остаются:
+    это fallback'и crash recovery и якоря `commit_history`. Пара неразрывна —
+    запасной Superblock без своего Commit хуже, чем никакого. Раньше не
+    отставлялись вовсе, и файл рос ~17 КБ на коммит без выхода на плато;
+    после горизонта владеемое выходит на плато, а рост падает до ~0,5 КБ
+    (report9, решение о горизонте). Глубина отката D2 не меняется: скан и так
+    рассматривает не больше 64 кандидатов. `compact_known` по-прежнему
+    сметает всё.
   - Trade-off: между commit'ом и следующим open'ом forensics с паролем может прочитать
     "удалённые" KV entries. Для типичного app-launch workflow окно невелико; для
     параноидального forward-secrecy host-app может вызвать `vacuum_orphans` явно после
