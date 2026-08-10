@@ -137,8 +137,8 @@ impl DecoyPool {
     /// slot that decrypts under our key is live-or-orphaned data, not a
     /// decoy, whatever the checkpoint said. Called once at open, with the
     /// scan's authoritative owned set.
-    pub(crate) fn subtract_owned(&mut self, owned: &[u64]) {
-        for &s in owned {
+    pub(crate) fn subtract_owned(&mut self, owned: &super::slots::OwnedSet) {
+        for s in owned.iter() {
             self.clear(s);
         }
     }
@@ -416,7 +416,7 @@ mod tests {
     #[test]
     fn owned_slots_leave_the_pool() {
         let mut p = DecoyPool::from_recorded(vec![1, 2, 3, 4, 5], 100);
-        p.subtract_owned(&[4, 2]);
+        p.subtract_owned(&[4u64, 2].into_iter().collect());
         assert_eq!(p.sorted(), vec![1, 3, 5]);
         assert_eq!(p.len(), 3);
     }

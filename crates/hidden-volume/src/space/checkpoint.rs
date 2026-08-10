@@ -174,19 +174,15 @@ pub(crate) struct CheckpointChunk {
 fn merge_carried_pool(
     live: Vec<u64>,
     carried: Vec<u64>,
-    owned: &[u64],
+    owned: &crate::space::slots::OwnedSet,
     high_water: u64,
 ) -> Vec<u64> {
-    debug_assert!(
-        owned.windows(2).all(|w| w[0] <= w[1]),
-        "owned must be sorted"
-    );
     if carried.is_empty() {
         return live;
     }
     let mut pool = live;
     pool.extend(carried);
-    pool.retain(|slot| *slot < high_water && owned.binary_search(slot).is_err());
+    pool.retain(|slot| *slot < high_water && !owned.contains(*slot));
     pool.sort_unstable();
     pool.dedup();
     pool
@@ -400,9 +396,11 @@ impl<'f> Space<'f> {
         // does not change slot_count (in-place overwrite), so `total`
         // sampled before the scrub is still the high-water.
         let cp_high_water = total;
-        let mut owned: Vec<u64> = self.state.owned_slots.clone();
-        owned.sort_unstable();
-        owned.dedup();
+        // The one place the set is materialized as eight bytes per slot: the
+        // record is encoded from it. Already ascending and duplicate-free by
+        // the set's construction, which is what the sort and dedup here used
+        // to guarantee.
+        let owned: Vec<u64> = self.state.owned_slots.to_sorted_vec();
         debug_assert!(
             owned.last().map(|&s| s < cp_high_water).unwrap_or(true),
             "owned slots must be below the checkpoint high-water"
@@ -414,7 +412,7 @@ impl<'f> Space<'f> {
         let pool: Vec<u64> = merge_carried_pool(
             self.state.pool.sorted(),
             carried_pool,
-            &owned,
+            &self.state.owned_slots,
             cp_high_water,
         );
         debug_assert!(
@@ -564,7 +562,7 @@ impl<'f> Space<'f> {
         if !scrubbed.is_empty() {
             self.file.fsync()?;
             let drop: std::collections::HashSet<u64> = scrubbed.into_iter().collect();
-            self.state.owned_slots.retain(|s| !drop.contains(s));
+            self.state.owned_slots.retain(|s| !drop.contains(&s));
             // A superseded chain is retired the same way a vacuumed orphan
             // is, so it joins the pool the same way (DESIGN §9.1). The
             // chain the caller is about to write does NOT come out of the
@@ -643,7 +641,7 @@ mod tests {
     /// after a reader subtracts its own scan.
     #[test]
     fn a_carried_slot_this_era_owns_is_not_recorded_as_reusable() {
-        let owned = vec![5u64, 9];
+        let owned = [5u64, 9].into_iter().collect();
         let pool = super::merge_carried_pool(vec![2], vec![5, 7, 9], &owned, 100);
         assert_eq!(pool, vec![2, 7], "a live slot was recorded as reusable");
     }
@@ -651,14 +649,14 @@ mod tests {
     /// And past the high-water: the record summarizes only what is below it.
     #[test]
     fn a_carried_slot_above_the_high_water_is_not_recorded() {
-        let pool = super::merge_carried_pool(vec![1], vec![3, 42], &[], 10);
+        let pool = super::merge_carried_pool(vec![1], vec![3, 42], &Default::default(), 10);
         assert_eq!(pool, vec![1, 3]);
     }
 
     /// Merged, not substituted, and deduplicated across the two halves.
     #[test]
     fn the_live_pool_and_the_carried_one_are_both_kept() {
-        let pool = super::merge_carried_pool(vec![4, 1], vec![1, 6], &[], 10);
+        let pool = super::merge_carried_pool(vec![4, 1], vec![1, 6], &Default::default(), 10);
         assert_eq!(pool, vec![1, 4, 6]);
     }
     use super::*;
@@ -852,7 +850,7 @@ mod tests {
     fn snapshot_readonly(path: &std::path::Path) -> StateSnap {
         let mut c = Container::open_readonly(path).unwrap();
         let mut s = c.open_space(b"pw").unwrap();
-        let mut owned = s.state.owned_slots.clone();
+        let mut owned = s.state.owned_slots.to_sorted_vec();
         owned.sort_unstable();
         let history = s.state.commit_history.clone();
         let seq = s.state.superblock.seq;

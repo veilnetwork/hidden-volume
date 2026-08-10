@@ -12,15 +12,16 @@
 //! parent buffer per `aead.open`); both are dropped before the next
 //! iteration. Across the whole scan we accumulate only:
 //!
-//! - `owned_slots: Vec<u64>` — 8 bytes per owned chunk.
-//! - the latest-seq Superblock's payload (≈48 bytes total).
-//! - `commit_history: Vec<u64>` — 8 bytes per *Superblock* chunk owned
-//!   (deduplicated to one per seq at the end).
+//! - `owned_slots` — one BIT per slot in the file ([`crate::space::slots`]).
+//! - up to [`MAX_SB_CANDIDATES`] Superblock payloads (≈48 bytes each).
+//! - `commit_history: Vec<u64>` — 8 bytes per distinct commit seq, with
+//!   replicas collapsed before the list doubles.
 //!
-//! That is ~16 bytes per owned chunk in the asymptotic limit (negligible
-//! on weak ARM with 4 GiB of containers); the previous implementation
-//! kept every Plaintext in memory for the duration of the scan
-//! (~4 KiB per owned chunk, ≈250× larger). See DESIGN §5.
+//! Measured end to end by `tests/open_peak_memory.rs`: **0.16 bytes of peak
+//! heap per owned slot**, which is ~2.5 MiB at [`MAX_OPEN_SCAN_CHUNKS`]. It
+//! was 27.5 bytes — 440 MiB at the cap — until report9 HV-13 replaced the
+//! owned-slot `Vec<u64>` with the bitmap, collapsed the anchor replicas, and
+//! capped the backward hunt's candidate window. See DESIGN §5.
 
 use crate::cancel::CancelToken;
 use crate::chunk::ChunkKind;
@@ -117,24 +118,22 @@ const CANCEL_POLL_PERIOD: u64 = 64;
 ///
 /// The audit put the open scan's peak at "256+ MiB at this cap" from an
 /// assumed per-slot cost. Measured instead, by
-/// `tests/open_peak_memory.rs`: **27.5 bytes of peak heap per owned slot**,
-/// which is ≈ 440 MiB at this cap — worse than the estimate, and well above
-/// the 8 bytes per owned chunk the streaming-scan note claims is retained.
-/// The extra is transient: the parallel reduce holds a second copy of an
-/// `owned_slots` half while it merges, and `commit_history` costs 8 more per
-/// commit.
+/// `tests/open_peak_memory.rs`, it was **27.5 bytes of peak heap per owned
+/// slot** — ≈440 MiB at this cap, worse than the estimate and far past what a
+/// phone has. A device that could hold a 64 GiB container could not open one.
+///
+/// It is **0.16 bytes per owned slot now**, ≈2.5 MiB at this cap. Three
+/// things carried the old figure: `owned_slots` was a `Vec<u64>` (eight bytes
+/// per owned chunk, retained for the life of the handle — a bitmap now, in
+/// `space::slots`); the commit-anchor list took a push per superblock
+/// CHUNK, so replicas inflated it before the final dedup; and the backward
+/// superblock hunt kept every distinct-seq candidate in its window, which runs
+/// on every open and was the actual peak.
 ///
 /// Read the extrapolation with its fixture in mind. That measurement commits
 /// once per iteration, so it is close to a worst case for slots-per-commit; a
 /// container that reached this cap by holding DATA rather than history has
-/// more slots per commit and a lower figure. What the number does establish is
-/// the order: tens of bytes per slot, hundreds of megabytes at the cap — so a
-/// device that can hold a 64 GiB container cannot necessarily open one.
-///
-/// Lowering it is a change of representation, not a tweak: `owned_slots` is a
-/// `Vec<u64>` in `SpaceState` itself, and the crate already has the structure
-/// that would replace it (`SlotSet`, one bit per slot, used by the vacuum).
-/// That touches commit, vacuum and reuse together and is its own pass.
+/// more slots per commit and a lower figure still.
 ///
 /// **Override is intentionally not in the v1.0 public surface.**
 /// Integrators with use cases beyond 64 GiB per container should
@@ -181,10 +180,10 @@ fn check_scan_budget(total: u64) -> Result<()> {
 /// Cost: O(N) per open, where N = number of slots. ~200 ms per GiB on
 /// modern x86, ~1 s per GiB on mobile ARM (DESIGN §5).
 ///
-/// Memory: O(M) where M = number of *owned* slots, NOT all slots.
-/// Each owned slot adds 8 bytes to `owned_slots` and at most 8 bytes
-/// to `commit_history` (Superblocks only). Decrypted plaintext bytes
-/// are dropped immediately after they are inspected — see module docs.
+/// Memory: one bit per slot in the file for `owned_slots`, plus 8 bytes per
+/// distinct commit seq in `commit_history` (Superblocks only). Decrypted
+/// plaintext bytes are dropped immediately after they are inspected — see
+/// module docs.
 ///
 /// Internal helper — public callers go through `Container::open_space` /
 /// `create_space`.
@@ -314,7 +313,14 @@ fn scan_and_recover_inner(
     }
 
     // --- Full scan: trial-decrypt every slot. ---
-    let mut acc = ScanAcc::default();
+    //
+    // The owned-set bitmap is sized to the file up front: it will be asked
+    // about every slot in `0..total` regardless of how many turn out to be
+    // ours, so growing it a word at a time buys nothing.
+    let mut acc = ScanAcc {
+        owned_slots: crate::space::slots::OwnedSet::with_capacity(total),
+        ..ScanAcc::default()
+    };
     for slot in 0..total {
         // Cooperative cancel check at coarse granularity. At slot 0 we
         // also check so that cancelling before scan starts surfaces
@@ -463,7 +469,7 @@ fn forced_unreadable_newer() -> bool {
 
 #[derive(Default)]
 struct ScanAcc {
-    owned_slots: Vec<u64>,
+    owned_slots: crate::space::slots::OwnedSet,
     commit_history: Vec<u64>,
     sb_candidates: std::collections::BTreeMap<u64, Vec<u8>>,
     /// Highest `seq` of an owned Superblock chunk whose payload this build
@@ -491,13 +497,40 @@ struct ScanAcc {
     read_the_record: bool,
 }
 
+/// Capacity at which the commit-anchor list dedups itself rather than
+/// doubling again.
+///
+/// The list takes a push per owned Superblock CHUNK, and a commit publishes
+/// several replicas of the same superblock — so it inflates several-fold over
+/// the distinct seqs it ends up holding. Measured on a fixture: 4096 entries
+/// of capacity for 801 distinct anchors, and the doubling that reached it
+/// briefly held one and a half copies, which was the open's peak once the
+/// owned set became a bitmap (report9 HV-13).
+///
+/// Below this it is not worth a sort: the whole list fits in a few cache
+/// lines and the doubling costs less than the pass.
+const COMMIT_HISTORY_DEDUP_AT: usize = 1024;
+
+/// Record a commit anchor, collapsing replicas before the list doubles.
+///
+/// The final `sort` + `dedup` in `finalize_scan_at` is unchanged and still
+/// the authority; this only keeps the list from carrying every replica until
+/// then.
+fn push_commit_anchor(history: &mut Vec<u64>, seq: u64) {
+    if history.len() == history.capacity() && history.capacity() >= COMMIT_HISTORY_DEDUP_AT {
+        history.sort_unstable();
+        history.dedup();
+    }
+    history.push(seq);
+}
+
 /// Fold one owned (AEAD-passing) slot's plaintext into the accumulator.
 /// Shared verbatim by the full and selective (fast) scan loops so they
 /// produce identical state for the same slot set.
 fn accumulate_owned_slot(acc: &mut ScanAcc, slot: u64, pt: Plaintext) {
-    acc.owned_slots.push(slot);
+    acc.owned_slots.insert(slot);
     if pt.kind == ChunkKind::Superblock {
-        acc.commit_history.push(pt.seq);
+        push_commit_anchor(&mut acc.commit_history, pt.seq);
         // First-wins on tie. Audit pass 7 (D4): same-seq replicas MUST
         // be bit-equal by construction — `commit_tx` writes the same
         // `new_sb` payload N times. The `debug_assert!` catches a
@@ -654,7 +687,22 @@ fn find_latest_superblock_reverse(
             None => continue,
         };
         if pt.kind == ChunkKind::Superblock && Superblock::is_valid_encoded_len(pt.payload.len()) {
-            sb_candidates.entry(pt.seq).or_insert(pt.payload);
+            // Through the capped helper, like the other three loops. This one
+            // used to keep every distinct-seq superblock in the window: up to
+            // REVERSE_SCAN_BUDGET payloads, held while the window is walked.
+            //
+            // It is the same gap the neighbouring comment warns about — "the
+            // three scan backends each keep their own copy of the candidate
+            // loop, and that duplication is what let the audit's candidate cap
+            // ship in one backend only" — with a fourth loop nobody counted.
+            // Measured, it WAS the open's peak: this phase runs before the
+            // fast path decides it cannot proceed, so every open paid it, and
+            // on an 800-commit fixture it held 800 payloads at once.
+            //
+            // The cap keeps the highest seqs, which is what this function
+            // returns; the D2 fallback depth becomes 64, the same as
+            // everywhere else.
+            push_sb_candidate(&mut sb_candidates, pt.seq, pt.payload);
         }
     }
     Ok(sb_candidates.iter().rev().find_map(|(chunk_seq, payload)| {
@@ -947,7 +995,7 @@ fn scan_and_recover_parallel_inner(
     /// fall back to lower-seq SBs if the highest fails to decode.
     #[derive(Default)]
     struct Acc {
-        owned_slots: Vec<u64>,
+        owned_slots: crate::space::slots::OwnedSet,
         commit_history: Vec<u64>,
         sb_candidates: std::collections::BTreeMap<u64, Vec<u8>>,
         /// Mirrors `ScanAcc`'s field. The parallel backend keeps its own
@@ -1018,9 +1066,9 @@ fn scan_and_recover_parallel_inner(
                         Some(pt) => pt,
                         None => continue,
                     };
-                    acc.owned_slots.push(slot);
+                    acc.owned_slots.insert(slot);
                     if pt.kind == ChunkKind::Superblock {
-                        acc.commit_history.push(pt.seq);
+                        push_commit_anchor(&mut acc.commit_history, pt.seq);
                         // Audit pass 7 (D4): see sequential variant for rationale.
                         // Audit pass 20: length-gate the candidate (memory bound).
                         // Accepts both canonical lengths (48 / 56); anything
@@ -1037,7 +1085,7 @@ fn scan_and_recover_parallel_inner(
                 Ok(acc)
             })
             .try_reduce(Acc::default, |mut a, b| -> Result<Acc> {
-                a.owned_slots.extend(b.owned_slots);
+                a.owned_slots.union_from(&b.owned_slots);
                 a.commit_history.extend(b.commit_history);
                 // Without this the flag survives only if the unreadable
                 // superblock happened to land in the accumulator that won the
@@ -1062,16 +1110,15 @@ fn scan_and_recover_parallel_inner(
     })?;
 
     let Acc {
-        mut owned_slots,
+        owned_slots,
         mut commit_history,
         sb_candidates,
         unparsable_sb_seq,
     } = acc;
 
-    // Parallel walk doesn't preserve slot order — sort to match the
-    // sequential contract (and to keep vacuum_orphans / audit walkers
-    // deterministic).
-    owned_slots.sort_unstable();
+    // The parallel walk does not preserve slot order, and the sequential
+    // contract is ascending. The owned set is a bitmap, which is ascending by
+    // construction — only the history still needs sorting.
     commit_history.sort_unstable();
     commit_history.dedup();
 
@@ -1209,7 +1256,7 @@ fn scan_and_recover_mmap_inner(
         return Err(Error::Malformed("mmap shorter than expected slot grid"));
     }
 
-    let mut owned_slots: Vec<u64> = Vec::new();
+    let mut owned_slots = crate::space::slots::OwnedSet::with_capacity(total);
     let mut commit_history: Vec<u64> = Vec::new();
     // Audit D2: collect every distinct-seq SB; decode in descending-seq
     // order at the end with fallback. See `scan_and_recover` doc.
@@ -1230,7 +1277,7 @@ fn scan_and_recover_mmap_inner(
             Some(pt) => pt,
             None => continue,
         };
-        owned_slots.push(slot);
+        owned_slots.insert(slot);
 
         if pt.kind == ChunkKind::Superblock {
             commit_history.push(pt.seq);
