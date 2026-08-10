@@ -513,6 +513,7 @@ fn finalize_scan_at(keys: SpaceKeys, acc: ScanAcc, total: u64) -> Result<SpaceSt
         pool,
         reuse_count: 0,
         churn_count: 0,
+        reuse_floor: usize::MAX,
         // Every Superblock chunk the scan decrypted contributed its seq here,
         // including replicas of a publish that never completed — so the max is
         // exactly "the highest number that may already be on disk".
@@ -992,6 +993,7 @@ fn scan_and_recover_parallel_inner(
         pool: crate::space::pool::DecoyPool::default(),
         reuse_count: 0,
         churn_count: 0,
+        reuse_floor: usize::MAX,
         // Every Superblock chunk the scan decrypted contributed its seq here,
         // including replicas of a publish that never completed — so the max is
         // exactly "the highest number that may already be on disk".
@@ -1169,6 +1171,7 @@ fn scan_and_recover_mmap_inner(
         pool: crate::space::pool::DecoyPool::default(),
         reuse_count: 0,
         churn_count: 0,
+        reuse_floor: usize::MAX,
         // Every Superblock chunk the scan decrypted contributed its seq here,
         // including replicas of a publish that never completed — so the max is
         // exactly "the highest number that may already be on disk".
