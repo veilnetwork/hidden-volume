@@ -439,6 +439,11 @@ impl<'f> Space<'f> {
         // in the same post-publish window and under the same fsync as the
         // padding, which is what makes churn and reuse land inside one
         // snapshot interval rather than in two the adversary can order.
+        // APPENDED, not written. Chunks that went into reused slots cost the
+        // file no growth, so there is no size delta for padding to hide; what
+        // they do leak — which offsets changed — is covered by the churn
+        // below instead. Counting them here would put growth back on exactly
+        // the commits reuse exists to keep flat (report9 HV-03).
         let real_added = self.file.slot_count() - slots_before;
         let pad_from = self.file.slot_count();
         // Padding and churn are ATTEMPTED SEPARATELY, and this is the whole
