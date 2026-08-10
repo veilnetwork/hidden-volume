@@ -53,18 +53,22 @@ impl<'f> Space<'f> {
     /// then the wrong move and vacuuming is a destructive one — reopen instead.
     /// The underlying cause is kept on [`Space::last_publish_error`].
     ///
-    /// **Padding-step failure (audit M1, 2026-05-10).** Once the
+    /// **Post-commit hardening failure (audit M1, 2026-05-10).** Once the
     /// superblock fsync (the durable-publish moment) succeeds, this
-    /// function returns `Ok(seq)` regardless of whether the
-    /// post-commit padding step succeeds or fails. A padding failure
-    /// is recorded on [`SpaceState::last_padding_error`] for caller
-    /// introspection but does not downgrade the durable commit into
-    /// an apparent failure — that would lie about visibility of the
-    /// commit to other processes (other processes already see the
-    /// new superblock). Padding is a privacy hardening, not a
-    /// correctness invariant; a single skipped padding round only
-    /// makes that commit's size observable to a multi-snapshot
-    /// adversary.
+    /// function returns `Ok(seq)` regardless of whether the post-commit
+    /// hardening steps succeed. Their failure is recorded on
+    /// [`SpaceState::last_hardening_error`] for caller introspection but does
+    /// not downgrade the durable commit into an apparent failure — that would
+    /// lie about visibility of the commit to other processes (other processes
+    /// already see the new superblock). These are privacy hardenings, not
+    /// correctness invariants.
+    ///
+    /// They are attempted INDEPENDENTLY, and the record names which one
+    /// failed, because they protect different things: padding hides the
+    /// commit's size, churn hides which of the dirtied offsets hold real data
+    /// (DESIGN §9.1), and the fsync puts both on the platter. A host told only
+    /// that "hardening failed" cannot act on any of the three (report9 HV-02,
+    /// HV-06).
     /// Both buffers arrive still wrapped in [`Redacted`] and are consumed
     /// here rather than in [`crate::tx::Tx::commit`], so the keys, values
     /// and payloads a caller queued are scrubbed when this function
@@ -467,8 +471,27 @@ impl<'f> Space<'f> {
         // One fsync for whatever landed, so both still share a single snapshot
         // interval — the property that made them one chain in the first place.
         let sync_result = self.file.fsync();
-        // First failure reported, both attempted.
-        let padding_outcome = padding_result.and(churn_result).and(sync_result);
+        // First failure reported WITH THE STEP IT CAME FROM, all three
+        // attempted. A bare error told the host that hardening failed and not
+        // which of three unrelated things is no longer true (report9 HV-06).
+        let hardening_outcome = padding_result
+            .err()
+            .map(|error| super::HardeningFailure {
+                step: super::HardeningStep::Padding,
+                error,
+            })
+            .or_else(|| {
+                churn_result.err().map(|error| super::HardeningFailure {
+                    step: super::HardeningStep::Churn,
+                    error,
+                })
+            })
+            .or_else(|| {
+                sync_result.err().map(|error| super::HardeningFailure {
+                    step: super::HardeningStep::Sync,
+                    error,
+                })
+            });
         // Garbage THIS space appended, at a slot range this space watched
         // itself write — the second of the two populations it can prove
         // are decoys (DESIGN §9.1). Recorded outside the closure and from
@@ -481,7 +504,7 @@ impl<'f> Space<'f> {
         // Replace (don't merge) — `last_padding_error` reflects only
         // the most recent commit's padding outcome. A successful
         // padding round clears any previously-stuck error.
-        self.state.last_padding_error = padding_outcome.err();
+        self.state.last_hardening_error = hardening_outcome;
 
         Ok(new_seq)
     }

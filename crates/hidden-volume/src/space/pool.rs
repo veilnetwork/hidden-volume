@@ -186,16 +186,33 @@ impl DecoyPool {
     pub(crate) fn sample_distinct(&mut self, n: usize) -> Result<Vec<u64>> {
         let k = n.min(self.len);
         let mut out = Vec::with_capacity(k);
+        // The failure is REMEMBERED rather than returned, because a `?` here
+        // would return between the clearing and the restoring below — and the
+        // slots drawn so far would stay cleared. Gone from `len`, never
+        // allocated, never churned: decoys that stop existing because a draw
+        // failed, which is the anonymity set shrinking for a reason nothing
+        // reports. The pool is also what the reuse budget is computed from.
+        let mut failure = None;
         for _ in 0..k {
-            let rank = uniform_below(self.len)?;
-            let slot = self.select(rank).expect("rank < len");
-            self.clear(slot);
-            out.push(slot);
+            match uniform_below(self.len) {
+                Ok(rank) => {
+                    let slot = self.select(rank).expect("rank < len");
+                    self.clear(slot);
+                    out.push(slot);
+                },
+                Err(e) => {
+                    failure = Some(e);
+                    break;
+                },
+            }
         }
         for &s in &out {
             self.set(s);
         }
-        Ok(out)
+        match failure {
+            Some(e) => Err(e),
+            None => Ok(out),
+        }
     }
 
     // --- bitmap internals ---
@@ -270,6 +287,43 @@ fn uniform_below(n: usize) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A draw that fails partway must leave the pool exactly as it found it.
+    ///
+    /// `sample_distinct` clears each drawn bit as its sampling device and puts
+    /// every one of them back at the end — churn retires nothing. A `?` on the
+    /// CSPRNG used to return between those two halves, so the slots drawn
+    /// before the failure stayed cleared: gone from `len`, never handed to the
+    /// allocator, never churned again. Decoys that quietly stop existing are
+    /// the anonymity set shrinking for a reason nothing reports, and the pool
+    /// is also the accounting the reuse budget is computed from.
+    ///
+    /// Armed at the SECOND fill so at least one draw has already cleared a
+    /// bit — otherwise there would be nothing to restore and the assertion
+    /// below would hold against the broken version too. With eight slots the
+    /// rejection loop in `uniform_below` retries with probability about
+    /// 2^-61, so the second fill is the second draw.
+    #[test]
+    fn a_failed_draw_leaves_the_pool_whole() {
+        let slots = vec![1u64, 3, 5, 7, 9, 11, 13, 15];
+        let mut p = DecoyPool::from_recorded(slots.clone(), 64);
+
+        // The same call succeeds without the fault, so the failure below is
+        // the fault and not the fixture.
+        assert_eq!(p.sample_distinct(4).unwrap().len(), 4);
+        assert_eq!(p.sorted(), slots, "sampling is not supposed to retire");
+
+        let _fault = crate::crypto::rng::ForcedRngFailure::arm(2);
+        let err = p.sample_distinct(4);
+        assert!(err.is_err(), "the armed CSPRNG failure never fired");
+        assert_eq!(
+            p.sorted(),
+            slots,
+            "a failed draw kept the slots it had already drawn — they are \
+             gone from the pool for the life of the container"
+        );
+        assert_eq!(p.len(), slots.len(), "len disagrees with membership");
+    }
 
     #[test]
     fn recorded_entries_past_the_end_are_dropped() {

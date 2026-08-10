@@ -529,11 +529,15 @@ cooperative)
 
 - **Тир.** T-cooperative-cancel.
 - **Метод.** Cancel во время post-commit garbage-padding step'а.
-- **Outcome.** Pass-18 M1 hardening: padding failures stash'атся
-  в `last_padding_error`, и `Ok(new_seq)` возвращается.
+- **Outcome.** Pass-18 M1 hardening: сбой stash'ится в
+  `last_hardening_error`, и `Ok(new_seq)` возвращается.
   Durability не downgrade'ится. Privacy-padding loss bounded
   этим одним commit'ом, observable multi-snapshot противникам
   (T2'); то же, что F-PAD-tamper outcome для этого commit'а.
+  Запись называет, КАКОЙ шаг упал (report9 HV-06): cancel на
+  padding стоит коммиту приватности размера, cancel на churn —
+  прикрытия §9.1 для переиспользованных им ячеек, и по одной
+  недифференцированной ошибке хост не взвесит ни то, ни другое.
 - **Verdict.** **Defended** на durability-слое; bounded
   privacy degradation acknowledged.
 - **Severity.** INFO.

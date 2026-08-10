@@ -519,7 +519,7 @@ fn finalize_scan_at(keys: SpaceKeys, acc: ScanAcc, total: u64) -> Result<SpaceSt
         // exactly "the highest number that may already be on disk".
         attempted_seq: commit_history.iter().copied().max().unwrap_or(0),
         commit_history,
-        last_padding_error: None,
+        last_hardening_error: None,
         last_publish_error: None,
         roots_payload_cache: None,
         unreadable_newer_superblock,
@@ -999,7 +999,7 @@ fn scan_and_recover_parallel_inner(
         // exactly "the highest number that may already be on disk".
         attempted_seq: commit_history.iter().copied().max().unwrap_or(0),
         commit_history,
-        last_padding_error: None,
+        last_hardening_error: None,
         last_publish_error: None,
         roots_payload_cache: None,
         unreadable_newer_superblock,
@@ -1177,7 +1177,7 @@ fn scan_and_recover_mmap_inner(
         // exactly "the highest number that may already be on disk".
         attempted_seq: commit_history.iter().copied().max().unwrap_or(0),
         commit_history,
-        last_padding_error: None,
+        last_hardening_error: None,
         last_publish_error: None,
         roots_payload_cache: None,
         unreadable_newer_superblock,

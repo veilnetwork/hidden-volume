@@ -402,9 +402,21 @@ fn a_padding_failure_does_not_cost_the_commit_its_churn() {
     // a path that never reached `append_garbage_chunks` — there would be no
     // padding failure to survive, and everything below would pass on a commit
     // that was never in the state under test.
-    assert!(
-        s.state.last_padding_error.is_some(),
-        "the padding fault never fired, so this test proves nothing"
+    //
+    // And it is recorded as a PADDING failure. The step is the whole reason
+    // the record carries one: a host reading "hardening failed" cannot tell a
+    // size leak from the deniability break the churn assertion below is
+    // about (report9 HV-06).
+    let failure = s
+        .state
+        .last_hardening_error
+        .as_ref()
+        .expect("the padding fault never fired, so this test proves nothing");
+    assert_eq!(
+        failure.step,
+        crate::space::HardeningStep::Padding,
+        "a padding failure was filed under {:?}",
+        failure.step
     );
 
     let reused = s.state.reuse_count;
@@ -414,6 +426,50 @@ fn a_padding_failure_does_not_cost_the_commit_its_churn() {
         churned, reused,
         "padding failed and took the churn with it: {reused} slots reused, \
          {churned} decoys churned"
+    );
+}
+
+/// A churn failure is reported as a churn failure, beside a padding that
+/// worked.
+///
+/// The two used to share one field called `last_padding_error`, so a host was
+/// told "padding" whichever of them broke — and they are not the same news.
+/// Padding failing means this commit's SIZE is readable. Churn failing means
+/// the slots it reused stand alone in a snapshot diff with no decoy moved
+/// beside them, which is the oracle DESIGN §9.1 exists to deny. One of those
+/// is worth a warning and the other is worth stopping for.
+#[test]
+fn a_churn_failure_is_not_filed_as_a_padding_failure() {
+    let path = scratch();
+    let _c = Cleanup(path.clone());
+    build_with_pool_and_padding(&path, 40);
+
+    let mut c = Container::open(&path).unwrap();
+    let mut s = c.open_space(b"pw").unwrap();
+    assert!(
+        s.stats().unwrap().reusable_slot_count >= 4,
+        "pool too small"
+    );
+
+    {
+        let _fault = crate::space::ForcedChurnFailure::arm();
+        let mut tx = s.begin_tx();
+        tx.put(Namespace::SETTINGS, b"k0", b"changed").unwrap();
+        // Still durable: hardening never downgrades a published commit.
+        tx.commit().unwrap();
+    }
+
+    let failure = s
+        .state
+        .last_hardening_error
+        .as_ref()
+        .expect("the churn fault never fired, so this test proves nothing");
+    assert_eq!(
+        failure.step,
+        crate::space::HardeningStep::Churn,
+        "the churn failed and the host was told {:?} — padding ran fine, and \
+         the two mean different things",
+        failure.step
     );
 }
 
