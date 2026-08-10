@@ -477,7 +477,18 @@ struct ScanAcc {
     /// pool from and the space starts the session append-only. That is a
     /// cost (a session's worth of reuse) and not a hazard — the pool is a
     /// hint whose absence only leaks disk.
+    ///
+    /// The cost stays a session's worth only because the checkpoint writer
+    /// carries the previous record's pool forward when this is empty; without
+    /// that, one refresh from such a session records the emptiness and the
+    /// accumulated set is gone for good (report9 HV-14). See
+    /// `Space::write_self_heal_checkpoint`.
     recorded_pool: Vec<u64>,
+    /// Whether this scan READ the checkpoint chain, as opposed to finding
+    /// nothing to read. An empty `recorded_pool` cannot tell the two apart —
+    /// a chain can honestly record an empty pool — and the checkpoint writer
+    /// needs the difference. See `SpaceState::pool_recovered`.
+    read_the_record: bool,
 }
 
 /// Fold one owned (AEAD-passing) slot's plaintext into the accumulator.
@@ -530,6 +541,7 @@ fn finalize_scan_at(keys: SpaceKeys, acc: ScanAcc, total: u64) -> Result<SpaceSt
         sb_candidates,
         unparsable_sb_seq,
         recorded_pool,
+        read_the_record,
     } = acc;
 
     // Recoverable-commit anchors for host-app rollback / multi-device
@@ -581,6 +593,7 @@ fn finalize_scan_at(keys: SpaceKeys, acc: ScanAcc, total: u64) -> Result<SpaceSt
         superblock,
         owned_slots,
         pool,
+        pool_recovered: read_the_record,
         reuse_count: 0,
         churn_count: 0,
         reuse_floor: usize::MAX,
@@ -656,15 +669,23 @@ fn find_latest_superblock_reverse(
 /// slot lists are the same type and mean opposite things: mixing them up
 /// hands the allocator a live slot, and `(u64, Vec<u64>, Vec<u64>)` at a
 /// call site says nothing about which is which.
-struct RecordedCheckpoint {
+pub(crate) struct RecordedCheckpoint {
     /// Slot count at checkpoint-write time. Recorded slots are below it;
     /// the reader scans `[high_water, total)` fresh.
-    high_water: u64,
+    #[allow(
+        dead_code,
+        reason = "read by the fast scan; the writer wants only the pool"
+    )]
+    pub(crate) high_water: u64,
     /// The complete sorted owned-slot set below the high-water.
-    owned: Vec<u64>,
+    #[allow(
+        dead_code,
+        reason = "read by the fast scan; the writer wants only the pool"
+    )]
+    pub(crate) owned: Vec<u64>,
     /// The recorded decoy pool — a hint, corrected by subtracting the
     /// scan's owned set. See [`crate::space::pool`].
-    pool: Vec<u64>,
+    pub(crate) pool: Vec<u64>,
 }
 
 /// Read the checkpoint chain rooted at `head`, returning the slot count
@@ -676,7 +697,7 @@ struct RecordedCheckpoint {
 /// read is trial-decrypted under this space's key, so an adversary
 /// without the key cannot drive this path. `constant_time` keeps the
 /// per-chunk timing equalizer engaged.
-fn read_checkpoint_chain(
+pub(crate) fn read_checkpoint_chain(
     container: &mut ContainerFile,
     keys: &SpaceKeys,
     container_id: &[u8; 32],
@@ -830,6 +851,7 @@ fn try_fast_scan_inner(
 
     let mut acc = ScanAcc {
         recorded_pool: pool_below,
+        read_the_record: true,
         ..ScanAcc::default()
     };
     // The selective set: recorded head-owned + pool slots, then the fresh
@@ -1085,6 +1107,7 @@ fn scan_and_recover_parallel_inner(
         // recover and this session writes append-only. A cost, not a
         // hazard: an absent pool leaks disk and nothing else.
         pool: crate::space::pool::DecoyPool::default(),
+        pool_recovered: false,
         reuse_count: 0,
         churn_count: 0,
         reuse_floor: usize::MAX,
@@ -1263,6 +1286,7 @@ fn scan_and_recover_mmap_inner(
         // recover and this session writes append-only. A cost, not a
         // hazard: an absent pool leaks disk and nothing else.
         pool: crate::space::pool::DecoyPool::default(),
+        pool_recovered: false,
         reuse_count: 0,
         churn_count: 0,
         reuse_floor: usize::MAX,
