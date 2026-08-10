@@ -192,29 +192,35 @@ impl<'f> Space<'f> {
         // (2026-05-03): matters for heavy-history containers (100K
         // owned + 1K to-scrub = 100M comparisons with Vec::contains).
         let mut to_drop = SlotSet::with_capacity(self.file.slot_count());
-        for i in 0..self.state.owned_slots.len() {
-            let slot = self.state.owned_slots[i];
-            if walk.has_visited(slot) {
-                continue;
-            }
-            // Inspect kind — only scrub IndexNode orphans. Old
-            // Superblocks / Commits / DataBatch chunks are left alone
-            // (fallbacks / shared batches respectively).
-            let pt = match self.read_owned_chunk(slot) {
-                Ok(p) => p,
-                Err(Error::AuthFailed) => {
-                    // Already scrubbed (or otherwise non-decryptable).
-                    to_drop.insert(slot);
+        // Walked one bitmap word at a time, because the body holds `&mut
+        // self` to read and scrub. A borrowed iterator cannot survive that,
+        // and materializing the slot list is the whole-list copy audit HV-03
+        // removed — one `u64` of stack covers 64 slots instead.
+        for w in 0..self.state.owned_slots.word_count() {
+            let word = self.state.owned_slots.word(w);
+            for slot in crate::space::slots::slots_in_word(w, word) {
+                if walk.has_visited(slot) {
                     continue;
-                },
-                Err(other) => return Err(other),
-            };
-            if pt.kind != ChunkKind::IndexNode {
-                continue;
+                }
+                // Inspect kind — only scrub IndexNode orphans. Old
+                // Superblocks / Commits / DataBatch chunks are left alone
+                // (fallbacks / shared batches respectively).
+                let pt = match self.read_owned_chunk(slot) {
+                    Ok(p) => p,
+                    Err(Error::AuthFailed) => {
+                        // Already scrubbed (or otherwise non-decryptable).
+                        to_drop.insert(slot);
+                        continue;
+                    },
+                    Err(other) => return Err(other),
+                };
+                if pt.kind != ChunkKind::IndexNode {
+                    continue;
+                }
+                self.file.scrub_slot(slot)?;
+                to_drop.insert(slot);
+                scrubbed += 1;
             }
-            self.file.scrub_slot(slot)?;
-            to_drop.insert(slot);
-            scrubbed += 1;
         }
         // fsync only when bytes actually changed, but drop the slots whenever
         // there are any to drop. A slot reaches `to_drop` through the
@@ -226,7 +232,7 @@ impl<'f> Space<'f> {
             self.file.fsync()?;
         }
         if !to_drop.is_empty() {
-            self.state.owned_slots.retain(|s| !to_drop.contains(*s));
+            self.state.owned_slots.retain(|s| !to_drop.contains(s));
             // Retired, therefore reusable AND churnable (DESIGN §9.1). This
             // is the ONLY way a slot that once held real data enters the
             // pool, and it enters carrying vacuum's own proof: unreachable
@@ -422,26 +428,30 @@ impl<'f> Space<'f> {
         // (2026-05-03): matters for heavy-history containers (100K
         // owned + 1K to-scrub = 100M comparisons with Vec::contains).
         let mut to_drop = SlotSet::with_capacity(self.file.slot_count());
-        for i in 0..self.state.owned_slots.len() {
-            let slot = self.state.owned_slots[i];
-            if referenced.contains(slot) {
-                continue;
-            }
-            let pt = match self.read_owned_chunk(slot) {
-                Ok(p) => p,
-                Err(Error::AuthFailed) => {
-                    // Already scrubbed (or otherwise non-decryptable).
-                    to_drop.insert(slot);
+        // Word-wise for the same reason as `vacuum_orphans` above: the body
+        // needs `&mut self`, and a whole-list copy is what audit HV-03 removed.
+        for w in 0..self.state.owned_slots.word_count() {
+            let word = self.state.owned_slots.word(w);
+            for slot in crate::space::slots::slots_in_word(w, word) {
+                if referenced.contains(slot) {
                     continue;
-                },
-                Err(other) => return Err(other),
-            };
-            if pt.kind != ChunkKind::DataBatch {
-                continue;
+                }
+                let pt = match self.read_owned_chunk(slot) {
+                    Ok(p) => p,
+                    Err(Error::AuthFailed) => {
+                        // Already scrubbed (or otherwise non-decryptable).
+                        to_drop.insert(slot);
+                        continue;
+                    },
+                    Err(other) => return Err(other),
+                };
+                if pt.kind != ChunkKind::DataBatch {
+                    continue;
+                }
+                self.file.scrub_slot(slot)?;
+                to_drop.insert(slot);
+                scrubbed += 1;
             }
-            self.file.scrub_slot(slot)?;
-            to_drop.insert(slot);
-            scrubbed += 1;
         }
         // fsync only when bytes actually changed, but drop the slots whenever
         // there are any to drop. A slot reaches `to_drop` through the
@@ -453,7 +463,7 @@ impl<'f> Space<'f> {
             self.file.fsync()?;
         }
         if !to_drop.is_empty() {
-            self.state.owned_slots.retain(|s| !to_drop.contains(*s));
+            self.state.owned_slots.retain(|s| !to_drop.contains(s));
             // Retired, therefore reusable AND churnable (DESIGN §9.1). This
             // is the ONLY way a slot that once held real data enters the
             // pool, and it enters carrying vacuum's own proof: unreachable

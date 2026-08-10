@@ -14,6 +14,7 @@ mod log_iter;
 pub(crate) mod pool;
 #[cfg(test)]
 mod reuse_tests;
+pub(crate) mod slots;
 mod tree;
 mod vacuum;
 mod walk;
@@ -34,6 +35,7 @@ use crate::{CHUNK_SIZE, Error, NONCE_LEN, Result};
 
 use self::index::{IndexNode, Namespace};
 use self::pool::DecoyPool;
+use self::slots::OwnedSet;
 use self::superblock::{NO_RECORD, Superblock};
 use self::walk::TreeWalk;
 
@@ -355,7 +357,7 @@ pub(crate) struct SpaceState {
     /// master key and is not public at all.
     pub keys: SpaceKeys,
     pub superblock: Superblock,
-    pub owned_slots: Vec<u64>,
+    pub owned_slots: OwnedSet,
     /// Sorted-ascending, deduplicated `seq` values of every Superblock
     /// chunk that AEAD-decrypted under this space's key during the open
     /// scan. Updated on every successful `commit_tx` by appending the
@@ -534,7 +536,7 @@ impl SpaceState {
                 root_hash: [0u8; 32],
                 checkpoint_slot: NO_RECORD,
             },
-            owned_slots: Vec::new(),
+            owned_slots: OwnedSet::default(),
             commit_history: Vec::new(),
             last_hardening_error: None,
             last_publish_error: None,
@@ -1709,7 +1711,11 @@ impl<'f> Space<'f> {
                 self.file.append_slot(&chunk)?;
             },
         }
-        self.state.owned_slots.push(slot);
+        // A slot already in the set would mean the allocator handed out a
+        // live one — the hazard `subtract_owned` exists to prevent. The set
+        // absorbs the duplicate either way; this says so out loud in tests.
+        let fresh = self.state.owned_slots.insert(slot);
+        debug_assert!(fresh, "slot {slot} was allocated while already owned");
         Ok(slot)
     }
 

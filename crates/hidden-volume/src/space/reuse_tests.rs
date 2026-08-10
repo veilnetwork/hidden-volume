@@ -167,7 +167,7 @@ fn no_slot_is_ever_both_pooled_and_owned() {
         }
         s.vacuum_orphans().unwrap();
         let (owned, pool) = (s.state.owned_slots.clone(), s.state.pool.sorted());
-        let owned_set: std::collections::BTreeSet<u64> = owned.iter().copied().collect();
+        let owned_set: std::collections::BTreeSet<u64> = owned.iter().collect();
         let overlap: Vec<u64> = pool
             .iter()
             .copied()
@@ -187,7 +187,7 @@ fn no_slot_is_ever_both_pooled_and_owned() {
     let mut c = Container::open(&path).unwrap();
     let s = c.open_space(b"pw").unwrap();
     let (owned, pool) = (s.state.owned_slots.clone(), s.state.pool.sorted());
-    let owned_set: std::collections::BTreeSet<u64> = owned.iter().copied().collect();
+    let owned_set: std::collections::BTreeSet<u64> = owned.iter().collect();
     let overlap: Vec<u64> = pool
         .iter()
         .copied()
