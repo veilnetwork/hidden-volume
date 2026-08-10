@@ -1083,6 +1083,14 @@ impl SpaceHandle {
 
     /// Recoverable commit-anchor history — every Superblock seq still
     /// on disk that AEAD-decrypts under this space's key.
+    ///
+    /// A WINDOW, not the whole history: a writable open retires every era
+    /// below `commit_seq() - hidden_volume::ANCHOR_HORIZON`. An anchor absent
+    /// from this list is a fork only if it is inside that window; further back
+    /// than it, its absence says nothing either way. `docs/en/guide/
+    /// multi-device.md` gives the order the three tests must be made in — a
+    /// host that checks membership without checking distance first will read
+    /// every long-offline device as an adversary.
     pub fn commit_history(&self) -> HvResult<Vec<u64>> {
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
         Ok(g.with_space_mut(|s| s.commit_history().to_vec()))

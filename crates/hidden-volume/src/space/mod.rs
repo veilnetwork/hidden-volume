@@ -741,11 +741,22 @@ impl<'f> Space<'f> {
     /// counts.
     ///
     /// **What is NOT in the list.** Seqs whose Superblock replicas have
-    /// all been physically removed from disk — most importantly, after
-    /// [`Container::compact_known`](crate::Container::compact_known) /
-    /// [`compact_known`](crate::Container::compact_known) the destination
-    /// container is fresh and its history starts at `[1]` regardless of
-    /// the source's history. Hosts must re-anchor after compaction.
+    /// all been physically removed from disk. Two things remove them:
+    ///
+    ///  * [`Container::compact_known`](crate::Container::compact_known) — the
+    ///    destination container is fresh and its history starts at `[1]`
+    ///    regardless of the source's. Hosts must re-anchor after compaction.
+    ///  * the horizon. A writable open retires every era below
+    ///    `commit_seq() - `[`ANCHOR_HORIZON`](crate::ANCHOR_HORIZON), so the
+    ///    list is a WINDOW on recent history and not the whole of it.
+    ///
+    /// The second one is what a rollback check has to be written against:
+    /// an anchor absent from this list is a fork only if it is INSIDE the
+    /// window. Further back than that, its absence says nothing either way —
+    /// see `docs/en/guide/multi-device.md`, which spells out the order the
+    /// three tests must be made in. A host that checks membership without
+    /// checking the distance first will read every long-offline device as an
+    /// adversary.
     ///
     /// **Privacy contract.** Same as [`Space::commit_seq`]: do NOT
     /// publish the history of a decoy/duress space. The shape of the
