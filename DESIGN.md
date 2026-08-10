@@ -534,6 +534,40 @@ each closing one way the two populations could be told apart:
    share, and the adversary would separate them by *where* instead
    of by *how often*.
 
+Rule 2 is a promise about the churn, so it has to be paid for out of
+the pool **before** the reuse spends it. Both halves draw from the same
+pool and reuse goes first: `take` removes a slot, and the churn then
+samples what is left. A commit free to reuse the whole pool would leave
+nothing to sample, and `sample_distinct` returns `n.min(len)` -- it
+truncates in silence -- so the commit would keep rule 2 in name and
+break it on disk.
+
+An episode may therefore reuse at most
+
+```
+pool / (1 + CHURN_PER_REUSE)
+```
+
+slots, leaving the remainder to fund their churn (`reuse_floor_for`).
+Past that it appends, which is a cost in growth and never in
+deniability -- the direction this trade must always fail in. At
+`CHURN_PER_REUSE = 1` that is an even split, the same split rule 2
+describes on disk. A pool of one funds nothing and reuses nothing, and
+a container right after its first `vacuum_orphans` is exactly where
+that case lives.
+
+The budget is spent where a slot leaves the pool, not decided once per
+commit. `publish_superblock` reads the *era* half of the reuse
+predicate once, before it burns the seq, and hands one answer to every
+replica -- correct for a question about the era, wrong for a resource
+the placements are consuming as they go.
+
+Rule 1 has the matching consequence: `commit_tx` is the only place the
+churn runs, so it is the only place reuse may happen.
+`write_self_heal_checkpoint` publishes a superblock too, and it takes
+its slots by appending rather than from the pool, because a reused slot
+there is one no churn would ever cover.
+
 #### The decoy pool, and why it is not "the garbage"
 
 A writer of space A **cannot** tell a garbage chunk from space B's
