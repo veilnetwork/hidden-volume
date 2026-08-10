@@ -12,6 +12,34 @@ format.
 
 ## [Unreleased]
 
+### Fixed — report9 HV-15: the key survived its own erasure
+
+- **Argon2's working memory was freed as-is.** m_cost KiB — 64 MiB at the
+  default parameters — holding the password's expansion. The `argon2` crate
+  has a `zeroize` feature for exactly this and it was not enabled.
+
+- **Every keyed BLAKE3 hash here IS a key, and none was wiped.**
+  `derive_master_key`, `derive_subkey` and `derive_chunk_key` each build a
+  `Zeroizing<[u8; 32]>` by copying OUT of a `blake3::Hash`, and that source
+  copy was dropped untouched; `derive_subkey`'s keyed `Hasher` holds
+  key-equivalent state for the same reason. `derive_chunk_key` runs once per
+  chunk read or written, so this was the highest-traffic key site in the crate.
+  The `blake3` crate's `zeroize` feature is enabled now and each transient is
+  wiped explicitly.
+
+- `docs/{en,ru}/security/audits/memory.md` said "key material — zeroized ✓"
+  and meant it about the RETURNED value. The buffer the key was derived in and
+  the hash it was copied out of were not in the table at all. Both are now,
+  in both languages, with what was actually true before.
+
+- The guard is a source and manifest check, and says why: proving a freed
+  buffer was scrubbed means reading memory after it is released, which is
+  undefined behaviour rather than a test. What can rot is the wiring — a
+  feature dropped in a dependency bump, a `.zeroize()` lost in a refactor.
+  Break-checked both ways. Its first version counted its own assertions
+  (`include_str!` reads the file the test lives in) and read 4 where it wanted
+  2; it now cuts the source at its own module.
+
 ### Fixed — report9 HV-12: a fast open could not be interrupted while it ran
 
 - **Neither fast-open phase polled the cancel token.** `try_fast_scan_inner`

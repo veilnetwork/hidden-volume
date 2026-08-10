@@ -22,7 +22,7 @@
 //!    multi-space containers: nothing in the cleartext header carries
 //!    a per-space identifier any more.
 
-use zeroize::{ZeroizeOnDrop, Zeroizing};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Kind-tag byte for `derive_subkey` inputs (audit pass 2 P-LOW2,
 /// closed in v3). Makes domain separation explicit by content rather
@@ -119,9 +119,13 @@ pub(crate) fn derive_subkey(parent: &[u8], context: &[u8]) -> Zeroizing<[u8; 32]
     let mut hasher = blake3::Hasher::new_keyed(&key32);
     hasher.update(&[SUBKEY_KIND_TAG]);
     hasher.update(context);
-    let h = hasher.finalize();
+    // Both the hasher's state and the finalized hash are key-equivalent here:
+    // the hash IS the subkey. Neither was wiped (report9 HV-15).
+    let mut h = hasher.finalize();
+    hasher.zeroize();
     let mut out = Zeroizing::new([0u8; 32]);
     out.copy_from_slice(h.as_bytes());
+    h.zeroize();
     out
 }
 
@@ -148,9 +152,12 @@ pub fn derive_chunk_key(
     input[0] = CHUNK_KEY_KIND_TAG;
     input[1..33].copy_from_slice(container_id);
     input[33..].copy_from_slice(&slot.to_le_bytes());
-    let h = blake3::keyed_hash(aead_root, &input);
+    // The hash IS the chunk key, and this runs once per chunk read or
+    // written — the highest-traffic key site in the crate (report9 HV-15).
+    let mut h = blake3::keyed_hash(aead_root, &input);
     let mut out = Zeroizing::new([0u8; 32]);
     out.copy_from_slice(h.as_bytes());
+    h.zeroize();
     out
 }
 
@@ -169,5 +176,66 @@ mod tests {
         let parent = [0u8; 32];
         let result: Zeroizing<[u8; 32]> = derive_subkey(&parent, b"context");
         let _ref: &[u8; 32] = &result;
+    }
+}
+
+#[cfg(test)]
+mod hv15_wipe_reach_tests {
+    /// The key-equivalent transients must stay wiped, and the crate features
+    /// that make wiping possible must stay on.
+    ///
+    /// A source and manifest check, because the effect is invisible from
+    /// inside the process: proving a freed buffer was scrubbed means reading
+    /// memory after it is released, which is undefined behaviour, not a test.
+    /// What can rot is the wiring — a dependency feature dropped in a
+    /// dependency bump, or a `.zeroize()` lost in a refactor — and both are
+    /// facts about files (report9 HV-15).
+    #[test]
+    fn the_key_equivalent_transients_are_still_wiped() {
+        let manifest = include_str!("../../Cargo.toml");
+        for (dep, why) in [
+            (
+                "argon2",
+                "Argon2's working memory is the password's expansion, tens of \
+                 mebibytes of it, and without this feature it is freed as-is",
+            ),
+            (
+                "blake3",
+                "a keyed Hasher's state and a Hash are the derived key itself, \
+                 and neither implements Zeroize without this feature",
+            ),
+        ] {
+            let line = manifest
+                .lines()
+                .find(|l| l.starts_with(dep))
+                .unwrap_or_else(|| panic!("{dep} is no longer a direct dependency"));
+            assert!(
+                line.contains("\"zeroize\""),
+                "{dep} lost its zeroize feature: {why}"
+            );
+        }
+
+        // Cut at this module: the assertions below contain the very literals
+        // they look for, and counting them made the check count itself.
+        let derive = include_str!("derive.rs");
+        let derive = &derive[..derive
+            .find("mod hv15_wipe_reach_tests")
+            .expect("this module moved — the guard is reading the wrong region")];
+        let kdf = include_str!("kdf.rs");
+        assert_eq!(
+            derive.matches("h.zeroize();").count(),
+            2,
+            "derive_subkey and derive_chunk_key each wipe the hash they copy \
+             the key out of — one of them stopped"
+        );
+        assert!(
+            derive.contains("hasher.zeroize();"),
+            "the keyed hasher in derive_subkey holds key-equivalent state and \
+             is no longer wiped"
+        );
+        assert!(
+            kdf.contains("h.zeroize();"),
+            "the master key's hash is no longer wiped"
+        );
     }
 }
