@@ -45,9 +45,14 @@ fn every_commit_leaves_an_anchor_even_past_the_collapse_threshold() {
     }
 
     // Read-only: no vacuum, so every superblock this session wrote is still
-    // on disk and the anchor list must name all of them. A writable open
-    // would retire the superseded ones, which is correct and would make the
-    // expected set a moving target.
+    // on disk and the anchor list must name all of them.
+    //
+    // This is deliberately NOT a claim that anchors are unbounded. A WRITABLE
+    // open retires every era below `commit_seq() - ANCHOR_HORIZON` and prunes
+    // the list to match — `tests/anchor_horizon.rs` pins that window from both
+    // sides. What this file is about is the other half: within one session,
+    // every commit that happened leaves an anchor, and the collapse the scan
+    // does to keep replicas from inflating the list must not drop any of them.
     let mut c = Container::open_readonly(&path).unwrap();
     let s = c.open_space(b"pw").unwrap();
     let seq = s.commit_seq();
