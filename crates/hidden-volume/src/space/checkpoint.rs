@@ -157,6 +157,41 @@ pub(crate) struct CheckpointChunk {
     pub pool: Vec<u64>,
 }
 
+/// The pool half of a record: this session's live pool, plus whatever was
+/// carried from the record being superseded.
+///
+/// Merged rather than substituted — a session that never loaded a pool can
+/// still have freed slots into one (every commit's garbage padding does), and
+/// those are as real as the carried ones.
+///
+/// Both halves are filtered against THIS era's owned set and high-water, so
+/// the two halves of the record stay complementary. That filter is
+/// defence-in-depth rather than a live correction: the reader subtracts its
+/// scan's owned set from the recorded pool anyway (see `crate::open`), and a
+/// session with no pool cannot have written to a carried slot in the first
+/// place. It is here so that the record is true on its own terms, not only
+/// after a reader repairs it.
+fn merge_carried_pool(
+    live: Vec<u64>,
+    carried: Vec<u64>,
+    owned: &[u64],
+    high_water: u64,
+) -> Vec<u64> {
+    debug_assert!(
+        owned.windows(2).all(|w| w[0] <= w[1]),
+        "owned must be sorted"
+    );
+    if carried.is_empty() {
+        return live;
+    }
+    let mut pool = live;
+    pool.extend(carried);
+    pool.retain(|slot| *slot < high_water && owned.binary_search(slot).is_err());
+    pool.sort_unstable();
+    pool.dedup();
+    pool
+}
+
 impl CheckpointChunk {
     /// Encode to the checkpoint payload bytes (header ‖ owned u64 LE list
     /// ‖ pool u64 LE list). Errors if the two lists together exceed
@@ -309,6 +344,46 @@ impl<'f> Space<'f> {
         let total = self.file.slot_count();
         let old_head = self.state.superblock.checkpoint_slot;
 
+        // What the chain we are about to supersede recorded, read BEFORE the
+        // scrub below destroys it.
+        //
+        // A session that never loaded the pool would otherwise record an EMPTY
+        // one over the accumulated set, and that loss is permanent — every
+        // later open starts append-only until the pool rebuilds. The session
+        // that does this is the constant-time open: it takes the full-scan
+        // path by design (the fast path's chunk count distinguishes a right
+        // password from a wrong one), and the pool is only recoverable from a
+        // checkpoint. Measured on a fixture: 46 recorded slots became 1
+        // (report9 HV-14).
+        //
+        // Only when this session never LOADED the record. A session that did
+        // holds the authoritative set — it knows both what the record said and
+        // what it has since consumed, and carrying anything forward there
+        // would resurrect a slot it deliberately dropped.
+        //
+        // Emptiness is the wrong test for that: this session's pool is empty
+        // only until the first commit frees a slot into it, after which one
+        // slot would be recorded over the accumulated forty.
+        let carried_pool: Vec<u64> = if !self.state.pool_recovered && old_head != NO_RECORD {
+            let container_id = self.state.keys.container_id;
+            let keys = self.state.keys.clone();
+            crate::open::read_checkpoint_chain(
+                self.file,
+                &keys,
+                &container_id,
+                old_head,
+                total,
+                None,
+                false,
+            )
+            .ok()
+            .flatten()
+            .map(|recorded| recorded.pool)
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
         // Scrub the chain we are about to supersede *first*, so the
         // fresh owned snapshot does not record the soon-dead chunks.
         // Crash-safe: if we die before publishing the new superblock,
@@ -336,7 +411,12 @@ impl<'f> Space<'f> {
         // the SAME moment: the two are complementary halves of "what this
         // space has below the high-water", and a reader that mixed one
         // era's owned set with another's pool could see a slot in neither.
-        let pool: Vec<u64> = self.state.pool.sorted();
+        let pool: Vec<u64> = merge_carried_pool(
+            self.state.pool.sorted(),
+            carried_pool,
+            &owned,
+            cp_high_water,
+        );
         debug_assert!(
             pool.last().map(|&s| s < cp_high_water).unwrap_or(true),
             "pool slots must be below the checkpoint high-water"
@@ -553,6 +633,34 @@ mod format_doc_agreement_tests {
 
 #[cfg(test)]
 mod tests {
+
+    /// The carried half must never name a slot this era owns.
+    ///
+    /// Defence-in-depth, and the only place it can be exercised: a session
+    /// with no pool cannot write to a carried slot, so no fixture at the
+    /// container level can produce the collision. Tested here because the
+    /// filter is what makes the record true on its own terms rather than only
+    /// after a reader subtracts its own scan.
+    #[test]
+    fn a_carried_slot_this_era_owns_is_not_recorded_as_reusable() {
+        let owned = vec![5u64, 9];
+        let pool = super::merge_carried_pool(vec![2], vec![5, 7, 9], &owned, 100);
+        assert_eq!(pool, vec![2, 7], "a live slot was recorded as reusable");
+    }
+
+    /// And past the high-water: the record summarizes only what is below it.
+    #[test]
+    fn a_carried_slot_above_the_high_water_is_not_recorded() {
+        let pool = super::merge_carried_pool(vec![1], vec![3, 42], &[], 10);
+        assert_eq!(pool, vec![1, 3]);
+    }
+
+    /// Merged, not substituted, and deduplicated across the two halves.
+    #[test]
+    fn the_live_pool_and_the_carried_one_are_both_kept() {
+        let pool = super::merge_carried_pool(vec![4, 1], vec![1, 6], &[], 10);
+        assert_eq!(pool, vec![1, 4, 6]);
+    }
     use super::*;
 
     #[test]

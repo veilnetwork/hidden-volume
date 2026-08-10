@@ -918,3 +918,203 @@ fn post_commit_padding_becomes_churnable_decoy() {
         "the file grew although the bucket still had padded slots free"
     );
 }
+
+/// The checkpoint record as it lies on disk, read back through the same
+/// chain reader an open uses.
+///
+/// Read directly rather than inferred from a reopen: the open path subtracts
+/// its scan's owned set from the recorded pool before handing it over, so a
+/// record that listed a live slot would come back looking clean. Everything
+/// about how the record is WRITTEN is invisible from the other side of that
+/// subtraction.
+fn recorded_checkpoint(s: &mut crate::space::Space<'_>) -> (Vec<u64>, Vec<u64>) {
+    let head = s.state.superblock.checkpoint_slot;
+    assert_ne!(
+        head,
+        crate::space::superblock::NO_RECORD,
+        "no checkpoint was written"
+    );
+    let total = s.file.slot_count();
+    let keys = s.state.keys.clone();
+    let container_id = keys.container_id;
+    let recorded =
+        crate::open::read_checkpoint_chain(s.file, &keys, &container_id, head, total, None, false)
+            .unwrap()
+            .expect("the chain this session just wrote is unreadable");
+    (recorded.owned, recorded.pool)
+}
+
+/// A checkpoint refresh must not record an empty pool over the accumulated
+/// one (report9 HV-14).
+///
+/// The decoy pool exists only in the checkpoint chain — nothing else on disk
+/// says which retired slots may be rewritten. A session that never read it
+/// therefore holds no pool, and used to record that emptiness as truth: one
+/// refresh and every later open starts append-only, permanently, with the
+/// accumulated set unrecoverable.
+///
+/// The session that does this is the constant-time open. It takes the full
+/// scan BY DESIGN — the fast path's chunk count is exactly the signal that
+/// distinguishes a right password from a wrong one — so the very mode chosen
+/// for its resistance to timing was the one that wiped the pool.
+///
+/// Measured on this fixture before the fix: 39 recorded slots became 1.
+#[test]
+fn a_refresh_from_a_pool_less_session_keeps_the_recorded_pool() {
+    let path = scratch();
+    let _c = Cleanup(path.clone());
+    let recorded_before: Vec<u64>;
+    {
+        let mut c = Container::create_with_options(
+            &path,
+            options(0, PaddingPolicy::BucketGrowth { bucket_chunks: 64 }),
+        )
+        .unwrap();
+        let mut s = c.create_space(b"pw").unwrap();
+        for i in 0..8u32 {
+            let mut tx = s.begin_tx();
+            tx.put(Namespace::SETTINGS, format!("k{i}").as_bytes(), b"v")
+                .unwrap();
+            tx.commit().unwrap();
+        }
+        s.write_self_heal_checkpoint().unwrap();
+        recorded_before = recorded_checkpoint(&mut s).1;
+        assert!(recorded_before.len() > 4, "fixture built no pool to lose");
+    }
+
+    // A constant-time open recovers no pool — that is the design — and then
+    // refreshes the checkpoint, which is what a self-heal does on any open.
+    {
+        let mut c = Container::open(&path).unwrap();
+        let mut s = c.open_space_constant_time(b"pw").unwrap();
+        assert_eq!(
+            s.state.pool.len(),
+            0,
+            "the constant-time open recovered a pool — this test no longer \
+             exercises the session it was written for"
+        );
+        assert!(
+            !s.state.pool_recovered,
+            "the constant-time open claims it read the record"
+        );
+        // Commit BEFORE the refresh, which is what a session actually does.
+        // Each commit's garbage padding lands in the live pool, so by the time
+        // the self-heal runs the pool is no longer empty — and "the live pool
+        // is empty" is exactly the too-narrow condition this rules out. With
+        // it, one session's handful of padding slots is recorded over the
+        // accumulated set and the loss is the same.
+        for i in 0..3u32 {
+            let mut tx = s.begin_tx();
+            tx.put(Namespace::SETTINGS, format!("ct{i}").as_bytes(), b"v")
+                .unwrap();
+            tx.commit().unwrap();
+        }
+        assert!(
+            s.state.pool.len() > 0,
+            "the constant-time session freed nothing into its pool, so a \
+             narrower carry condition would be indistinguishable here"
+        );
+        s.write_self_heal_checkpoint().unwrap();
+        let (owned, pool) = recorded_checkpoint(&mut s);
+        // By IDENTITY, not by count. A count survives on its own: this
+        // session's three commits pad the file, every padding slot joins the
+        // live pool, and the record then holds forty NEW slots while the forty
+        // accumulated ones are gone. A break-check that removed the carry
+        // entirely passed a count assertion for exactly that reason.
+        let lost: Vec<u64> = recorded_before
+            .iter()
+            .copied()
+            .filter(|slot| !pool.contains(slot) && !owned.contains(slot))
+            .collect();
+        assert!(
+            lost.is_empty(),
+            "{} of the {} slots the previous record offered for reuse are in \
+             neither half of the new one ({lost:?}) — the record is the only \
+             copy there is, so every later open now starts append-only and \
+             nothing can rebuild them",
+            lost.len(),
+            recorded_before.len()
+        );
+        for slot in &pool {
+            assert!(
+                !owned.contains(slot),
+                "slot {slot} is in both halves of the same record — a carried \
+                 slot this era owns was written back as reusable"
+            );
+        }
+    }
+
+    // And it survives the trip back in.
+    let mut c = Container::open(&path).unwrap();
+    let after = c.open_space(b"pw").unwrap().state.pool.len();
+    assert!(
+        after >= recorded_before.len(),
+        "the record kept {} slots but a reopen recovered only {after}",
+        recorded_before.len()
+    );
+}
+
+/// The other half: what a refresh records must never offer a live slot.
+///
+/// This is the property the carry-forward could plausibly break, and the
+/// reason it filters the carried set against this era's owned set. The
+/// fixture makes the hazard concrete — it spends slots OUT of a loaded pool,
+/// so there really are slots that were reusable one era ago and are live now
+/// — and then reads the record back to check that neither half names a slot
+/// from the other.
+///
+/// Two earlier versions of this test proved nothing. One compared the
+/// reopened pool's SIZE against what the writing session held afterwards and
+/// failed at 85 vs 79 — the test being wrong, not the code: the checkpoint
+/// publish takes its own chunks out of the pool after the record is computed.
+/// The other checked the reopened pool against the reopened owned set, which
+/// `finalize_scan_at` makes disjoint by construction — an assertion that
+/// cannot fail is not a test. Only the record itself is evidence.
+#[test]
+fn a_refresh_never_records_a_slot_that_is_live() {
+    let path = scratch();
+    let _c = Cleanup(path.clone());
+    {
+        let mut c = Container::create_with_options(
+            &path,
+            options(0, PaddingPolicy::BucketGrowth { bucket_chunks: 64 }),
+        )
+        .unwrap();
+        let mut s = c.create_space(b"pw").unwrap();
+        for i in 0..8u32 {
+            let mut tx = s.begin_tx();
+            tx.put(Namespace::SETTINGS, format!("k{i}").as_bytes(), b"v")
+                .unwrap();
+            tx.commit().unwrap();
+        }
+        s.write_self_heal_checkpoint().unwrap();
+    }
+
+    let mut c = Container::open(&path).unwrap();
+    let mut s = c.open_space(b"pw").unwrap();
+    assert!(s.state.pool_recovered, "the fixture recovered no pool");
+    assert!(s.state.pool.len() > 4, "nothing to spend");
+    for i in 0..6u32 {
+        let mut tx = s.begin_tx();
+        tx.put(Namespace::SETTINGS, format!("r{i}").as_bytes(), b"vv")
+            .unwrap();
+        tx.commit().unwrap();
+    }
+    // Non-vacuity: with no reuse, no slot ever crosses from the pool into the
+    // live set and the check below has nothing to catch.
+    assert!(
+        s.state.reuse_count > 0,
+        "the session reused nothing, so this proves nothing"
+    );
+    s.write_self_heal_checkpoint().unwrap();
+
+    let (owned, pool) = recorded_checkpoint(&mut s);
+    assert!(!owned.is_empty() && !pool.is_empty(), "an empty record");
+    for slot in &pool {
+        assert!(
+            !owned.contains(slot),
+            "the record offers slot {slot} for reuse and names it live in the \
+             same breath — a writer would overwrite a live chunk"
+        );
+    }
+}

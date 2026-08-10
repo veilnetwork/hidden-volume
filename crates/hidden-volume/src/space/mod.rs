@@ -458,6 +458,20 @@ pub(crate) struct SpaceState {
     /// a slot a later commit reused decrypts under our key again, so the
     /// subtraction removes it whatever the checkpoint said.
     pub pool: DecoyPool,
+    /// Whether [`Self::pool`] was seeded from the recorded pool, or merely
+    /// starts empty because this open never read one.
+    ///
+    /// Only the checkpoint fast path recovers the pool; every full scan —
+    /// the parallel and mmap backends, and the constant-time open, which
+    /// takes the full path BY DESIGN because a fast path's chunk count
+    /// distinguishes a right password from a wrong one — leaves it empty.
+    ///
+    /// For the session itself that distinction is only a cost: no pool means
+    /// no reuse, which leaks disk and nothing else. It matters at checkpoint
+    /// WRITE time, where recording this session's empty pool over the
+    /// accumulated one destroys the only copy that exists. See
+    /// [`crate::space::checkpoint`] (report9 HV-14).
+    pub pool_recovered: bool,
     /// Monotone count of slots this handle has taken out of the pool.
     ///
     /// `commit_tx` reads the delta across its own body to size the churn
@@ -527,6 +541,8 @@ impl SpaceState {
             roots_payload_cache: None,
             attempted_seq: 0,
             pool: DecoyPool::default(),
+            // A brand-new space has no record to have recovered.
+            pool_recovered: false,
             reuse_count: 0,
             churn_count: 0,
             reuse_floor: usize::MAX,
