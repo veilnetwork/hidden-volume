@@ -120,6 +120,44 @@ def render_table(checksums: dict[str, int]) -> str:
     return "\n".join(lines)
 
 
+# One entry of the rendered table, however the Dart formatter has since laid
+# it out. `dart format` wraps a line past 80 columns, and the longest symbols
+# here are well past it, so a freshly generated table and a formatted one
+# differ as TEXT while naming the same numbers.
+ENTRY_RE = re.compile(r"'(" + CHECKSUM_PREFIX + r"[a-z0-9_]+)'\s*:\s*(\d+)\s*,")
+
+
+def parse_table(source: str) -> dict[str, int]:
+    """The checksums the bindings currently declare.
+
+    Read as DATA rather than compared as text. The check used to re-render the
+    table and diff the whole file, which made it a formatting check as much as
+    a drift check: `dart format` reflowed the long entries onto two lines, the
+    values never moved, and the gate failed on every run from then on. A gate
+    that always fails is one everybody learns to skip — and this one guards a
+    table that fails the app closed at launch when it is genuinely wrong.
+    """
+    start = source.find(BEGIN)
+    end = source.find(END)
+    if start < 0 or end < 0:
+        sys.exit(
+            f"error: markers not found in {BINDINGS}.\n"
+            f"Expected a block delimited by:\n{BEGIN}\n{END}"
+        )
+    block = source[start:end]
+    found = {m[0]: int(m[1]) for m in ENTRY_RE.findall(block)}
+    # A block that plainly holds entries while the pattern matches none is a
+    # broken PARSER, and reporting that as "stale" is how this gate spent a day
+    # failing for a line wrap. Say which it is.
+    if not found and CHECKSUM_PREFIX in block:
+        sys.exit(
+            "error: the generated block names checksum symbols but none "
+            "matched the entry pattern — the parser is out of step with the "
+            "file's layout, not the table with the library."
+        )
+    return found
+
+
 def splice(source: str, table: str) -> str:
     start = source.find(BEGIN)
     end = source.find(END)
@@ -152,11 +190,30 @@ def main() -> int:
     updated = splice(source, render_table(checksums))
 
     if args.check:
-        if updated != source:
+        declared = parse_table(source)
+        if declared != checksums:
+            only_declared = sorted(set(declared) - set(checksums))
+            only_built = sorted(set(checksums) - set(declared))
+            changed = sorted(
+                s
+                for s in set(declared) & set(checksums)
+                if declared[s] != checksums[s]
+            )
+            detail = []
+            if changed:
+                detail.append(
+                    "  changed: "
+                    + ", ".join(f"{s} ({declared[s]} -> {checksums[s]})" for s in changed)
+                )
+            if only_built:
+                detail.append("  missing from bindings.dart: " + ", ".join(only_built))
+            if only_declared:
+                detail.append("  no longer exported: " + ", ".join(only_declared))
             print(
                 "ERROR: the UniFFI checksum table in bindings.dart is stale.\n"
                 f"Checked against: {lib_path}\n"
-                "Regenerate it with: scripts/regen-dart-checksums.py",
+                + "\n".join(detail)
+                + "\nRegenerate it with: scripts/regen-dart-checksums.py",
                 file=sys.stderr,
             )
             return 1
@@ -166,11 +223,16 @@ def main() -> int:
         print(f"checksum table is up to date ({len(checksums)} entries) — {lib_path}")
         return 0
 
-    if updated == source:
+    if parse_table(source) == checksums:
         print(f"checksum table already current ({len(checksums)} entries)")
         return 0
     BINDINGS.write_text(updated)
     print(f"wrote {len(checksums)} checksums from {lib_path} into {BINDINGS}")
+    print(
+        "note: run `dart format` on the plugin — this writes one entry per "
+        "line and the formatter wraps the long ones. The check reads the "
+        "numbers, not the layout, so either shape passes."
+    )
     return 0
 
 
