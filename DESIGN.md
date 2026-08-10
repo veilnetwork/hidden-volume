@@ -274,10 +274,13 @@ unlock-time, not per-message; acceptable.
 **Streaming memory** (v0.6): scan does not accumulate decrypted plaintexts.
 Per iteration there is one ciphertext chunk (4 KiB stack) and one Plaintext
 (≈4 KiB heap), both die before the next iteration. From persistent state
-only `owned_slots: Vec<u64>` (8 B/owned chunk), `commit_history: Vec<u64>`
-(8 B/Superblock after dedup), and the payload of the current max-seq
-Superblock (~48 B) accumulate. Total — on the order of 16 B per owned chunk
-regardless of container size. That is ~250× less than holding all
+only `owned_slots` (a BITMAP — one bit per slot in the file, not eight bytes
+per owned chunk; see `space::slots`), `commit_history: Vec<u64>` (8 B per
+distinct commit seq, replicas collapsed as the scan goes), and the payload of
+the current max-seq Superblock (~48 B) accumulate. Measured end to end by
+`tests/open_peak_memory.rs`: **0.16 bytes of peak heap per owned slot**, which
+is ~2.5 MiB at the 16M-slot scan cap. It was 27.5 B/slot — 440 MiB at the cap
+— while `owned_slots` was a `Vec<u64>` (report9 HV-13). That is ~250× less than holding all
 Plaintexts during the scan; critical for weak devices with large
 (multi-GiB) containers.
 
@@ -702,19 +705,30 @@ cannot. Hiding write *volume* requires writing at a constant rate
 independent of activity, which is a battery and flash-wear cost this
 project has not accepted.
 
-**Unchanged — the file still grows.** Reuse recycles `IndexNode` and
-`DataBatch` chunks, because those are what `vacuum_orphans` retires.
-It does **not** recycle superseded `Commit` and `Superblock` chunks:
-those are the crash-recovery fallbacks and the `commit_history`
-anchors, and vacuum leaves them alone by design. Steady-state growth
-is therefore `1 + superblock_replicas` chunks per commit (4 at the
-default) instead of that plus the rebuilt index path. Measured on
-the `reuse_recycles_the_index_tree_and_nothing_else` fixture at one
-replica: 24 commits appended **48** slots where append-only appended
-**72**. Reuse reduces growth; only `compact_known` still stops it.
-Retiring old eras would close the rest and would bound
-`commit_history`, which is a published contract — a separate
-decision, not this one.
+**Reuse alone did not stop the growth; the horizon does.** Reuse
+recycles `IndexNode` and `DataBatch` chunks, because those are what
+`vacuum_orphans` retires. It used to leave superseded `Commit` and
+`Superblock` chunks alone — the crash-recovery fallbacks and the
+`commit_history` anchors — so growth stayed at `1 + superblock_replicas`
+chunks per commit (4 at the default). Measured on the
+`reuse_recycles_the_index_tree_and_nothing_else` fixture at one replica:
+24 commits appended **48** slots where append-only appended **72**.
+
+That paragraph used to end "retiring old eras would bound
+`commit_history`, which is a published contract — a separate decision,
+not this one". **The decision was taken.** `vacuum_orphans` now retires
+the pair — the era's Superblock and the Commit chunk it points at —
+for every era below `commit_seq() - ANCHOR_HORIZON` (1024). The two go
+together: a fallback Superblock whose Commit chunk is gone is worse
+than no fallback.
+
+Measured on a fixture rewriting one key: the owned set PLATEAUS
+(2003, 3604, 5204, 6115, 6116, 6115 across sessions of 400 commits)
+and per-commit growth falls from ~17 KB to ~0.5 KB. What is left is
+the padding policy doing its job — with `PaddingPolicy::None` the same
+fixture grows by exactly zero — and the D2 fallback depth is unchanged,
+because the scan caps candidates at 64 and the horizon is far above it.
+The contract that changed is in `docs/{en,ru}/guide/multi-device.md`.
 
 **Cost.** One extra chunk write per reused slot per commit, in the
 `fsync` the padding already pays for. On a phone that is 4 KiB of
@@ -768,9 +782,12 @@ documented under threat-model "out of scope".
    adversary (T2) can roll the file back to an old version — the library
    alone does not detect this. The host-app contract is captured in
    `docs/en/guide/multi-device.md`: `Space::commit_seq()` — the current
-   monotonic commit counter; `Space::commit_history()` — the list of all
-   seqs whose Superblocks are still on disk and decrypt under our key (to
-   distinguish rollback from a fork). Anchor ONLY for spaces whose
+   monotonic commit counter; `Space::commit_history()` — the seqs whose
+   Superblocks are still on disk and decrypt under our key, which since
+   `ANCHOR_HORIZON` is a WINDOW on recent history rather than all of it (to
+   distinguish rollback from a fork, and see the guide for the order the
+   three tests must be made in: an anchor older than the horizon is
+   "unknown", not "fork"). Anchor ONLY for spaces whose
    existence is not deniability-sensitive.
 
 3. **Maximum slot count.** With `u64` seq and 4 KiB chunks the file goes
