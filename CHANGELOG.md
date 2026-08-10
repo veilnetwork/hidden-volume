@@ -12,6 +12,42 @@ format.
 
 ## [Unreleased]
 
+### Fixed — report9 HV-14: a checkpoint refresh recorded an empty decoy pool over the accumulated one
+
+- **The pool exists in one place only.** Nothing on disk but the checkpoint
+  chain says which retired slots may be rewritten. A session that never read
+  the chain therefore holds no pool — and used to record that emptiness as
+  truth on its next self-heal. The loss is permanent, not per-session: every
+  later open starts append-only and there is nothing left to rebuild from.
+
+- **The session that does this is the constant-time open.** It takes the full
+  scan BY DESIGN — a fast path's chunk count is exactly the signal that
+  distinguishes a right password from a wrong one — so the mode chosen for its
+  resistance to timing was the one that wiped the pool. Measured on a fixture:
+  39 recorded slots became 1.
+
+- **The fix carries the previous record forward.** `write_self_heal_checkpoint`
+  now reads the chain it is about to supersede BEFORE scrubbing it, and merges
+  that pool with the live one whenever this session never loaded a record.
+  Merged rather than substituted: a pool-less session still frees slots of its
+  own (every commit's garbage padding lands there), and those are as real as
+  the carried ones. Both halves are filtered against this era's owned set and
+  high-water, so the record stays true on its own terms rather than only after
+  a reader repairs it.
+
+- **The condition is "never loaded a record", not "the pool is empty".** New
+  `SpaceState::pool_recovered`, set by the scan that actually read the chain.
+  Emptiness is indistinguishable one instruction after the open and wrong one
+  commit later: with it, a session's handful of padding slots is recorded over
+  the accumulated forty. A break-check confirms — the narrower condition passes
+  a fixture that refreshes immediately and fails one that commits first.
+
+- **Tested by identity, not by count.** The first version of the container-level
+  test asserted the recorded pool had not shrunk, and a break-check that removed
+  the carry-forward passed it: the session's own padding refilled the count with
+  forty different slots. The test now names the slots the previous record
+  offered and requires each to be in the new record still.
+
 ### Fixed — report9 HV-16: the transport's own copies of a secret
 
 - **The Rust half was already done** (audit H-03): `decode_space_keys` takes
