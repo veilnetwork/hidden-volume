@@ -136,6 +136,12 @@ impl OwnedSet {
 
     /// Absorb `other`. Used by the parallel scan's reduce, where the two
     /// halves are disjoint by construction (each work item owns a slot range).
+    ///
+    /// Gated exactly as its one caller is. `parallel-scan` is off by default —
+    /// mobile does not want six megabytes of rayon for a scan that is already
+    /// AEAD-bound — so on a default build this method has no callers at all,
+    /// and the Android cross-compile gate builds with `-D warnings`.
+    #[cfg(all(feature = "parallel-scan", unix))]
     pub(crate) fn union_from(&mut self, other: &Self) {
         if other.words.len() > self.words.len() {
             self.words.resize(other.words.len(), 0);
@@ -227,6 +233,7 @@ mod tests {
         assert_eq!(s.to_sorted_vec().len(), 100);
     }
 
+    #[cfg(all(feature = "parallel-scan", unix))]
     #[test]
     fn a_union_counts_the_overlap_once() {
         let mut a: OwnedSet = [1u64, 2, 3].into_iter().collect();
