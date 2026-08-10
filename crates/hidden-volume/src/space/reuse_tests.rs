@@ -344,6 +344,79 @@ fn reuse_recycles_the_index_tree_and_nothing_else() {
     );
 }
 
+/// Same as [`build_with_pool`], but under a padding policy that actually
+/// appends — the only fixture in which the post-commit padding step runs at
+/// all, and therefore the only one in which it can be made to fail.
+fn build_with_pool_and_padding(path: &std::path::Path, keys: u32) {
+    let mut c = Container::create_with_options(
+        path,
+        options(0, PaddingPolicy::BucketGrowth { bucket_chunks: 64 }),
+    )
+    .unwrap();
+    let mut s = c.create_space(b"pw").unwrap();
+    for i in 0..keys {
+        let mut tx = s.begin_tx();
+        tx.put(Namespace::SETTINGS, format!("k{i}").as_bytes(), b"v")
+            .unwrap();
+        tx.commit().unwrap();
+    }
+    s.vacuum_orphans().unwrap();
+    s.write_self_heal_checkpoint().unwrap();
+}
+
+/// Churn must survive a padding failure, because the commit does.
+///
+/// `commit_tx` publishes the superblock BEFORE it pads, and it deliberately
+/// does not fail afterwards (audit pass 18) — the data is durable, so a late
+/// error would be a lie. Both post-commit obligations therefore run on a
+/// commit that has already happened, and they used to run as one `and_then`
+/// chain: padding first, churn inside it. A padding failure skipped the churn
+/// silently and `commit_tx` still returned `Ok`.
+///
+/// What that leaves on disk is precisely the snapshot pair §9.1 exists to
+/// deny: real writes landed in reused slots, no decoy moved, so every offset
+/// that changed below the tail holds live data. And padding fails on a full
+/// disk — an adversary who can fill one can ask for that pair.
+#[test]
+fn a_padding_failure_does_not_cost_the_commit_its_churn() {
+    let path = scratch();
+    let _c = Cleanup(path.clone());
+    build_with_pool_and_padding(&path, 40);
+
+    let mut c = Container::open(&path).unwrap();
+    let mut s = c.open_space(b"pw").unwrap();
+    let pool = s.stats().unwrap().reusable_slot_count;
+    assert!(pool >= 4, "fixture pool too small: {pool}");
+
+    let seq = {
+        let _fault = crate::container::file::ForcedGarbageAppendFailure::arm();
+        let mut tx = s.begin_tx();
+        tx.put(Namespace::SETTINGS, b"k0", b"changed").unwrap();
+        // The commit is durable before padding is even attempted, so this
+        // must still be Ok — the audit-pass-18 invariant.
+        tx.commit().unwrap()
+    };
+    assert!(seq > 0, "commit returned no sequence");
+
+    // NOT vacuous: if the arm had missed — a policy that padded zero chunks,
+    // a path that never reached `append_garbage_chunks` — there would be no
+    // padding failure to survive, and everything below would pass on a commit
+    // that was never in the state under test.
+    assert!(
+        s.state.last_padding_error.is_some(),
+        "the padding fault never fired, so this test proves nothing"
+    );
+
+    let reused = s.state.reuse_count;
+    let churned = s.state.churn_count;
+    assert!(reused > 0, "the commit appended instead of reusing");
+    assert_eq!(
+        churned, reused,
+        "padding failed and took the churn with it: {reused} slots reused, \
+         {churned} decoys churned"
+    );
+}
+
 /// The distinguisher the prohibition existed to prevent, checked as an
 /// observation rather than as an implementation detail.
 ///

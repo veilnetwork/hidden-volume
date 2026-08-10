@@ -297,6 +297,43 @@ fn create_fsync_should_fail() -> bool {
     CREATE_FSYNC_FAILS.with(std::cell::Cell::get)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only switch that fails post-commit garbage padding.
+    ///
+    /// Padding fails for reasons no test can stage on a real filesystem: a
+    /// full disk, a quota, the write budget 64 GiB up. Which one does not
+    /// matter to what this is armed for — it is the only way to reach the
+    /// state where the commit is already durable and the padding step did not
+    /// finish, and what happens to the OTHER post-commit obligation in that
+    /// state is a security property, not a cleanup detail.
+    ///
+    /// Thread-local for the reason `CREATE_FSYNC_FAILS` above records at
+    /// length: a process-global fires inside whatever unrelated commit a
+    /// parallel test thread happens to be running.
+    static GARBAGE_APPEND_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Arm [`GARBAGE_APPEND_FAILS`] on this thread; restores on drop so a
+/// panicking test cannot leak the fault into whatever runs next.
+#[cfg(test)]
+pub(crate) struct ForcedGarbageAppendFailure;
+
+#[cfg(test)]
+impl ForcedGarbageAppendFailure {
+    pub(crate) fn arm() -> Self {
+        GARBAGE_APPEND_FAILS.with(|c| c.set(true));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for ForcedGarbageAppendFailure {
+    fn drop(&mut self) {
+        GARBAGE_APPEND_FAILS.with(|c| c.set(false));
+    }
+}
+
 impl ContainerFile {
     /// Create a new container at `path` with the given Argon2 params.
     /// Errors if the file already exists or `params` are below
@@ -499,6 +536,10 @@ impl ContainerFile {
         self.check_writable()?;
         if n == 0 {
             return Ok(());
+        }
+        #[cfg(test)]
+        if GARBAGE_APPEND_FAILS.with(std::cell::Cell::get) {
+            return Err(Error::Internal("forced padding failure (test)"));
         }
         // Audit pass 17 B: refuse if the write would push past the
         // open-scan budget. Previously the create / post-commit-padding

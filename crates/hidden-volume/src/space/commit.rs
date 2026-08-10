@@ -426,7 +426,17 @@ impl<'f> Space<'f> {
         // snapshot interval rather than in two the adversary can order.
         let real_added = self.file.slot_count() - slots_before;
         let pad_from = self.file.slot_count();
-        let padding_outcome = self
+        // Padding and churn are ATTEMPTED SEPARATELY, and this is the whole
+        // point of the shape below. They used to be one `and_then` chain, so a
+        // padding failure — a quota, an arithmetic slip, ENOSPC — skipped churn
+        // entirely. The superblock is already durable by here, so that left a
+        // commit whose real writes reused slots and whose decoys never moved:
+        // exactly the snapshot pair §9.1 exists to deny, produced by a failure
+        // an adversary can provoke by filling the disk.
+        //
+        // Churn is not optional cleanup. It is what makes the reuse deniable,
+        // so it runs whatever padding did.
+        let padding_result = self
             .file
             .padding_policy
             .garbage_after_commit(pad_from, real_added)
@@ -434,14 +444,20 @@ impl<'f> Space<'f> {
                 if pad_count > 0 {
                     self.file.append_garbage_chunks(pad_count)?;
                 }
-                // One churned decoy per slot this commit reused. Drawn
-                // from the pool the reuse drew from, uniformly, as the
-                // same commit — see `CHURN_PER_REUSE` for why the rate is
-                // tied to reuse and not to a clock.
-                let reused = self.state.reuse_count.saturating_sub(reuse_before) as usize;
-                self.churn_decoys(reused.saturating_mul(super::CHURN_PER_REUSE))?;
-                self.file.fsync()
+                Ok(())
             });
+        // One churned decoy per slot this commit reused. Drawn from the pool
+        // the reuse drew from, uniformly, in the same commit — see
+        // `CHURN_PER_REUSE` for why the rate is tied to reuse and not a clock.
+        let reused = self.state.reuse_count.saturating_sub(reuse_before) as usize;
+        let churn_result = self
+            .churn_decoys(reused.saturating_mul(super::CHURN_PER_REUSE))
+            .map(|_| ());
+        // One fsync for whatever landed, so both still share a single snapshot
+        // interval — the property that made them one chain in the first place.
+        let sync_result = self.file.fsync();
+        // First failure reported, both attempted.
+        let padding_outcome = padding_result.and(churn_result).and(sync_result);
         // Garbage THIS space appended, at a slot range this space watched
         // itself write — the second of the two populations it can prove
         // are decoys (DESIGN §9.1). Recorded outside the closure and from
