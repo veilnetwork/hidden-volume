@@ -595,16 +595,28 @@ RustBuffer _bufferFromBytes(Uint8List src) {
 /// deserializer expects: `i32` BE length + raw bytes. Use for any FFI
 /// arg whose Rust type is `Vec<u8>` (passwords, KV keys/values).
 RustBuffer _bufferFromByteVec(Uint8List src) {
-  final w = _Writer()..writeByteVec(src);
-  // The framed copy is a SECOND copy of the secret, in the Dart heap this
-  // time, and handing it to the garbage collector unwiped is the same leak one
-  // layer up (report9 HV-16). Rust has copied it by the time
-  // `_bufferFromBytes` returns, so wiping here is safe.
-  final framed = w.toBytes();
+  return _bufferFromOwnedSecret((_Writer()..writeByteVec(src)).toBytes());
+}
+
+/// Hand an OWNED Dart byte list to Rust, then wipe it.
+///
+/// The encoded copy is a SECOND copy of the secret, in the Dart heap this
+/// time, and handing it to the garbage collector unwiped is the same leak the
+/// `calloc` buffer had one layer down (report9 HV-16). Rust has copied it by
+/// the time [_bufferFromBytes] returns, so wiping here is safe.
+///
+/// **`owned` is the whole contract.** Every caller passes the result of
+/// `_Writer.toBytes()`, which is a fresh concatenation — never a buffer the
+/// caller of the caller still holds. `BytesBuilder.takeBytes()` would NOT
+/// satisfy that: `_Writer` builds on `BytesBuilder(copy: false)`, so for a
+/// single-chunk payload `takeBytes` returns that chunk BY REFERENCE, and the
+/// "owned" buffer would be the host app's live password. `toBytes()` always
+/// copies. `test/secret_buffers_wiped_test.dart` pins that choice.
+RustBuffer _bufferFromOwnedSecret(Uint8List owned) {
   try {
-    return _bufferFromBytes(framed);
+    return _bufferFromBytes(owned);
   } finally {
-    framed.fillRange(0, framed.length, 0);
+    owned.fillRange(0, owned.length, 0);
   }
 }
 
@@ -629,9 +641,36 @@ List<Uint8List> _decodeFramedKeys(Uint8List buf) {
 Uint8List _bufferToBytes(RustBuffer buf) {
   try {
     if (buf.len == 0 || buf.data == ffi.nullptr) return Uint8List(0);
-    return Uint8List.fromList(buf.data.asTypedList(buf.len));
+    final copy = Uint8List.fromList(buf.data.asTypedList(buf.len));
+    // The INBOUND leg of the same leak (report9 HV-16). Everything Rust hands
+    // back through here is plaintext this app asked for — KV values, log
+    // payloads, and the raw `SpaceKeys` — and `_freeBuffer` returns the bytes
+    // to the Rust allocator exactly as they are. The wipe sits between the
+    // copy and the free, and both edges are load-bearing: above the copy it
+    // returns zeros to the caller, below the free it writes into memory the
+    // allocator has already taken back. Dropping a `Vec<u8>` never reads its
+    // contents, so zeroing first is safe.
+    buf.data.asTypedList(buf.len).fillRange(0, buf.len, 0);
+    return copy;
   } finally {
     _freeBuffer(buf);
+  }
+}
+
+/// Decode a `Vec<u8>` reply whose CONTENT is a secret, wiping the framed
+/// intermediate.
+///
+/// `_Reader(_bufferToBytes(out)).readByteVec()` leaves the framed list — the
+/// `i32` BE length plus the secret itself — as an anonymous temporary for the
+/// garbage collector. `readByteVec` wraps its slice in `Uint8List.fromList`, a
+/// real copy, so the frame is dead the moment it returns and wiping it costs
+/// the caller nothing.
+Uint8List _secretByteVecFrom(RustBuffer out) {
+  final framed = _bufferToBytes(out);
+  try {
+    return _Reader(framed).readByteVec();
+  } finally {
+    framed.fillRange(0, framed.length, 0);
   }
 }
 
@@ -940,6 +979,10 @@ class HvPasswordRotation {
   final Uint8List newPwd;
 }
 
+/// Every password in the rotation, old and new, concatenated into one blob —
+/// the densest secret this plugin ever builds. It goes out through
+/// [_bufferFromOwnedSecret], not [_bufferFromBytes], because the caller's
+/// buffers are untouched by `toBytes()` and this blob belongs to nobody else.
 RustBuffer _writeRotations(List<HvPasswordRotation> rotations) {
   final w = _Writer()..writeI32(rotations.length);
   for (final r in rotations) {
@@ -947,15 +990,17 @@ RustBuffer _writeRotations(List<HvPasswordRotation> rotations) {
       ..writeByteVec(r.oldPwd)
       ..writeByteVec(r.newPwd);
   }
-  return _bufferFromBytes(w.toBytes());
+  return _bufferFromOwnedSecret(w.toBytes());
 }
 
+/// Same shape as [_writeRotations], same reason: `compact_known` carries every
+/// password that unlocks a kept space.
 RustBuffer _writeBytesSequence(List<Uint8List> items) {
   final w = _Writer()..writeI32(items.length);
   for (final b in items) {
     w.writeByteVec(b);
   }
-  return _bufferFromBytes(w.toBytes());
+  return _bufferFromOwnedSecret(w.toBytes());
 }
 
 /// Decode `Option<Vec<u8>>`: 1 byte tag + (Some) i32 BE len + bytes.
@@ -1582,8 +1627,9 @@ class SpaceHandleBindings {
     _ensureOpen();
     final h = _cloneHandle();
     final out = rustCall<RustBuffer>((s) => _spSpaceKeys(h, s));
-    // Wire format `i32 BE len + bytes` (Vec<u8>), same as listNamespaces.
-    return _Reader(_bufferToBytes(out)).readByteVec();
+    // Wire format `i32 BE len + bytes` (Vec<u8>), same as listNamespaces —
+    // but the payload is 64 raw key bytes, so the frame gets wiped too.
+    return _secretByteVecFrom(out);
   }
 
   /// Walk every chunk owned by this space, AEAD-decrypting and
@@ -1801,7 +1847,7 @@ class MultiSpaceHandleBindings {
     _ensureOpen();
     final h = _clone();
     final out = rustCall<RustBuffer>((s) => _msSpaceKeys(h, _sid(id), s));
-    return _Reader(_bufferToBytes(out)).readByteVec();
+    return _secretByteVecFrom(out);
   }
 
   /// Apply a write batch to space [id]; returns its new commit_seq.

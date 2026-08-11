@@ -478,6 +478,37 @@ copied across the FFI boundary, but the source buffer remains under
 your control on the foreign side. Zero it out yourself once the call
 resolves (Kotlin: `pw.fill(0)`; Swift: `pw.resetBytes(in: 0..<count)`).
 
+#### What the Dart plugin wipes on its own side (report9 HV-01 / HV-02)
+
+The rule above is about YOUR buffer. Between it and Rust's `Zeroizing`
+sit the copies the binding layer makes, and
+`experimental/flutter_plugin/hidden_volume/` now wipes each of them:
+
+- **Outbound**, in `_bufferFromBytes` (the `calloc` buffer, wiped
+  before the `free`) and in `_bufferFromOwnedSecret`, the one owning
+  helper behind `_bufferFromByteVec`, `_writeRotations` and
+  `_writeBytesSequence`. The last two encode every password of a
+  `change_passwords` / `compact_known` call into a single blob — the
+  densest secret the plugin builds.
+- **Inbound**, in `_bufferToBytes`: the Rust-owned buffer is wiped
+  between the copy out and `_freeBuffer`. Both edges are load-bearing.
+  `spaceKeys()` additionally wipes its framed intermediate via
+  `_secretByteVecFrom`, which is where the 64 raw key bytes sit
+  between the FFI reply and the decoded result.
+- **Across isolates.** `Isolate.spawn` / `Isolate.run` deep-copy their
+  message, so the worker's bootstrap password and a one-shot isolate's
+  rotation list are that isolate's OWN buffers; each is wiped in a
+  `finally`, failed opens included. The synchronous `changePasswords`
+  and `compactKnown` deliberately do NOT do this — those lists are the
+  caller's, and `oldPwd == newPwd` is a documented no-op that passes
+  one instance twice. Your buffer is still yours to zero.
+
+**Known residual.** `space_keys` returns a 64-byte `Vec<u8>` that
+uniffi's `Lower` takes by move; that Rust-side copy is not wrapped.
+A `Zeroizing` wrapper there would introduce a third copy and scrub the
+wrong one, so it is recorded rather than worked around. It applies to
+the sync, async and multi-space exports alike.
+
 ## Versioning
 
 The FFI crate is versioned independently from `hidden-volume` core,
