@@ -171,6 +171,10 @@ pub use container::Container;
 pub use error::{Error, Result};
 pub use multi::MultiSpace;
 pub use open::MAX_OPEN_SCAN_CHUNKS;
+/// Fast-path scan seam for tests OUTSIDE this crate — see
+/// [`open::test_hooks`]. Off by default; `open` itself stays crate-private.
+#[cfg(feature = "test-hooks")]
+pub use open::test_hooks;
 pub use space::Space;
 
 /// How many commit eras a space keeps behind the current one.
