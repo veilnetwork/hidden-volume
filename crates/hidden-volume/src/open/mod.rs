@@ -52,17 +52,27 @@ use crate::{Error, NONCE_LEN, PLAINTEXT_LEN, Result, TAG_LEN};
 /// `[cp_high_water, total)`. See [`try_fast_scan_inner`].
 const REVERSE_SCAN_BUDGET: u64 = 4096;
 
-/// In-crate test seams: a counter of fast-path engagements and a toggle
-/// to force the full scan, so unit tests can assert the fast-path was
-/// actually taken and compare it against a forced full scan. Compiled
-/// out of release builds entirely.
+/// Test seams: a counter of fast-path engagements and a toggle to force
+/// the full scan, so a test can assert the fast path was actually taken
+/// and compare it against a forced full scan. Compiled out of release
+/// builds entirely.
 ///
 /// **Thread-local** so concurrently-running `#[test]`s (cargo's default)
 /// don't race on shared state: a synchronous `open_space` runs the scan
 /// on the calling test's thread, so the thread-local counter/toggle are
 /// the same instance the test reads.
-#[cfg(test)]
-pub(crate) mod test_hooks {
+///
+/// Reachable two ways, and it needs both. `#[cfg(test)]` covers in-crate
+/// unit tests (`space::checkpoint`, `space::reuse_tests`). The
+/// `test-hooks` feature covers `tests/*.rs`, which are SEPARATE crates
+/// linked against a non-test build of this one and therefore cannot see
+/// a `cfg(test)` item at all. `tests/open_peak_memory_fast_path.rs`
+/// needs it: only an integration-test binary can install the
+/// `#[global_allocator]` that measures peak bytes, and without this
+/// counter such a test cannot prove which scan path it measured.
+#[cfg(any(test, feature = "test-hooks"))]
+#[cfg_attr(feature = "test-hooks", doc(hidden))]
+pub mod test_hooks {
     use std::cell::Cell;
 
     thread_local! {
@@ -70,16 +80,20 @@ pub(crate) mod test_hooks {
         static HITS: Cell<u64> = const { Cell::new(0) };
     }
 
-    pub(crate) fn set_disable(v: bool) {
+    /// Force the full scan on this thread, so a test can compare the two
+    /// paths on one fixture.
+    pub fn set_disable(v: bool) {
         DISABLE.with(|c| c.set(v));
     }
-    pub(crate) fn disabled() -> bool {
+    pub fn disabled() -> bool {
         DISABLE.with(Cell::get)
     }
-    pub(crate) fn hits() -> u64 {
+    /// How many times the fast path has engaged on this thread since
+    /// [`reset_hits`].
+    pub fn hits() -> u64 {
         HITS.with(Cell::get)
     }
-    pub(crate) fn reset_hits() {
+    pub fn reset_hits() {
         HITS.with(|c| c.set(0));
     }
     pub(crate) fn record_hit() {
@@ -288,11 +302,11 @@ fn scan_and_recover_inner(
     // time; its callers have paid for equal timing and were quietly being
     // handed back the speed instead.
     let fast_enabled = !constant_time && {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-hooks"))]
         {
             !test_hooks::disabled()
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-hooks")))]
         {
             true
         }
@@ -307,7 +321,7 @@ fn scan_and_recover_inner(
             constant_time,
         )?
     {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-hooks"))]
         test_hooks::record_hit();
         return Ok(state);
     }
@@ -889,13 +903,25 @@ fn try_fast_scan_inner(
     // as the covered region, and hands `finalize_scan_at` the ownership
     // facts it needs to subtract a stale pool entry that has since gone
     // live.
-    let mut head_owned: Vec<u64> = owned_below
+    // A bitmap, not a `Vec<u64>`. Chaining both inputs into a vector held a
+    // SECOND eight-bytes-per-slot copy of them alongside the originals — peak
+    // `2 * (|owned| + |pool|) * 8`, memory proportional to the file
+    // (report11 HV-M1). `OwnedSet` is one bit per slot, and it is ascending
+    // and deduplicated by construction, so the `sort_unstable` + `dedup` that
+    // restored an order both inputs already had are gone with it.
+    //
+    // Measured over 30,067-slot and 60,127-slot containers, the fast open's
+    // peak falls from 20.82 to 11.61 bytes per slot in the file. Budgeted by
+    // `tests/open_peak_memory_fast_path.rs`, which asserts the slope over a
+    // 7,522/30,067 pair: 19.27 before, 13.55 after, against a 16.0 bound.
+    let mut head_owned = crate::space::slots::OwnedSet::with_capacity(cp_high_water);
+    for slot in owned_below
         .into_iter()
         .chain(pool_below.iter().copied())
         .filter(|&s| s < cp_high_water)
-        .collect();
-    head_owned.sort_unstable();
-    head_owned.dedup();
+    {
+        head_owned.insert(slot);
+    }
 
     let mut acc = ScanAcc {
         recorded_pool: pool_below,
@@ -904,7 +930,7 @@ fn try_fast_scan_inner(
     };
     // The selective set: recorded head-owned + pool slots, then the fresh
     // tail.
-    let selective = head_owned.iter().copied().chain(cp_high_water..total);
+    let selective = head_owned.iter().chain(cp_high_water..total);
     for (i, slot) in selective.enumerate() {
         if let Some(token) = cancel
             && (i as u64).is_multiple_of(CANCEL_POLL_PERIOD)

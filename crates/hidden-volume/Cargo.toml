@@ -29,6 +29,18 @@ parallel-scan = ["dep:rayon"]
 # flock to exclude that case), (b) on small containers there is no
 # measurable win over the streaming `pread` path. cfg(unix) only.
 mmap = ["dep:memmap2"]
+# Exposes `open::test_hooks` — the open-scan fast-path counter and its
+# disable switch — to code OUTSIDE this crate.
+#
+# The seam already existed for in-crate `#[cfg(test)]` use (checkpoint.rs,
+# reuse_tests.rs). `#[cfg(test)]` is invisible to `tests/*.rs`, which are
+# separate crates compiled against a NON-test build of the lib, so an
+# integration test could not ask whether the fast path engaged. That matters
+# for `tests/open_peak_memory_fast_path.rs`: measuring the fast path's peak
+# allocation needs a `#[global_allocator]`, which only an integration test
+# binary can install, and asserting it measured the FAST path needs this
+# counter. Off by default — nothing in a shipped build compiles it.
+test-hooks = []
 
 [dependencies]
 # AEAD: XChaCha20-Poly1305 — 192-bit nonce safe for random generation.
