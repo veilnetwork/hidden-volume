@@ -420,6 +420,61 @@ uniffi-bindgen-kotlin --library target/debug/libhidden_volume_ffi.so --out-dir b
 `uniffi-bindgen-swift`. The bindgen tools are not vendored into this
 repo because they evolve independently of the FFI surface.
 
+## `StatsInfo` — the two things a poll used to lose (report10 HV-04)
+
+`stats()` is what a host polls. Two things the core has always held did
+not cross it, and both are things the host is the only one that can act
+on.
+
+**`reusable_slot_count`.** The decoy pool: slots this space has retired
+and will reuse before it grows the file again. Without it, the only
+compaction signal on this side of the boundary was
+`utilization_ratio`, and that half answers wrongly in both directions —
+a low ratio with a large pool is a container recycling healthily, and
+compacting it rewrites the whole file and rotates the `container_id`
+for nothing; a low ratio with a pool near zero is the shape that
+genuinely needs `compact_known`. Read the two together, never one
+alone. (It is also the anonymity set a reused slot hides in — see
+DESIGN §9.1.)
+
+**`hardening_failure`.** The post-commit padding / churn / fsync record,
+carrying **which** step failed:
+
+| Step | What is no longer true |
+|---|---|
+| `Padding` | the commit's SIZE is readable by a multi-snapshot adversary |
+| `Churn` | the slots that commit REUSED stand alone in a snapshot diff |
+| `Sync` | neither masking write is on the platter yet |
+
+`Some(_)` does not mean the commit failed — it is durable. What is
+weaker than promised is the masking around it, which is why it rides on
+`stats` rather than on `commit`'s return.
+
+### Why it is sticky, and why there is an acknowledgement
+
+The record is **not** "the last commit's outcome". Once set it stays set
+until `acknowledge_hardening_error()`, and nothing else clears it: not a
+later successful commit, not a vacuum, not another read of `stats`. A
+later failure does not replace it either — the first unacknowledged one
+wins, the same rule `commit_tx` already applies to the three steps
+within one commit.
+
+It has to work that way because the host learns about this by POLLING.
+The core recorded only the newest commit's outcome, so an ordinary
+second commit landing between two polls erased the warning, and the
+write whose masking failed was reported to nobody. A field that merely
+crossed the boundary without becoming sticky would have moved the loss
+one step outward, not closed it.
+
+`acknowledge_hardening_error()` is the other half: sticky with no way to
+dismiss is a warning permanently on screen, which teaches whoever reads
+it to stop reading it. Call it once the warning has actually been
+surfaced — acknowledging it unread throws the same warning away by hand.
+It is idempotent, and a failure recorded afterwards sticks in its turn.
+
+Exported on both `SpaceHandle` and `AsyncSpaceHandle`. The state is
+in-memory: a reopened handle starts clear.
+
 ## Threading model — Mutex per handle
 
 uniffi generates `Arc<SpaceHandle>` — multiple foreign-side references

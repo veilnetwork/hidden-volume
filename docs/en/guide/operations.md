@@ -364,6 +364,15 @@ at all right now — and, equally, the anonymity set a reused slot
 hides in. A host-app that cares about the T2' posture keeps the
 padding policy generous enough for that number to stay large.
 
+**Read it together with the ratio below, never one alone** (report10
+HV-04). A low ratio with a large pool is a container recycling
+healthily and wanting no compaction — acting on the ratio by itself
+rewrites the whole file and rotates the `container_id` for nothing.
+A low ratio with a pool near zero is the shape that does want L5. It
+crosses the FFI as `StatsInfo.reusable_slot_count`; until report10
+HV-04 it did not cross at all, so foreign-language hosts had only
+the half of the pair that cannot decide on its own.
+
 ### 5.2 Measuring live-ratio: `Space::utilization_ratio`
 
 `SpaceStats::utilization_ratio()` returns the fraction of the file's

@@ -12,6 +12,55 @@ format.
 
 ## [Unreleased]
 
+### Fixed — report10 HV-04: a commit could be masked worse than promised and nobody downstream was told
+
+The three post-commit hardening steps — padding, decoy churn, fsync — run
+after the superblock is durable, and they are deliberately not allowed to
+downgrade a commit that has already happened. Their failure was recorded on
+`SpaceState::last_hardening_error` instead, which is the right answer. Two
+things then threw that record away.
+
+- **A successful commit erased it.** The field held the LAST commit's outcome
+  and was replaced unconditionally, with a comment saying so. A host learns
+  about this by polling `stats`, and one more commit between two polls is not
+  an edge case — it is what a messenger does per message. So the ordinary
+  sequence "the padding that should have hidden this write's size failed; the
+  next write went fine" left nothing to poll for. The commit is durable either
+  way; what was gone was the only signal that its masking is not what the
+  format promises.
+
+  It is **sticky** now. The first unacknowledged failure stays readable until
+  the host says otherwise: no commit, successful or not, replaces it. A later
+  failure does not displace it either, which extends the rule `commit_tx`
+  already applies inside one commit — the first step to fail is the one
+  reported — to keep the news the host is least likely to have seen.
+
+- **It never crossed the FFI at all.** `StatsInfo` had no field for it, so
+  Kotlin / Swift / Dart got a successful commit and no way to warn the person.
+  It crosses now as `Option<HardeningFailureInfo>`, carrying WHICH step failed
+  (`Padding` / `Churn` / `Sync`) — a size leak, a broken deniability and a
+  missing fsync are three different pieces of news, and flattening them to a
+  bool here would have re-created report9 HV-06 one layer out.
+
+- **`Space::acknowledge_hardening_error()`**, exported on both handles, is the
+  only thing that clears it. Sticky with no way to dismiss is a warning that is
+  always on screen, which teaches whoever reads it to stop reading it.
+
+- **`reusable_slot_count` crosses too**, in the same record. It was the half of
+  the compaction decision the host did not have: `utilization_ratio` alone
+  reads a healthily recycling container as sparse, so a host acting on it
+  compacts destructively when it need not — rewriting the whole file and
+  rotating the `container_id` — and cannot tell that case from the one that
+  genuinely needs it.
+
+- **The checksum table did not and could not catch this.** uniffi checksums a
+  method's SIGNATURE, and `stats` still returns a thing called `StatsInfo`, so
+  adding two fields to the record moved no existing checksum — the new
+  acknowledge method is the only new entry. The hand-written Dart decoder would
+  have read the wrong offsets with `checksum_test.dart` green throughout. Its
+  wire layout is now pinned byte for byte in `test/stats_hardening_test.dart`,
+  against buffers the test writes itself.
+
 ### Fixed — report9 HV-01 / HV-02: the copies the first pass did not reach
 
 The HV-16 entry below wiped the two buffers on the argument path of a single
