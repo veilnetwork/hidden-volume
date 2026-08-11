@@ -12,6 +12,112 @@ format.
 
 ## [Unreleased]
 
+### Fixed — report11 HV-M1: the fast open path held two copies of the recorded slot union
+
+Phase C of `try_fast_scan_inner` built `owned_below ∪ pool_below` by chaining
+both into a `Vec<u64>`, so the union held a second eight-byte word per slot
+alongside the inputs it was built from — peak `2 * (|owned| + |pool|) * 8` —
+and then sorted and deduplicated an order both inputs already had. It is an
+`OwnedSet` now (one bit per slot, ascending and deduplicated by construction),
+which drops the copy to a bitmap and removes the `O(N log N)` sort.
+
+Measured on a container built by 6000 single-KV commits (30,067 slots), the
+fast open's peak allocation falls from **20.82 to 11.61 bytes per slot in the
+file** asymptotically; over the 1500/6000 fixture pair the test asserts, 19.27
+to 13.55.
+
+**Severity is LOW, not medium.** The cap that bounds this is
+`MAX_OPEN_SCAN_CHUNKS = 16 * 1024 * 1024`, which at `CHUNK_SIZE` 4096 is a
+64 GiB container — so even the old union was ~0.39% of file size, and it is
+memory proportional to a file its owner has already unlocked. This is a
+proportionality bound worth keeping, not a denial-of-service surface.
+
+- **The real defect was the test gap.** `tests/open_peak_memory.rs` never
+  covered the fast path and could not: its fixtures are 200 and 800 single-KV
+  commits, which come out at 1004 and 4004 slots, and
+  `maybe_self_heal_checkpoint` declines to write a checkpoint below
+  `CHECKPOINT_MIN_TOTAL = 4096`. With no checkpoint there is nothing for the
+  fast path to start from — measured, `test_hooks::hits()` is 0 for both
+  fixtures on every open. The large one misses the threshold by 92 slots.
+  Break-check: with the union reverted to `Vec<u64>`, the new
+  `fast_open_peak_does_not_scale_with_the_recorded_union` fails at 19.27 B/slot
+  against a 16.0 budget while `open_peak_does_not_scale_with_the_owned_set`
+  and its positive control both stay green — the divergence that proves the
+  old budget was measuring the full-scan path.
+
+- **`tests/open_peak_memory_fast_path.rs`** is new, and it is a separate test
+  binary rather than a second `#[test]` in the existing file because both
+  install a process-global tracking `#[global_allocator]`. Its denominator is
+  file slots, not owned slots: `audit_owned_chunk_count` plateaus near 4130
+  once the orphan vacuum and `ANCHOR_HORIZON` bound the live set, so there is
+  no owned-slot slope to fit. What scales is the decoy pool the vacuum feeds,
+  and `pool_below` is half the union.
+
+- **`test-hooks` cargo feature**, off by default, exposes `open::test_hooks`
+  outside the crate. The fast-path counter existed only under `#[cfg(test)]`,
+  which `tests/*.rs` cannot see — they are separate crates linked against a
+  non-test build — so no integration test could assert which scan path it had
+  just measured. Measuring peak allocation needs a `#[global_allocator]`, which
+  only an integration-test binary can install; the two requirements could not
+  be satisfied in the same place until now.
+
+### Changed — report11 HV-M3: the decoy pool's draw-cost bound was documented as a constant
+
+`DecoyPool::select`'s rustdoc gave "sixty-four draws is a commit that reuses
+thirty-two and churns thirty-two" as the worst case. Sixty-four is one
+illustrative commit, not a bound, and nothing caps a commit there. Traced
+through the two call sites that draw:
+
+```text
+draws_per_commit = (1 + CHURN_PER_REUSE) * reused = 2 * reused
+reused           <= min(pool_len / 2, chunks_placed)
+```
+
+One `select` per chunk placed via `DecoyPool::take`, gated by
+`Space::reuse_budget_available` (`space/mod.rs`) against a `reuse_floor`
+re-armed once per commit from `reuse_floor_for` (`space/commit.rs`), then
+`reused * CHURN_PER_REUSE` more through `DecoyPool::sample_distinct`
+(`churn_decoys`, same file). The cost scales with the POOL, not with a
+constant. The doc now records the derivation, the pointers, and the measured
+number for a realistic container: 1 GiB is 262,144 slots, between the first
+two rows of the table already there, so the illustrative 32-reuse/32-churn
+commit costs about 0.2 ms.
+
+The algorithm is unchanged — this is a documentation correction only.
+
+Two corrections to the report that prompted it. Its "~97k draws, seconds per
+commit" came from reading `MAX_RECORDS_PER_BATCH = 1024` (`space/log.rs`) as a
+per-namespace cap; it is per DataBatch CHUNK, which is the category error that
+produced the number. And the ceiling is `pool_len / 2` under integer division,
+not `ceil(pool_len / 2)`: reuse proceeds while `pool.len() > reuse_floor` and
+each `take` drops the length by one, so a pool of `P` funds exactly
+`P - reuse_floor_for(P)` = `P / 2` reuses — two for a pool of five, not three.
+
+### Fixed — report11 HV-M4: the iOS podspec named a licence file that is not there
+
+`experimental/flutter_plugin/hidden_volume/ios/hidden_volume.podspec` declared
+`:file => '../../../LICENSE-MIT'`. From `ios/` that resolves to
+`experimental/LICENSE-MIT`, which does not exist; the repo root is four levels
+up, not three. The sibling `experimental/flutter_plugin/hidden_volume/LICENSE`
+had the same off-by-one in its prose pointer.
+
+**This was never a build failure.** `pod install` succeeds today and always
+did — CocoaPods does not error on an unreadable license file, it silently
+drops the pod from the acknowledgements. Verified on this repo's own consumer:
+`hidden_volume` appears zero times in `ios/Pods/Target Support
+Files/Pods-Runner/Pods-Runner-acknowledgements.markdown` while twelve other
+pods do. So the damage is a licence-attribution defect in every shipped iOS
+build, plus a `pod lib lint` that could not pass.
+
+Also dropped the `preserve_paths` line, which was a no-op three times over:
+`preserve_paths` does not clean for `:path` development pods, the file is not
+in `source_files` so it was never compiled, and `scripts/build-ios.sh` already
+copies `bindings/swift/` into the Headers of both xcframework slices — its
+path was mis-rooted by the same one level besides.
+
+Checked with `pod ipc spec ios/hidden_volume.podspec` (CocoaPods 1.16.2): the
+spec parses and the license path now resolves to the repo-root `LICENSE-MIT`.
+
 ### Fixed — report10 HV-04: a commit could be masked worse than promised and nobody downstream was told
 
 The three post-commit hardening steps — padding, decoy churn, fsync — run

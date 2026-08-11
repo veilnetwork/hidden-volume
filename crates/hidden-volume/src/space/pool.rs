@@ -258,16 +258,50 @@ impl DecoyPool {
     /// | 1 M (≈4 GiB) | 6.8 µs | 0.43 ms |
     /// | 16 M (64 GiB, `MAX_OPEN_SCAN_CHUNKS`) | 84 µs | 5.4 ms |
     ///
-    /// Sixty-four draws is a commit that reuses thirty-two slots and churns
-    /// thirty-two. So the worst case this format can be pushed to costs a
-    /// commit about five milliseconds, on a container at the hard cap.
+    /// Sixty-four draws is one ILLUSTRATIVE commit — one that reuses
+    /// thirty-two slots and churns thirty-two. It is not a worst case, and
+    /// nothing caps a commit at sixty-four draws. The real bound, traced
+    /// through the two call sites that draw:
+    ///
+    /// - One `select` per chunk placed through [`Self::take`], gated
+    ///   by `Space::reuse_budget_available` (`space/mod.rs`), which is
+    ///   `pool.len() > state.reuse_floor`.
+    /// - `reuse_floor` is re-armed once per commit from
+    ///   [`super::reuse_floor_for`] (called at the top of `commit_tx` in
+    ///   `space/commit.rs`), i.e. `pool_len - pool_len / (1 + CHURN_PER_REUSE)`.
+    /// - Then `reused * CHURN_PER_REUSE` further draws, one `select` each,
+    ///   through [`Self::sample_distinct`] — `commit_tx` calls
+    ///   `churn_decoys(reused * CHURN_PER_REUSE)` after the placements.
+    ///
+    /// So, with [`super::CHURN_PER_REUSE`] `= 1`:
+    ///
+    /// ```text
+    /// draws_per_commit = (1 + CHURN_PER_REUSE) * reused = 2 * reused
+    /// reused           <= min(pool_len / 2, chunks_placed)
+    /// ```
+    ///
+    /// `pool_len / 2` is integer division: reuse proceeds while
+    /// `pool.len() > reuse_floor`, and each `take` drops the length by one,
+    /// so a pool of `P` funds exactly `P - reuse_floor_for(P)` = `P / 2`
+    /// reuses. `sample_distinct` restores every bit it drew, so churn does
+    /// not shrink the pool and does not feed back into the budget.
+    ///
+    /// The cost therefore scales with the POOL, not with a constant, and
+    /// the table above is what to multiply. A realistic container is the
+    /// number that matters: 1 GiB at `CHUNK_SIZE` 4096 is 262,144 slots,
+    /// between the first two rows (≈3.4 µs/draw interpolated), so the
+    /// illustrative 32-reuse/32-churn commit costs about 0.2 ms. Even the
+    /// degenerate commit — one that places enough chunks to exhaust the
+    /// budget on a pool spanning a container at the hard cap — is priced by
+    /// the same 84 µs/draw row, and it takes `pool_len / 2` chunks in ONE
+    /// transaction to reach it.
     ///
     /// A hierarchical popcount index would cut that by a factor of sixty, and
     /// it would put a second, derived copy of the membership beside the
     /// bitmap. This is the structure where a wrong answer means the allocator
-    /// hands out a LIVE slot — data loss, silently, on the next commit. Five
-    /// milliseconds on a 64 GiB container is not worth that trade. Re-measure
-    /// with `measure_select_cost` before revisiting.
+    /// hands out a LIVE slot — data loss, silently, on the next commit. Two
+    /// tenths of a millisecond on a realistic container is not worth that
+    /// trade. Re-measure with `measure_select_cost` before revisiting.
     fn select(&self, mut rank: usize) -> Option<u64> {
         for (w, &word) in self.words.iter().enumerate() {
             let count = word.count_ones() as usize;
