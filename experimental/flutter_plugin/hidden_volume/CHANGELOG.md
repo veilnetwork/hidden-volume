@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- `HvStatsInfo` gains `reusableSlotCount` and `hardeningFailure`, and
+  `HvSpace` / `HvAsyncSpace` gain `acknowledgeHardeningError()` (report10
+  HV-04). The first is the half of the `compactKnown` decision Dart did not
+  have — `utilizationRatio()` alone reads a healthily recycling container as
+  sparse. The second is a padding / churn / fsync round that did not run: the
+  commit is durable, its MASKING is weaker than the format promises, and Dart
+  had no way to be told. It is **sticky** — a later successful commit does not
+  clear it, because a host polls for this and one more commit between two polls
+  is ordinary — and `acknowledgeHardeningError()` is the only thing that does.
+  `HvHardeningStep` says which of the three failed; the three mean different
+  things and a host told only "hardening failed" cannot act on any of them.
+
 - Add `HvSpace.addSpace({path, password})` (+ `SpaceHandleBindings.addSpace`) —
   bind the new `add_space` FFI constructor that adds a parallel, deniable space
   to an existing container. The primitive for hiding several identities in one

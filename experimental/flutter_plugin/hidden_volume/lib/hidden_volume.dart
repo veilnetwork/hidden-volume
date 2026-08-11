@@ -47,6 +47,8 @@ export 'src/bindings.dart'
     show
         ArgonPreset,
         HvException,
+        HvHardeningFailure,
+        HvHardeningStep,
         HvHeaderInfo,
         HvIntegrityResult,
         HvLogEntry,
@@ -255,6 +257,10 @@ class HvSpace {
   /// per-namespace entry counts. Drives host-app `compact_known`
   /// triggers.
   ffi.HvStatsInfo stats() => _inner.stats();
+
+  /// Acknowledge the sticky [ffi.HvStatsInfo.hardeningFailure] — "I have shown
+  /// this to the person". Clears it; nothing else does (report10 HV-04).
+  void acknowledgeHardeningError() => _inner.acknowledgeHardeningError();
 
   /// Reclaim DataBatch chunk slots that no longer hold live log entries.
   /// Returns the count of slots scrubbed.

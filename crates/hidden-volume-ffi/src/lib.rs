@@ -688,6 +688,48 @@ impl core::fmt::Debug for LogEntry {
 
 // ---------- Stats record ----------
 
+/// Which post-commit hardening step failed. Mirrors
+/// [`hidden_volume::space::HardeningStep`] across UniFFI.
+///
+/// The step is the whole point of reporting the failure at all: the three
+/// protect different things and a host told only "hardening failed" cannot act
+/// on any of them (report9 HV-06). Flattening it to a bool on the way across
+/// the boundary would have re-created that finding one layer out.
+#[derive(uniffi::Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HardeningStepKind {
+    /// Padding failed — this commit's SIZE is readable by an adversary who
+    /// diffs two snapshots of the file (DESIGN §8).
+    Padding,
+    /// Churn failed — the slots this commit REUSED stand alone in that same
+    /// diff, with no decoy moved beside them (DESIGN §9.1).
+    Churn,
+    /// The fsync failed — the padding and churn writes are not on the platter
+    /// yet. The COMMIT is durable regardless; this is about the masking.
+    Sync,
+}
+
+impl From<hidden_volume::space::HardeningStep> for HardeningStepKind {
+    fn from(s: hidden_volume::space::HardeningStep) -> Self {
+        use hidden_volume::space::HardeningStep as S;
+        match s {
+            S::Padding => Self::Padding,
+            S::Churn => Self::Churn,
+            S::Sync => Self::Sync,
+        }
+    }
+}
+
+/// A recorded post-commit hardening failure, as
+/// [`StatsInfo::hardening_failure`] carries it.
+#[derive(uniffi::Record, Debug, Clone)]
+pub struct HardeningFailureInfo {
+    /// Which of the three steps failed.
+    pub step: HardeningStepKind,
+    /// Why, rendered. Diagnostic text for a log or a bug report — the host's
+    /// decision comes from [`Self::step`], not from parsing this.
+    pub message: String,
+}
+
 /// Aggregated per-space stats. Parallels [`hidden_volume::space::SpaceStats`]
 /// but flattened for FFI.
 #[derive(uniffi::Record, Debug, Clone)]
@@ -703,10 +745,46 @@ pub struct StatsInfo {
     /// drives the host-app's `compact_known` trigger — see
     /// [`Self::utilization_ratio`].
     pub total_slot_count: u64,
+    /// Slots this space has retired and will reuse before it grows the file
+    /// again — the decoy pool (DESIGN §9.1). Mirrors
+    /// [`hidden_volume::space::SpaceStats::reusable_slot_count`].
+    ///
+    /// **Read it with [`Self::utilization_ratio`], never without.** The ratio
+    /// alone answers the `compact_known` question wrongly in both directions:
+    /// a low ratio with a large pool is a container recycling healthily and
+    /// wanting no compaction, and compacting it anyway rewrites the whole file
+    /// and rotates the `container_id` for nothing; a low ratio with a pool near
+    /// zero is the shape that genuinely needs it. Until report10 HV-04 this
+    /// number did not cross the boundary at all, so a host had only the half of
+    /// the pair that cannot decide on its own.
+    ///
+    /// It is also the anonymity set a reused slot hides in — see the core
+    /// field's docs.
+    pub reusable_slot_count: u64,
     /// Sum of per-namespace entry counts.
     pub total_entries: u64,
     /// Per-namespace `(namespace_byte, entry_count)` pairs.
     pub namespace_counts: Vec<NamespaceCount>,
+    /// A post-commit hardening failure this space has recorded and the host
+    /// has not yet acknowledged, if there is one (report10 HV-04).
+    ///
+    /// **Sticky.** It is NOT "the last commit's outcome" — a commit that
+    /// succeeds completely leaves it exactly as it was. It stays here, poll
+    /// after poll, until [`SpaceHandle::acknowledge_hardening_error`] clears
+    /// it. That is the only thing that clears it.
+    ///
+    /// Why it has to work that way: a host learns about this by polling stats,
+    /// and the failure it needs to warn about is one commit among many. A field
+    /// that reflected only the newest commit would be empty by the time anyone
+    /// looked, which is the state this crate shipped in — the write whose
+    /// masking was weaker than promised was reported to nobody.
+    ///
+    /// `Some(_)` does NOT mean the commit failed. The commit is durable; what
+    /// is weaker than promised is the masking around it. See
+    /// [`HardeningStepKind`] for what each step costs.
+    ///
+    /// In-memory: a reopened handle starts with `None`.
+    pub hardening_failure: Option<HardeningFailureInfo>,
 }
 
 impl StatsInfo {
@@ -730,6 +808,15 @@ impl StatsInfo {
         } else {
             self.owned_chunk_count as f64 / self.total_slot_count as f64
         }
+    }
+}
+
+/// Flatten a borrowed core record for the boundary. One function, so the sync
+/// and async `stats` cannot disagree about what a failure looks like.
+fn hardening_failure_info(f: &hidden_volume::space::HardeningFailure) -> HardeningFailureInfo {
+    HardeningFailureInfo {
+        step: f.step.into(),
+        message: f.error.to_string(),
     }
 }
 
@@ -1260,13 +1347,21 @@ impl SpaceHandle {
     /// would render.
     pub fn stats(&self) -> HvResult<StatsInfo> {
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
-        let s = g.with_space_mut(|sp| sp.stats())?;
+        let (s, hardening) = g.with_space_mut(|sp| {
+            let s = sp.stats()?;
+            // Read INSIDE the same lock hold as the stats walk, so the pair a
+            // host acts on describes one moment. Read AFTER it, so a commit
+            // that raced us is either wholly in both or wholly in neither.
+            let h = sp.last_hardening_error().map(hardening_failure_info);
+            Ok::<_, hidden_volume::Error>((s, h))
+        })?;
         let total: usize = s.namespace_counts.iter().map(|(_, n)| *n).sum();
         Ok(StatsInfo {
             commit_seq: s.commit_seq,
             commit_history_len: s.commit_history_len as u64,
             owned_chunk_count: s.owned_chunk_count as u64,
             total_slot_count: s.total_slot_count,
+            reusable_slot_count: s.reusable_slot_count,
             total_entries: total as u64,
             namespace_counts: s
                 .namespace_counts
@@ -1276,7 +1371,24 @@ impl SpaceHandle {
                     count: c as u64,
                 })
                 .collect(),
+            hardening_failure: hardening,
         })
+    }
+
+    /// Acknowledge the sticky [`StatsInfo::hardening_failure`] — "I have shown
+    /// this to the person". Clears it; nothing else does (report10 HV-04).
+    ///
+    /// Idempotent, and safe to call when there is nothing recorded. Call it
+    /// after the warning has actually been surfaced, not on the way past: the
+    /// record survives commits precisely so it cannot be lost between two
+    /// polls, and acknowledging it unread throws away the same warning by hand.
+    pub fn acknowledge_hardening_error(&self) -> HvResult<()> {
+        let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
+        g.with_space_mut(|sp| {
+            sp.acknowledge_hardening_error();
+            Ok::<(), hidden_volume::Error>(())
+        })?;
+        Ok(())
     }
 
     /// Walk the Merkle tree and verify every link end-to-end.
@@ -1736,12 +1848,14 @@ impl AsyncSpaceHandle {
     pub async fn stats(&self) -> HvResult<StatsInfo> {
         self.run_op(move |s, _cancel| -> HvResult<StatsInfo> {
             let stats = s.stats()?;
+            let hardening = s.last_hardening_error().map(hardening_failure_info);
             let total: usize = stats.namespace_counts.iter().map(|(_, n)| *n).sum();
             Ok(StatsInfo {
                 commit_seq: stats.commit_seq,
                 commit_history_len: stats.commit_history_len as u64,
                 owned_chunk_count: stats.owned_chunk_count as u64,
                 total_slot_count: stats.total_slot_count,
+                reusable_slot_count: stats.reusable_slot_count,
                 total_entries: total as u64,
                 namespace_counts: stats
                     .namespace_counts
@@ -1751,7 +1865,17 @@ impl AsyncSpaceHandle {
                         count: c as u64,
                     })
                     .collect(),
+                hardening_failure: hardening,
             })
+        })
+        .await
+    }
+
+    /// Async equivalent of [`SpaceHandle::acknowledge_hardening_error`].
+    pub async fn acknowledge_hardening_error(&self) -> HvResult<()> {
+        self.run_op(move |s, _cancel| -> HvResult<()> {
+            s.acknowledge_hardening_error();
+            Ok(())
         })
         .await
     }
@@ -2097,6 +2221,44 @@ mod tests {
         let p = tmp.path().to_owned();
         drop(tmp);
         p
+    }
+
+    /// Each hardening step crosses as itself (report10 HV-04).
+    ///
+    /// The step is the whole reason the record is a struct and not a flag: a
+    /// size leak, a broken deniability and a missing fsync are three different
+    /// pieces of news, and a host told the wrong one acts on the wrong thing —
+    /// worse than being told nothing. A `From` impl is exactly where that gets
+    /// transposed silently, because every arm typechecks against every variant.
+    ///
+    /// Driven off an exhaustive `match` so a fourth step added upstream fails
+    /// to compile here rather than arriving mapped to whatever this list
+    /// happened to end at.
+    #[test]
+    fn every_hardening_step_maps_to_its_own_kind() {
+        use hidden_volume::space::HardeningStep as S;
+        for step in [S::Padding, S::Churn, S::Sync] {
+            let expected = match step {
+                S::Padding => HardeningStepKind::Padding,
+                S::Churn => HardeningStepKind::Churn,
+                S::Sync => HardeningStepKind::Sync,
+            };
+            let info = hardening_failure_info(&hidden_volume::space::HardeningFailure {
+                step,
+                error: hidden_volume::Error::ReadOnly,
+            });
+            assert_eq!(
+                info.step, expected,
+                "a {step:?} failure crossed the boundary as {:?}",
+                info.step
+            );
+            // The cause travels too, rendered. A host logging "hardening
+            // failed" with no reason cannot get a bug report out of it.
+            assert!(
+                !info.message.is_empty(),
+                "the failure crossed with no diagnostic at all"
+            );
+        }
     }
 
     #[test]

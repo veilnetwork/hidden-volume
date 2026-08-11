@@ -506,10 +506,27 @@ impl<'f> Space<'f> {
         for slot in pad_from..self.file.slot_count() {
             self.state.pool.insert(slot);
         }
-        // Replace (don't merge) — `last_padding_error` reflects only
-        // the most recent commit's padding outcome. A successful
-        // padding round clears any previously-stuck error.
-        self.state.last_hardening_error = hardening_outcome;
+        // STICKY, and only an explicit acknowledgement clears it (report10
+        // HV-04).
+        //
+        // This used to be a plain replace: the record reflected the LAST
+        // commit's outcome, so a successful round cleared it. That is exactly
+        // one poll interval of visibility, and the host polls. A commit whose
+        // masking failed, followed a millisecond later by one that worked, was
+        // a warning nobody could have read — the host asked for stats, got a
+        // clean record, and the person was never told that one of their writes
+        // is sized, unchurned or unsynced on the disk. The failure is a
+        // property of a WRITE THAT HAPPENED; it does not stop being true
+        // because the next write went well.
+        //
+        // The FIRST unacknowledged failure wins, which extends the rule this
+        // block already applies within one commit (`padding.or(churn).or(sync)`
+        // — the first step to fail is the one reported). A later failure
+        // overwriting an earlier one would lose the older news, which is the
+        // one the host is more likely never to have shown.
+        if self.state.last_hardening_error.is_none() {
+            self.state.last_hardening_error = hardening_outcome;
+        }
 
         Ok(new_seq)
     }

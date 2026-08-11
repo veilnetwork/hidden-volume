@@ -473,6 +473,191 @@ fn a_churn_failure_is_not_filed_as_a_padding_failure() {
     );
 }
 
+/// Commit with a forced churn failure, and hand back the pool size beforehand
+/// so a caller can assert the fixture was in the state under test.
+fn commit_with_churn_failure(s: &mut Space<'_>, key: &[u8]) {
+    let _fault = crate::space::ForcedChurnFailure::arm();
+    let mut tx = s.begin_tx();
+    tx.put(Namespace::SETTINGS, key, b"changed").unwrap();
+    tx.commit().unwrap();
+}
+
+fn commit_cleanly(s: &mut Space<'_>, key: &[u8]) {
+    let mut tx = s.begin_tx();
+    tx.put(Namespace::SETTINGS, key, b"changed").unwrap();
+    tx.commit().unwrap();
+}
+
+/// THE property (report10 HV-04): a recorded hardening failure outlives the
+/// next successful commit.
+///
+/// The record used to be replaced on every commit, so it described the LAST
+/// one. A host learns about it by polling `stats`, and between two polls a
+/// second commit is entirely ordinary — the messenger this crate stores for
+/// writes on every message. So the sequence below was, until this fix, the
+/// normal way the warning was lost: the padding or the churn that should have
+/// masked a write did not run, the next write went fine, and the record of the
+/// first was gone before anybody asked. The commit is durable either way; what
+/// vanished was the only signal that its masking is weaker than promised.
+#[test]
+fn a_hardening_failure_survives_the_next_successful_commit() {
+    let path = scratch();
+    let _c = Cleanup(path.clone());
+    build_with_pool_and_padding(&path, 40);
+
+    let mut c = Container::open(&path).unwrap();
+    let mut s = c.open_space(b"pw").unwrap();
+    assert!(
+        s.stats().unwrap().reusable_slot_count >= 4,
+        "fixture pool too small — the churn would have nothing to fail at"
+    );
+
+    // ANCHOR against vacuity, and it is the assertion this test would otherwise
+    // be missing. If a clean commit of this shape recorded a failure of its own
+    // — a padding round that cannot fit, an fsync this fixture cannot do — then
+    // the final assertion below would hold against a NON-sticky field too, and
+    // this test would pass while proving nothing. Establishing it here, on a
+    // space known to be clear, is what makes the last step mean stickiness.
+    commit_cleanly(&mut s, b"k0");
+    assert!(
+        s.last_hardening_error().is_none(),
+        "a fault-free commit recorded a hardening failure of its own, so this \
+         fixture cannot tell stickiness from a fresh failure"
+    );
+
+    commit_with_churn_failure(&mut s, b"k1");
+    let recorded = s
+        .last_hardening_error()
+        .expect("the churn fault never fired, so this test proves nothing");
+    assert_eq!(recorded.step, crate::space::HardeningStep::Churn);
+
+    // The successful commit that used to erase it. Its own churn runs and
+    // succeeds — `churn_count` moving is what says so.
+    let churned_before = s.state.churn_count;
+    commit_cleanly(&mut s, b"k2");
+    assert!(
+        s.state.churn_count > churned_before,
+        "the second commit churned nothing, so it is not the successful \
+         hardening round this test needs it to be"
+    );
+
+    let survivor = s.last_hardening_error().expect(
+        "a successful commit erased the record of a failed one — the host polls \
+         for this, and between two polls that is the whole warning",
+    );
+    assert_eq!(
+        survivor.step,
+        crate::space::HardeningStep::Churn,
+        "the record survived but changed step"
+    );
+}
+
+/// The acknowledgement clears it, and nothing else does.
+///
+/// Sticky with no way to dismiss is a warning permanently on screen, which
+/// teaches whoever reads it to stop reading it. So the clear exists — and it is
+/// the ONLY thing that clears, which is the half a plain `Option` field would
+/// have got wrong in the other direction.
+#[test]
+fn only_an_acknowledgement_clears_a_hardening_failure() {
+    let path = scratch();
+    let _c = Cleanup(path.clone());
+    build_with_pool_and_padding(&path, 40);
+
+    let mut c = Container::open(&path).unwrap();
+    let mut s = c.open_space(b"pw").unwrap();
+    assert!(
+        s.stats().unwrap().reusable_slot_count >= 4,
+        "pool too small"
+    );
+
+    commit_with_churn_failure(&mut s, b"k1");
+    assert!(
+        s.last_hardening_error().is_some(),
+        "the churn fault never fired"
+    );
+
+    // Everything a host does that is NOT an acknowledgement. None of these may
+    // take the warning away.
+    commit_cleanly(&mut s, b"k2");
+    let _ = s.stats().unwrap();
+    let _ = s.commit_seq();
+    let _ = s.vacuum_orphans().unwrap();
+    assert!(
+        s.last_hardening_error().is_some(),
+        "something other than the acknowledgement cleared the record"
+    );
+
+    s.acknowledge_hardening_error();
+    assert!(
+        s.last_hardening_error().is_none(),
+        "the acknowledgement did not clear the record, so a host has no way to \
+         dismiss a warning it has already shown"
+    );
+
+    // Idempotent, and it does not arm anything: acknowledging twice on a clear
+    // space is a no-op, not a state a later read misinterprets.
+    s.acknowledge_hardening_error();
+    assert!(s.last_hardening_error().is_none());
+
+    // And a failure recorded AFTER the acknowledgement is new news, not
+    // suppressed by having acknowledged the previous one.
+    commit_with_churn_failure(&mut s, b"k3");
+    assert!(
+        s.last_hardening_error().is_some(),
+        "the acknowledgement silenced later failures too — it is a dismiss, \
+         not an opt-out"
+    );
+}
+
+/// A second failure does not displace the first one the host has not seen.
+///
+/// The record holds one failure, and within a single commit the rule is already
+/// "the first step to fail is the one reported". Across commits the same rule
+/// keeps the OLDER news, which is the one more likely never to have reached a
+/// person — a newest-wins field would let a steady trickle of failures keep
+/// pushing the unread one out.
+#[test]
+fn a_second_failure_does_not_displace_the_unacknowledged_first() {
+    let path = scratch();
+    let _c = Cleanup(path.clone());
+    build_with_pool_and_padding(&path, 40);
+
+    let mut c = Container::open(&path).unwrap();
+    let mut s = c.open_space(b"pw").unwrap();
+    assert!(
+        s.stats().unwrap().reusable_slot_count >= 4,
+        "pool too small"
+    );
+
+    // First: a PADDING failure.
+    {
+        let _fault = crate::container::file::ForcedGarbageAppendFailure::arm();
+        let mut tx = s.begin_tx();
+        tx.put(Namespace::SETTINGS, b"k1", b"changed").unwrap();
+        tx.commit().unwrap();
+    }
+    assert_eq!(
+        s.last_hardening_error()
+            .expect("the padding fault never fired")
+            .step,
+        crate::space::HardeningStep::Padding
+    );
+
+    // Then a CHURN failure, which is a different step — so if the record were
+    // overwritten this assertion could tell, rather than reading the same value
+    // twice and calling it survival.
+    commit_with_churn_failure(&mut s, b"k2");
+    assert_eq!(
+        s.last_hardening_error()
+            .expect("the record was cleared by a second failure")
+            .step,
+        crate::space::HardeningStep::Padding,
+        "a later churn failure displaced the padding failure the host had not \
+         acknowledged"
+    );
+}
+
 /// A pool too small to fund the churn must bound the reuse, not the churn.
 ///
 /// Reuse and churn draw from the SAME pool, and reuse goes first: it `take`s

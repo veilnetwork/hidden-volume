@@ -252,7 +252,8 @@ const Map<String, int> _methodChecksums = <String, int>{
   'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_add_space': 26649,
   'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_create': 32815,
   'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_open': 49007,
-  'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_open_with_keys': 38449,
+  'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_open_with_keys':
+      38449,
   'uniffi_hidden_volume_ffi_checksum_func_change_passwords': 12821,
   'uniffi_hidden_volume_ffi_checksum_func_compact_known': 9495,
   'uniffi_hidden_volume_ffi_checksum_func_header_info': 40142,
@@ -260,16 +261,24 @@ const Map<String, int> _methodChecksums = <String, int>{
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_commit_seq': 20495,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_count': 7841,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_get': 65186,
-  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_iter_log_range': 14894,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_iter_log_range':
+      14894,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_kv_keys': 32138,
-  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_kv_keys_page': 65359,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_kv_keys_page':
+      65359,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_open_space': 38306,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_read_log': 27036,
-  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_set_padding_policy': 49029,
-  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_space_count': 64423,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_set_padding_policy':
+      49029,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_space_count':
+      64423,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_space_keys': 15090,
-  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_vacuum_data_batches': 40066,
-  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_vacuum_space': 35449,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_vacuum_data_batches':
+      40066,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_vacuum_space':
+      35449,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_acknowledge_hardening_error':
+      23895,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_commit': 59696,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_commit_history': 53412,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_commit_seq': 53179,
@@ -281,12 +290,16 @@ const Map<String, int> _methodChecksums = <String, int>{
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_kv_keys_page': 45476,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_list_namespaces': 63954,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_read_log': 59826,
-  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_set_padding_policy': 6532,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_set_padding_policy':
+      6532,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_space_keys': 38453,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_stats': 53120,
-  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_vacuum_after_open': 23213,
-  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_vacuum_data_batches': 48307,
-  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_verify_integrity': 55085,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_vacuum_after_open':
+      23213,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_vacuum_data_batches':
+      48307,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_verify_integrity':
+      55085,
 };
 // END GENERATED CHECKSUMS
 
@@ -917,6 +930,42 @@ class HvNamespaceCount {
   final int count;
 }
 
+/// Which post-commit hardening step failed. Mirror of the Rust
+/// `HardeningStepKind`; the ordinals are uniffi's, 1-based in declaration
+/// order.
+///
+/// The step is why this is an enum and not a flag. The three protect different
+/// things, and a host told only "hardening failed" cannot act on any of them.
+enum HvHardeningStep {
+  /// The commit's SIZE is readable by an adversary who diffs two snapshots of
+  /// the container file.
+  padding,
+
+  /// The slots this commit REUSED stand alone in that diff, with no decoy
+  /// moved beside them — the deniability the reuse depends on.
+  churn,
+
+  /// The masking writes are not on the platter yet. The COMMIT is durable
+  /// regardless; this is about the padding and churn around it.
+  sync,
+}
+
+/// A post-commit hardening failure the space has recorded and the host has not
+/// acknowledged. See [HvStatsInfo.hardeningFailure].
+class HvHardeningFailure {
+  const HvHardeningFailure({required this.step, required this.message});
+
+  /// Which of the three steps failed — the part a host acts on.
+  final HvHardeningStep step;
+
+  /// Why, rendered by Rust. Diagnostic text for a log or a bug report; do not
+  /// branch on it.
+  final String message;
+
+  @override
+  String toString() => 'HvHardeningFailure(${step.name}: $message)';
+}
+
 /// Aggregated per-space stats. Mirror of `SpaceStats` flattened for FFI.
 class HvStatsInfo {
   const HvStatsInfo({
@@ -924,15 +973,48 @@ class HvStatsInfo {
     required this.commitHistoryLen,
     required this.ownedChunkCount,
     required this.totalSlotCount,
+    required this.reusableSlotCount,
     required this.totalEntries,
     required this.namespaceCounts,
+    required this.hardeningFailure,
   });
   final int commitSeq;
   final int commitHistoryLen;
   final int ownedChunkCount;
   final int totalSlotCount;
+
+  /// Slots this space has retired and will reuse before it grows the file
+  /// again — the decoy pool.
+  ///
+  /// **Read it together with [utilizationRatio], never instead of it.** The
+  /// ratio on its own gets the `compact_known` decision wrong both ways: a low
+  /// ratio with a large pool is a container recycling healthily, and compacting
+  /// it rewrites the whole file and rotates the `container_id` for nothing; a
+  /// low ratio with a pool near zero is the shape that actually needs it. Until
+  /// report10 HV-04 this number did not cross the FFI at all, so a host had
+  /// only the half that cannot decide alone.
+  final int reusableSlotCount;
+
   final int totalEntries;
   final List<HvNamespaceCount> namespaceCounts;
+
+  /// A post-commit hardening failure this space recorded and nobody has
+  /// acknowledged yet, or `null` (report10 HV-04).
+  ///
+  /// **Sticky.** This is NOT "the last commit's outcome". A commit that
+  /// succeeds completely leaves it exactly as it was, poll after poll, until
+  /// [SpaceHandleBindings.acknowledgeHardeningError] clears it — which is the only
+  /// thing that clears it. It used to reflect only the newest commit and never
+  /// crossed the boundary at all: a host polling for it would have found a
+  /// clean record because an ordinary second commit had landed in between, and
+  /// the person was never told that one of their writes is sized, unchurned or
+  /// unsynced on the disk.
+  ///
+  /// Non-null does NOT mean a commit failed. The commit is durable; what is
+  /// weaker than promised is the masking around it.
+  ///
+  /// In-memory: a reopened handle starts with `null`.
+  final HvHardeningFailure? hardeningFailure;
 
   /// Convenience: fraction of allocated slots that hold owned (live)
   /// chunks. Drives host-app `compact_known` triggers.
@@ -946,12 +1028,21 @@ class HvStatsInfo {
       totalSlotCount == 0 ? 0.0 : ownedChunkCount / totalSlotCount;
 }
 
+/// uniffi lowers an enum as an i32 of its 1-based declaration index. Ordered to
+/// match `HardeningStepKind` in `crates/hidden-volume-ffi/src/lib.rs`.
+const List<HvHardeningStep> _hardeningSteps = <HvHardeningStep>[
+  HvHardeningStep.padding,
+  HvHardeningStep.churn,
+  HvHardeningStep.sync,
+];
+
 HvStatsInfo _readStats(Uint8List bytes) {
   final r = _Reader(bytes);
   final commitSeq = r.readU64();
   final commitHistoryLen = r.readU64();
   final ownedChunkCount = r.readU64();
   final totalSlotCount = r.readU64();
+  final reusableSlotCount = r.readU64();
   final totalEntries = r.readU64();
   final n = r.readI32();
   if (n < 0) throw StateError('negative sequence length');
@@ -959,15 +1050,46 @@ HvStatsInfo _readStats(Uint8List bytes) {
     for (var i = 0; i < n; i++)
       HvNamespaceCount(namespace: r.readU8(), count: r.readU64()),
   ];
+  // `Option<HardeningFailureInfo>`: 1 byte tag, then (Some) the record — i32
+  // enum ordinal, i32 string length, utf8 bytes.
+  final tag = r.readU8();
+  HvHardeningFailure? hardening;
+  if (tag == 1) {
+    final ordinal = r.readI32();
+    if (ordinal < 1 || ordinal > _hardeningSteps.length) {
+      // A step this build does not know about is a library newer than these
+      // bindings. Refusing beats guessing: the whole value of the field is
+      // WHICH thing is no longer true, and a wrong step is worse advice than
+      // none.
+      throw StateError('uniffi: unknown hardening step ordinal $ordinal');
+    }
+    hardening = HvHardeningFailure(
+      step: _hardeningSteps[ordinal - 1],
+      message: r.readString(),
+    );
+  } else if (tag != 0) {
+    throw StateError('uniffi: unexpected Option tag $tag');
+  }
   return HvStatsInfo(
     commitSeq: commitSeq,
     commitHistoryLen: commitHistoryLen,
     ownedChunkCount: ownedChunkCount,
     totalSlotCount: totalSlotCount,
+    reusableSlotCount: reusableSlotCount,
     totalEntries: totalEntries,
     namespaceCounts: counts,
+    hardeningFailure: hardening,
   );
 }
+
+/// Test seam for the `StatsInfo` wire decode.
+///
+/// The hardening record only becomes non-null when a padding, churn or fsync
+/// round actually fails, and the hooks that force one live inside the Rust
+/// core's own test build — unreachable from here. So the `Some(_)` leg of this
+/// decoder cannot be exercised through a real call, and without a seam it would
+/// ship untested while everything around it looks green.
+HvStatsInfo debugReadStats(Uint8List bytes) => _readStats(bytes);
 
 /// One mapping for [changePasswords]. `oldPwd == newPwd` preserves the
 /// space verbatim. Spaces NOT mentioned are **dropped** by the rewrite —
@@ -1317,6 +1439,11 @@ final _spStats = _dylib.lookupFunction<
         RustBuffer Function(int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_spacehandle_stats');
 
+final _spAcknowledgeHardeningError = _dylib.lookupFunction<
+        ffi.Void Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
+        void Function(int, ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_method_spacehandle_acknowledge_hardening_error');
+
 final _spVacuumDataBatches = _dylib.lookupFunction<
         ffi.Uint64 Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
         int Function(int, ffi.Pointer<RustCallStatus>)>(
@@ -1595,6 +1722,21 @@ class SpaceHandleBindings {
     final h = _cloneHandle();
     final out = rustCall<RustBuffer>((s) => _spStats(h, s));
     return _readStats(_bufferToBytes(out));
+  }
+
+  /// Acknowledge the sticky [HvStatsInfo.hardeningFailure] — "I have shown this
+  /// to the person". Clears it; nothing else does (report10 HV-04).
+  ///
+  /// Idempotent, and safe when there is nothing recorded. Call it once the
+  /// warning has actually been surfaced, not on the way past: the record
+  /// survives commits precisely so it cannot fall between two polls, and
+  /// acknowledging it unread throws the same warning away by hand.
+  void acknowledgeHardeningError() {
+    _ensureOpen();
+    final h = _cloneHandle();
+    rustCall<void>((s) {
+      _spAcknowledgeHardeningError(h, s);
+    });
   }
 
   /// Reclaim DataBatch chunk slots that no longer have any live

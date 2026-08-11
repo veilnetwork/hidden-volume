@@ -162,6 +162,11 @@ class _StatsRequest extends _Request {
   const _StatsRequest({required SendPort reply}) : super(reply);
 }
 
+class _AcknowledgeHardeningErrorRequest extends _Request {
+  const _AcknowledgeHardeningErrorRequest({required SendPort reply})
+      : super(reply);
+}
+
 class _VacuumAfterOpenRequest extends _Request {
   const _VacuumAfterOpenRequest({required SendPort reply}) : super(reply);
 }
@@ -351,8 +356,9 @@ class HvOperation<T> {
 class HvWorkerDeath {
   HvWorkerDeath() {
     errorPort.listen((message) {
-      final detail =
-          message is List && message.isNotEmpty ? '${message.first}' : '$message';
+      final detail = message is List && message.isNotEmpty
+          ? '${message.first}'
+          : '$message';
       _die('hidden-volume worker isolate error: $detail');
     });
     exitPort.listen((_) => _die('hidden-volume worker isolate exited'));
@@ -393,7 +399,13 @@ void _workerEntry(_SpawnConfig config) {
   final SpaceHandleBindings space;
   try {
     space = switch (config.bootstrap) {
-      _BootstrapCreate(:final path, :final password, :final argon, :final initialGarbageChunks, :final superblockReplicas) =>
+      _BootstrapCreate(
+        :final path,
+        :final password,
+        :final argon,
+        :final initialGarbageChunks,
+        :final superblockReplicas
+      ) =>
         SpaceHandleBindings.create(
           path: path,
           password: password,
@@ -457,7 +469,12 @@ void _dispatch(SpaceHandleBindings space, _Request msg, ReceivePort rx) {
       run(() => space.commit(ops));
     case _GetRequest(:final namespace, :final key):
       run(() => space.get(namespace, key));
-    case _IterLogRangeRequest(:final namespace, :final start, :final end, :final limit):
+    case _IterLogRangeRequest(
+        :final namespace,
+        :final start,
+        :final end,
+        :final limit
+      ):
       run(() => space.iterLogRange(
           namespace: namespace, start: start, end: end, limit: limit));
     case _CommitSeqRequest():
@@ -479,6 +496,11 @@ void _dispatch(SpaceHandleBindings space, _Request msg, ReceivePort rx) {
       });
     case _StatsRequest():
       run(() => space.stats());
+    case _AcknowledgeHardeningErrorRequest():
+      run<Object?>(() {
+        space.acknowledgeHardeningError();
+        return null;
+      });
     case _VacuumDataBatchesRequest():
       run(() => space.vacuumDataBatches());
     case _VacuumAfterOpenRequest():
@@ -749,9 +771,8 @@ class HvAsyncSpace {
       _submit<int>((reply) => _CommitRequest(ops: ops, reply: reply));
 
   /// Read a KV value, or null if absent.
-  Future<Uint8List?> get(int namespace, Uint8List key) =>
-      _call<Uint8List?>(
-          (reply) => _GetRequest(namespace: namespace, key: key, reply: reply));
+  Future<Uint8List?> get(int namespace, Uint8List key) => _call<Uint8List?>(
+      (reply) => _GetRequest(namespace: namespace, key: key, reply: reply));
 
   /// Read a contiguous range of log entries.
   Future<List<HvLogEntry>> iterLogRange({
@@ -813,6 +834,11 @@ class HvAsyncSpace {
   /// Aggregated per-space stats.
   Future<HvStatsInfo> stats() =>
       _call<HvStatsInfo>((reply) => _StatsRequest(reply: reply));
+
+  /// Acknowledge the sticky [HvStatsInfo.hardeningFailure] — "I have shown this
+  /// to the person". Clears it; nothing else does (report10 HV-04).
+  Future<void> acknowledgeHardeningError() =>
+      _call<void>((reply) => _AcknowledgeHardeningErrorRequest(reply: reply));
 
   /// Reclaim DataBatch chunk slots that no longer hold live log
   /// entries. Returns the count of slots scrubbed.
@@ -990,8 +1016,7 @@ Future<HvHeaderInfo> headerInfoAsync(String path, {String? dylibPath}) {
   return Isolate.run(() => _headerInfoEntry((path, dylibPath)));
 }
 
-void _changePasswordsEntry(
-    (String, List<HvPasswordRotation>, String?) args) {
+void _changePasswordsEntry((String, List<HvPasswordRotation>, String?) args) {
   final (path, rotations, dylibPath) = args;
   if (dylibPath != null) {
     overrideDylib(DynamicLibrary.open(dylibPath));
@@ -1017,8 +1042,7 @@ void _changePasswordsEntry(
 Future<void> changePasswordsAsync(
     String path, List<HvPasswordRotation> rotations,
     {String? dylibPath}) {
-  return Isolate.run(
-      () => _changePasswordsEntry((path, rotations, dylibPath)));
+  return Isolate.run(() => _changePasswordsEntry((path, rotations, dylibPath)));
 }
 
 void _compactKnownEntry((String, List<Uint8List>, String?) args) {
