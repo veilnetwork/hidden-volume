@@ -820,8 +820,11 @@ impl<'f> Space<'f> {
     ///
     /// **Sticky** (report10 HV-04). Once set it stays readable until
     /// [`Self::acknowledge_hardening_error`] is called. A later successful
-    /// commit does NOT clear it, and a later failure does not overwrite it —
-    /// see [`SpaceState::last_hardening_error`] for why. It lives in memory
+    /// commit does NOT clear it, and a later failure does not overwrite it:
+    /// the host polls this, and between two polls a cleared record is the
+    /// whole warning gone. (The field behind it is private, so this says why
+    /// rather than linking to it — a public doc that links into private items
+    /// is a rustdoc warning, and this crate's release gate denies those.) It lives in memory
     /// only: a reopened handle starts clean, because nothing about it is
     /// written to disk.
     #[must_use]
