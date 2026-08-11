@@ -379,6 +379,13 @@ pub(crate) struct SpaceState {
     /// "none of it is on the platter yet". Those are a size leak, a
     /// deniability break and a durability gap, and they do not deserve one
     /// warning between them.
+    ///
+    /// **Sticky since report10 HV-04.** It used to hold the LAST commit's
+    /// outcome, so the next successful commit cleared it and the host — which
+    /// learns about this by polling `stats` — had one poll interval to notice.
+    /// Now the first failure recorded stays until
+    /// [`Space::acknowledge_hardening_error`] takes it away, and no commit,
+    /// successful or not, replaces it. In-memory only; a reopen starts clean.
     pub last_hardening_error: Option<HardeningFailure>,
     /// Why the last superblock publish failed, if one did (report8 H-09).
     ///
@@ -811,10 +818,30 @@ impl<'f> Space<'f> {
     /// | [`HardeningStep::Churn`] | the slots this commit REUSED stand alone in a snapshot diff (DESIGN §9.1) |
     /// | [`HardeningStep::Sync`] | the padding and churn writes are not on the platter yet |
     ///
-    /// Cleared on every round where all three succeed.
+    /// **Sticky** (report10 HV-04). Once set it stays readable until
+    /// [`Self::acknowledge_hardening_error`] is called. A later successful
+    /// commit does NOT clear it, and a later failure does not overwrite it —
+    /// see [`SpaceState::last_hardening_error`] for why. It lives in memory
+    /// only: a reopened handle starts clean, because nothing about it is
+    /// written to disk.
     #[must_use]
     pub fn last_hardening_error(&self) -> Option<&HardeningFailure> {
         self.state.last_hardening_error.as_ref()
+    }
+
+    /// Clear the sticky hardening record — "I have shown this to the person".
+    ///
+    /// The only thing that clears it. A warning with no way to dismiss it is
+    /// permanently on screen, which teaches whoever reads it to stop reading
+    /// it, so the acknowledgement is part of the same change that made the
+    /// record survive the next commit (report10 HV-04).
+    ///
+    /// Idempotent, and it takes nothing away: whatever
+    /// [`Self::last_hardening_error`] returned before the call is what the host
+    /// is asserting it has handled. A failure recorded AFTER this returns is a
+    /// new one and sticks in its turn.
+    pub fn acknowledge_hardening_error(&mut self) {
+        self.state.last_hardening_error = None;
     }
 
     /// Why the last superblock publish failed, if one did (report8 H-09).
