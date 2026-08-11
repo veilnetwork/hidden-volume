@@ -12,6 +12,61 @@ format.
 
 ## [Unreleased]
 
+### Fixed — report9 HV-01 / HV-02: the copies the first pass did not reach
+
+The HV-16 entry below wiped the two buffers on the argument path of a single
+`Vec<u8>`. It stopped there. Everything else this plugin copies a secret into
+was still released as it was — and the inbound direction had never been looked
+at at all.
+
+- **Outbound: every password at once.** `_writeRotations` encodes the whole
+  rotation — every OLD and every NEW password, concatenated — into one blob,
+  and `_writeBytesSequence` does the same for `compact_known`. Both went out
+  through `_bufferFromBytes`, which wipes its own `calloc` buffer and leaves
+  the Dart-side blob to the collector. The densest secret the plugin ever
+  builds was the one copy nobody wiped. The wipe tail is now one owning helper,
+  `_bufferFromOwnedSecret`, and `_bufferFromByteVec` shares it.
+
+- **`owned` is the whole contract of that helper**, and it rests on a fact
+  nothing else in the file states: `_Writer` builds on `BytesBuilder(copy:
+  false)`, where `takeBytes()` returns a single-chunk payload BY REFERENCE.
+  Under `takeBytes` the "owned" buffer would be the host app's live password
+  and the helper would wipe it. `toBytes()` always copies. A test pins that
+  one word; nothing else can, because every writer in this file happens to be
+  multi-chunk today, so the swap is invisible at runtime until the day it
+  isn't.
+
+- **Inbound: nothing was wiped at all.** `_bufferToBytes` copied a Rust-owned
+  buffer out and handed it straight back to the Rust allocator — KV values,
+  log payloads, and the raw `SpaceKeys` alike. `spaceKeys()` then decoded 64
+  key bytes out of a framed temporary and dropped the frame on the floor. Both
+  are wiped now, through `_secretByteVecFrom` at the two export sites.
+
+- **Async: three private clones, none of them the caller's.** `Isolate.spawn`
+  and `Isolate.run` deep-copy their message, so the worker's bootstrap
+  password and the one-shot isolates' rotation lists are the isolate's OWN
+  buffers. The worker's clone lived as long as the isolate, which for an open
+  space is the whole session. They are wiped in a `finally` — including the
+  failed-open path, which is exactly when a password is about to be typed
+  again. The synchronous `changePasswords` / `compactKnown` deliberately do
+  NOT mirror this: there the list belongs to the caller, and `oldPwd ==
+  newPwd` is a documented no-op that legitimately passes one instance twice.
+
+- **The source checks cannot tell our copy from the caller's** — both are a
+  `fillRange` — so the tests assert the inverse and cannot pass vacuously:
+  after `changePasswordsAsync` the caller's passwords must be byte-identical,
+  and `spaceKeys()` must still open the space through `openWithKeys`. A
+  break-check that moved either wipe to the caller's isolate returns the
+  password as ten zeros; one that moved a wipe above its copy returns 64
+  zeros of the right length, which a "the buffer reads as zero" test would
+  have called a pass.
+
+- **Deferred, deliberately.** Rust still hands back a 64-byte `Vec<u8>` from
+  `space_keys` (`crates/hidden-volume-ffi/src/lib.rs`, the sync, async and
+  multi-space exports) that uniffi's `Lower` takes by move. A `Zeroizing`
+  wrapper there would add a THIRD copy and scrub the wrong one. Recorded here
+  rather than papered over.
+
 ### Breaking — a space now keeps a bounded window of commit anchors
 
 - **The growth this removes.** Every commit left two chunks nothing later

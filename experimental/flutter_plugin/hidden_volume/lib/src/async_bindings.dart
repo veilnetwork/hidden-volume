@@ -410,6 +410,8 @@ void _workerEntry(_SpawnConfig config) {
   } catch (e) {
     config.bootstrap.reply.send(_ErrorReply('Internal', e.toString()));
     return;
+  } finally {
+    _wipeBootstrapPassword(config.bootstrap);
   }
 
   // Bootstrap succeeded — open the request port and signal readiness
@@ -421,6 +423,22 @@ void _workerEntry(_SpawnConfig config) {
     if (msg is! _Request) return;
     _dispatch(space, msg, rx);
   });
+}
+
+/// Wipe the worker's OWN copy of the bootstrap password (report9 HV-16).
+///
+/// `Isolate.spawn` deep-copies its message, so this `Uint8List` is the
+/// worker's private clone — the host app's buffer stays under the host app's
+/// control, exactly as `docs/en/reference/ffi.md` promises. The clone is dead
+/// the moment the handle exists or fails to exist; without this it sat in the
+/// worker's heap for the whole life of the isolate, which for an open space is
+/// the whole session.
+void _wipeBootstrapPassword(_Bootstrap bootstrap) {
+  final pwd = switch (bootstrap) {
+    _BootstrapCreate(:final password) => password,
+    _BootstrapOpen(:final password) => password,
+  };
+  pwd.fillRange(0, pwd.length, 0);
 }
 
 void _dispatch(SpaceHandleBindings space, _Request msg, ReceivePort rx) {
@@ -978,7 +996,20 @@ void _changePasswordsEntry(
   if (dylibPath != null) {
     overrideDylib(DynamicLibrary.open(dylibPath));
   }
-  changePasswords(path, rotations);
+  try {
+    changePasswords(path, rotations);
+  } finally {
+    // The isolate's OWN copies (report9 HV-16) — `Isolate.run` deep-copies the
+    // captured closure state. The synchronous `changePasswords` deliberately
+    // does NOT do this: there the list is the caller's, and `oldPwd == newPwd`
+    // is a documented no-op rotation, so the same instance legitimately
+    // appears twice. Wiping it twice here is harmless; wiping the caller's
+    // would be the bug this fix is not.
+    for (final r in rotations) {
+      r.oldPwd.fillRange(0, r.oldPwd.length, 0);
+      r.newPwd.fillRange(0, r.newPwd.length, 0);
+    }
+  }
 }
 
 /// Async equivalent of [changePasswords]. Spawns a one-shot isolate so
@@ -995,7 +1026,14 @@ void _compactKnownEntry((String, List<Uint8List>, String?) args) {
   if (dylibPath != null) {
     overrideDylib(DynamicLibrary.open(dylibPath));
   }
-  compactKnown(path, passwords);
+  try {
+    compactKnown(path, passwords);
+  } finally {
+    // The isolate's own clones — see `_changePasswordsEntry`.
+    for (final p in passwords) {
+      p.fillRange(0, p.length, 0);
+    }
+  }
 }
 
 /// Async equivalent of [compactKnown]. Spawns a one-shot isolate so the
