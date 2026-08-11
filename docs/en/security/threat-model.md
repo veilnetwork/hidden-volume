@@ -34,8 +34,28 @@ If anything here conflicts with `DESIGN.md`, **`DESIGN.md` wins**.
 A single-file, encrypted, multi-space storage primitive. It was
 append-only until DESIGN §9.1 lifted that: the writer now also reuses
 slots it has retired, and re-randomizes an equal number of decoys beside
-them so the two are one kind of event on disk. `Inv-W1` is the current
-statement of what the writer may touch — "only a slot unreachable from
+them so the two are one kind of event on disk.
+
+That last sentence is true of the finished commit and NOT of every
+instant during it, and the difference is worth stating plainly (audit
+report10 HV-03). The real reused offsets are written and `fsync`ed
+BEFORE the decoy re-randomization runs. A filesystem snapshot taken in
+that window, or a crash inside it, sees the reuse without its masking;
+and a failure of the churn step does not roll the commit back, so a
+container can carry reuse whose masking never happened at all.
+
+This is accepted rather than fixed, and the reasoning is the project
+owner's: writing to a space presupposes that space is already UNLOCKED,
+so an adversary positioned to image the file mid-write has already
+obtained more than the classification of offsets could give them. The
+remaining shapes — a VM snapshot, a cloud disk, a backup system running
+against a live container — are a narrow enough case that the writer is
+not going to pay two-phase commit latency for every write to close it.
+
+What follows from that: do not read this section as a guarantee that
+holds against an observer who can sample the file at arbitrary moments.
+It holds against one who compares two settled states. `Inv-W1` is the
+current statement of what the writer may touch — "only a slot unreachable from
 any superblock a reopen could select", not "only the end of the file".
 The core is sync, std-only Rust. An optional tokio wrapper
 (`hidden-volume-async`, currently feature-gated) and a `parallel-scan`
