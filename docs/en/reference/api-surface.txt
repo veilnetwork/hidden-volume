@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-12T04:21:00Z
+# Captured: 2026-08-12T21:02:18Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -61,11 +61,11 @@ container/file.rs:  535:    pub fn append_garbage_chunks(&mut self, n: u64) -> R
 container/file.rs:  579:    pub fn slot_count(&self) -> u64 {
 container/file.rs:  590:    pub fn read_slot(&mut self, i: u64) -> Result<[u8; CHUNK_SIZE]> {
 container/file.rs:  612:    pub fn read_slot_concurrent(&self, i: u64) -> Result<[u8; CHUNK_SIZE]> {
-container/file.rs:  631:    pub fn raw_file(&self) -> &File {
-container/file.rs:  641:    pub fn append_slot(&mut self, chunk: &[u8; CHUNK_SIZE]) -> Result<u64> {
-container/file.rs:  671:    pub fn rewrite_slot(&mut self, slot: u64, chunk: &[u8; CHUNK_SIZE]) -> Result<()> {
-container/file.rs:  693:    pub fn scrub_slot(&mut self, slot: u64) -> Result<()> {
-container/file.rs:  700:    pub fn fsync(&mut self) -> Result<()> {
+container/file.rs:  660:    pub fn raw_file(&self) -> &File {
+container/file.rs:  670:    pub fn append_slot(&mut self, chunk: &[u8; CHUNK_SIZE]) -> Result<u64> {
+container/file.rs:  700:    pub fn rewrite_slot(&mut self, slot: u64, chunk: &[u8; CHUNK_SIZE]) -> Result<()> {
+container/file.rs:  722:    pub fn scrub_slot(&mut self, slot: u64) -> Result<()> {
+container/file.rs:  729:    pub fn fsync(&mut self) -> Result<()> {
 container/header.rs:  31:pub struct Header {
 container/header.rs:  45:    pub fn new_random(params: Argon2Params) -> Result<Self> {
 container/header.rs:  55:    pub fn decode(bytes: &[u8]) -> Result<Self> {
