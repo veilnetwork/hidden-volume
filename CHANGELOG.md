@@ -8,9 +8,118 @@ the on-disk format and the public Rust + FFI API are frozen**: any
 subsequent breaking change requires a v2.0 major bump and a proper
 migration tool (see [`docs/en/guide/migration.md`](docs/en/guide/migration.md)).
 v0.x line was pre-release; v0.x → v0.y bumps were free to break the
-format.
+format. **[2.0.0](#200--2026-08-12) is that major bump**, taken for the
+public Rust + FFI + Dart APIs. The format generation did not move with it
+and no migration tool was required; the 2.0.0 entry says why, and names the
+one direction of container compatibility the release does not keep.
 
 ## [Unreleased]
+
+## [2.0.0] — 2026-08-12
+
+Major release: 87 commits closing audit reports 5 through 11 and their
+follow-through. It is a 2.0 because the public Rust, FFI and Dart APIs
+broke — not because the format did. **`PARAMS_VERSION` stays at 3**, the
+48-byte cleartext header is byte-identical, and the chunk, index-node and
+superblock encodings are untouched, so a container written by 1.2.x opens
+here with no conversion step. **No migration tool ships, and none is
+needed**: `docs/en/guide/migration.md` is about moving between format
+*generations*, and no generation was introduced. The v1.0 freeze promise —
+"v2.x reads v3" — is kept as written. The reverse is not, and that is the
+one thing to read before upgrading; see below.
+
+### Compatibility — what breaks, and what a consumer does about it
+
+- **Forward, 1.2.x → 2.0.0: nothing to do.** Existing containers open
+  unchanged. No format bump, no header change, no re-encoding, no tool.
+
+- **Backward, 2.0.0 → 1.2.x: not supported, and it fails loudly.** Two
+  deliberate changes put a container this version has written to out of an
+  older build's reach:
+  - **A namespace can be deeper than a 1.2.x reader accepts.** The writer
+    now grows a level whenever the level below outgrows one chunk (HV-15);
+    10⁶ 64-byte entries produce four levels. Every 1.2.x walker refuses
+    `depth > MAX_TREE_DEPTH = 3` with
+    `Malformed("tree depth exceeded MAX_TREE_DEPTH")` — so a large namespace
+    written here is unreadable there, not merely slower. The depth constant
+    is gone in this version, replaced by a bound derived from the chunks the
+    space actually owns.
+  - **Node boundaries are content-defined** (HV-16), so a namespace this
+    version rewrites is cut at different offsets than the old greedy packer
+    chose, and containers of small values are ~16 % larger (10⁶ × 64 B:
+    77.6 → 90.4 MiB). This is shape, not encoding; nothing about it needs
+    migrating in the forward direction.
+
+  If a downgrade is genuinely required, the export-and-reimport recipe in
+  [`migration.md`](docs/en/guide/migration.md) is generation-agnostic and
+  applies unchanged. There is no in-place downgrade and there will not be
+  one.
+
+- **A container can also be refused for a reason that is not the format.**
+  The Argon2 header ceilings dropped to 512 MiB / t8 / p16 (from
+  1 GiB / t100 / p64) so they bound open *time* as well as memory, and
+  `Argon2Params::validate` runs against the stored header on every open. A
+  container whose params sit above the new ceilings no longer opens. All
+  four shipped presets (`MIN`, `LIGHT`, `DEFAULT`, `HEAVY`) and all four FFI
+  `ArgonPreset` values stay admissible, so this is reachable only from a
+  Rust caller that hand-built `Argon2Params` above those values — never from
+  the FFI or Dart surface, which cannot express them.
+
+- **Public Rust API.** `Space::last_padding_error()` is
+  `Space::last_hardening_error() -> Option<&HardeningFailure>`, which names
+  which step (`Padding`, `Churn`, `Sync`) failed rather than reporting all
+  three as padding. `RepackOptions::argon2` and `RepackOptions::padding_policy`
+  are `Option<..>`, defaulting to `None` = preserve the source's, so
+  maintenance no longer re-parameterises the container it maintains.
+  `LeafNode::entries` and `ChildPointer::first_key` are `Redacted<..>` —
+  reads and mutations are unchanged via `Deref`/`DerefMut`, taking the value
+  out by move is `.into_inner()`. `Error::IndexFull` no longer means
+  "namespace full" and its `Display` string changed. A publish that may have
+  landed answers `Error::PublishUncertain` where it answered `Error::Io`
+  before, and its remedy is **reopen**, not retry. `Tx::delete` against a
+  namespace recorded as `Log` now fails the commit with
+  `WrongNamespaceKind` — `Tx::delete_log` is the call. `IntegrityReport::max_depth`
+  can reach 13. Added: `hidden_volume::redact`, `ANCHOR_HORIZON`,
+  `Space::last_publish_error()`, `Space::vacuum_after_open()`,
+  `SpaceStats::reusable_slot_count`, the `list_keys` / `list_keys_after` /
+  `list_after` paging family, `OwnedSet`.
+
+- **Public FFI API.** `WriteOp::Delete` on a log namespace now fails the
+  commit with `WrongNamespaceKind`; `WriteOp::DeleteLog` is the call.
+  `compact_known` and `change_passwords` preserve the container's KDF and
+  padding posture instead of resetting it to defaults — the FFI has no way
+  to ask for a rotation, which is the correct posture for it. Added:
+  `vacuum_after_open`, `vacuum_space`, `acknowledge_hardening_error`,
+  `kv_keys_page`, `abandoned_operations`, `HardeningFailureInfo`,
+  `HardeningStepKind`, `OperationOutcome`, `AbandonedOperation`.
+
+- **Dart binding API.** `HvAsyncSpace.close()` **throws** when the container
+  did not close, instead of killing the worker and reporting success: an
+  isolate kill cannot unwind an FFI frame, so the old behaviour left the
+  exclusive flock held and every later open failed `Busy` until the app
+  restarted. A worker that dies under a call raises the new
+  `HvOpIndeterminate` rather than `HvOpFailed`, because nothing on the Dart
+  side can claim a dead worker committed nothing. `_WorkerDeath` is public
+  as `HvWorkerDeath`. Added: `HvException.mayHaveApplied`,
+  `HvAsyncSpace.closeTimeout`, `debugOverWorker`, `debugKillWorker`.
+
+- **Host-app procedure, and the one change that fails silently if missed.**
+  A space keeps a bounded window of commit anchors (`ANCHOR_HORIZON = 1024`)
+  rather than every anchor it has ever taken. The rollback procedure in
+  `docs/{en,ru}/guide/multi-device.md` gains a third answer: an anchor
+  further back than the horizon is **out of range**, and its absence says
+  nothing either way. A host that keeps the old order — absent anchor means
+  fork, treat as adversarial — will read every device that has been offline
+  longer than the horizon as an attacker.
+
+- **On-disk content that changed without the format changing.** Retired
+  slots are reused rather than only appended, with decoy churn beside each
+  reuse (DESIGN §9.1), and the checkpoint chunk carries a second slot list
+  with its header grown from 28 to 32 bytes. Neither is correctness-bearing
+  across versions: a checkpoint written by either generation fails the
+  other's length check, and the reader falls back to a full scan — the
+  checkpoint's standing contract in both directions. That is why
+  `PARAMS_VERSION` did not have to move.
 
 ### Fixed — report11 HV-M1: the fast open path held two copies of the recorded slot union
 
@@ -585,7 +694,11 @@ rule is old and the refusals were only in some of the places that need them.
   the path through a new thread-local CSPRNG fault (`ForcedRngFailure`) —
   eight slots in, one drawn, and the broken version comes back with seven.
 
-### Changed — report9 HV-06: the hardening record names the step that failed
+### Breaking — report9 HV-06: the hardening record names the step that failed
+
+*Filed as `Changed` while it was unreleased; corrected at the 2.0.0 cut. It
+renames a public Rust method — `Space::last_padding_error()` — so it is a
+break a downstream consumer has to act on, whichever heading it sits under.*
 
 - **`SpaceState::last_padding_error` is now `last_hardening_error:
   Option<HardeningFailure>`**, carrying a `HardeningStep` of `Padding`,
@@ -853,7 +966,14 @@ rule is old and the refusals were only in some of the places that need them.
   and `close()` drains the in-flight call first, so the contract above
   has no other way to be exercised.
 
-### Breaking — report8 H-09 (Dart)
+### Changed — report8 H-09 (Dart)
+
+*Filed as `Breaking` while it was unreleased; corrected at the 2.0.0 cut.
+Nothing a caller names changed here — no Dart signature, type or error kind
+is removed or altered, and the getter below is additive. What changed is a
+documented promise that was never true, and the advice two guides had copied
+from it. The behaviour that makes the corrected advice necessary is the Rust
+`PublishUncertain` change above, which is breaking and is filed as such.*
 
 - **`HvOpFailed` no longer promises that nothing happened.** Its doc
   said, of every kind, "**Nothing was committed**, so the operation is
