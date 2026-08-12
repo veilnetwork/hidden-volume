@@ -620,6 +620,35 @@ impl ContainerFile {
         Ok(buf)
     }
 
+    /// The whole file, byte for byte, read back through the handle that
+    /// holds the lock.
+    ///
+    /// Test-only, and the lock is the entire reason it exists. The flock
+    /// this handle took at open time is advisory on Unix — a second
+    /// `std::fs::read(path)` sails straight past it — and MANDATORY on
+    /// Windows, where the same read fails with `ERROR_LOCK_VIOLATION`
+    /// (os error 33, "another process has locked a portion of the file").
+    /// A read issued on the handle that OWNS the lock is permitted on
+    /// every platform, so a test that wants the file's bytes while a
+    /// container is open has to ask through here.
+    ///
+    /// Identical to what `std::fs::read(path)` returns, including any
+    /// trailing partial chunk — which is why it is not `read_slot` in a
+    /// loop: that would hand back whole chunks by construction and
+    /// silently answer "yes" to a caller asking whether the file is
+    /// chunk-aligned.
+    ///
+    /// Moves the file cursor; every read and write path in this module
+    /// seeks explicitly before it touches the file, so nothing depends
+    /// on where it is left.
+    #[cfg(test)]
+    pub(crate) fn read_all_for_test(&mut self) -> Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        self.file.seek(SeekFrom::Start(0))?;
+        self.file.read_to_end(&mut buf)?;
+        Ok(buf)
+    }
+
     /// Borrow the underlying [`File`] handle. Used by the `mmap`
     /// feature's `scan_and_recover_mmap` to construct a
     /// [`memmap2::Mmap`]. The flock acquired at open time

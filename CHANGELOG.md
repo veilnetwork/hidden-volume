@@ -15,6 +15,35 @@ one direction of container compatibility the release does not keep.
 
 ## [Unreleased]
 
+### Fixed — two tests that only tag-time CI could see
+
+Branch and PR CI are deliberately not wired (CLAUDE.md §4), so both of
+these were first observed on the `v2.0.0` tag. Neither is a regression
+from that release, and neither touches shipped code — the release
+itself is unaffected.
+
+- **`space::reuse_tests::a_commit_that_reuses_slots_also_dirties_decoys`
+  could not run on Windows at all.** Its `before` snapshot read the
+  container by path while the `Container` and `Space` handles were still
+  open. The flock those hold is advisory on Unix — `std::fs::read`
+  sails past it — and mandatory on Windows, where the same read fails
+  with `ERROR_LOCK_VIOLATION` (os error 33). Deterministic, not flaky:
+  it failed on `windows-latest` and passed everywhere else. Both
+  snapshots now go through the container's own handle, via a test-only
+  `ContainerFile::read_all_for_test`, which every platform's lock
+  permits and which returns the same bytes `std::fs::read` would —
+  trailing partial chunk included, so the "every dirty offset is a whole
+  chunk" assertion keeps its teeth.
+
+  Closing the handles around the snapshot and reopening afterwards would
+  have been the wrong shape. `open_space` runs the auto-vacuum and a
+  self-heal checkpoint refresh, so a reopen WRITES: measured at five
+  scattered whole-chunk scrubs on a container with five orphans pending.
+  Those are the same shape on disk as a churn, which is what the test
+  counts — so a reopen inside the measured interval would have let
+  open-time maintenance satisfy "the commit dirtied enough decoys" with
+  no churn involved at all.
+
 ## [2.0.0] — 2026-08-12
 
 Major release: 87 commits closing audit reports 5 through 11 and their
