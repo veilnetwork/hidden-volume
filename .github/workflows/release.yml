@@ -67,6 +67,33 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: release-${{ matrix.target }}
+
+      # The `targets:` above lands on the toolchain THAT ACTION installs —
+      # `stable`. This repository pins 1.97.1 in rust-toolchain.toml with
+      # `targets = ["aarch64-linux-android", "x86_64-pc-windows-gnu"]`, so
+      # every cargo invocation below switches to the pinned toolchain, where
+      # the matrix target is not installed. `error[E0463]: can't find crate
+      # for 'core'` is what that looks like from inside the build.
+      #
+      # It only shows on the legs where the target differs from the host:
+      # three of the five matrix entries build their own host triple and were
+      # green, which is why this reads as a partial failure rather than a
+      # setup that never took effect at all.
+      #
+      # It could not have been caught before now. The pin arrived in da1d9fd,
+      # after v1.2.3, and this workflow only fires on a tag — so v2.0.0 was
+      # the first tag to meet it.
+      - name: The cross target, on the toolchain cargo will actually use
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          rustup target add "${{ matrix.target }}"
+          rustup target list --installed | grep -qx "${{ matrix.target }}" || {
+            echo "::error::${{ matrix.target }} is still missing after target add"
+            exit 1
+          }
+
       # Cross-linker for aarch64-linux on x86_64 hosts.
       - if: matrix.cross
         run: |

@@ -345,6 +345,23 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: release-${{ matrix.target }}
+
+      # Same as release.yml's release-build, and for the same reason: the
+      # `targets:` above installs onto the toolchain that action brings, while
+      # rust-toolchain.toml pins a different one for every cargo call below.
+      # `flutter-build.yml` has always added its targets this way explicitly,
+      # which is why that workflow was never caught by it.
+      - name: The cross target, on the toolchain cargo will actually use
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          rustup target add "${{ matrix.target }}"
+          rustup target list --installed | grep -qx "${{ matrix.target }}" || {
+            echo "::error::${{ matrix.target }} is still missing after target add"
+            exit 1
+          }
+
       # Cross-linker for aarch64-linux on x86_64 hosts.
       - if: matrix.cross
         run: |
