@@ -2,10 +2,21 @@
 
 🇬🇧 **English** · [🇷🇺 Русский](../../ru/guide/migration.md)
 
-**Status.** Pre-1.0. Format generation has bumped twice in pre-1.0
-already (v1 → v2 in audit pass 13, v2 → v3 on 2026-05-28); these
-bumps were **breaking by design** and no in-place migration tool
-ships. Cross-version transitions go through export-and-reimport.
+**Status.** The format is **frozen at v3** and has been since v1.0.0
+(2026-05-28). Format generation bumped twice before that (v1 → v2 in
+audit pass 13, v2 → v3 on 2026-05-28); those bumps were **breaking by
+design** and no in-place migration tool ships. Cross-version
+transitions go through export-and-reimport.
+
+**v2.0.0 (2026-08-12) did not introduce a generation.** The major bump
+was taken for the public Rust + FFI + Dart APIs; `PARAMS_VERSION` stays
+at 3 and a container written by 1.2.x opens under 2.0.0 unchanged, so
+**no migration tool was required and none ships**. One caveat runs the
+other way and is not a format matter: 2.0.0's writer can emit B+ trees
+deeper than the `MAX_TREE_DEPTH = 3` every 1.2.x walker enforced, so a
+container 2.0.0 has written to may be unreadable by a 1.x build. There
+is no in-place downgrade; the export-and-reimport recipe below is
+generation-agnostic and is the fallback if one is genuinely needed.
 
 This document covers:
 
@@ -159,8 +170,9 @@ freeze trades flexibility for stability.
 | project start | v1 introduced | `DESIGN.md` (historical) |
 | audit pass 13 (R-NSKIND) | v2 introduced (per-`IndexRoot` `kind` byte) | `CHANGELOG.md` pass-13 entry |
 | 2026-05-28 | **v3 introduced** (#8 kind-tag bytes + #9 cryptographic version-binding + #10 per-space derived `container_id`) | [`format.md` §13](../reference/format.md) |
-| v1.0 (planned) | Format freeze | TBD |
-| post-1.0 (TBD) | First proper migration tool | This document, expanded |
+| 2026-05-28 | v1.0.0 — format frozen at v3 | `CHANGELOG.md` 1.0.0 entry |
+| 2026-08-12 | **v2.0.0 — major bump with NO generation change.** APIs broke; `PARAMS_VERSION` stays 3; no migration tool needed. 1.x cannot read deep trees 2.0.0 writes. | `CHANGELOG.md` 2.0.0 entry |
+| post-2.0 (TBD) | First proper migration tool (only if a v4 generation is introduced) | This document, expanded |
 
 ## Cross-references
 
