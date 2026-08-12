@@ -105,6 +105,23 @@ struct Session {
     /// session otherwise, which is what lets the reader thread reach
     /// end-of-transcript.
     observer: Option<OwnedFd>,
+    /// Whether the pty had `ECHO` set when it was allocated — the
+    /// baseline that makes "echo is on after the child exits" mean the
+    /// CLI restored it.
+    ///
+    /// Recorded by [`Session::start`] BEFORE the child is spawned,
+    /// because that is the only moment at which the answer is a fact
+    /// rather than a timing. `read_password` clears `ECHO` as soon as it
+    /// reaches the prompt, and nothing orders that `tcsetattr` against a
+    /// `tcgetattr` a test makes once the child is already running — the
+    /// prompt is written BEFORE the guard engages, so not even waiting
+    /// for the prompt separates them. The two simply race, and on a
+    /// loaded runner the child wins: that is
+    /// `the_terminal_is_restored_after_the_prompt` failing on
+    /// "a fresh pty should start with ECHO on" in CI while passing
+    /// everywhere quieter. Read here, the only process holding this pty
+    /// is this one, so there is nothing to race with.
+    echo_on_when_fresh: bool,
 }
 
 impl Session {
@@ -112,6 +129,8 @@ impl Session {
         use std::sync::{Arc, Mutex};
 
         let pty = openpty();
+        // Before the spawn — see `Session::echo_on_when_fresh`.
+        let echo_on_when_fresh = echo_is_on(&pty.slave);
         let child = Command::new(env!("CARGO_BIN_EXE_hv"))
             .args(args)
             .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
@@ -153,6 +172,7 @@ impl Session {
             master: pty.master,
             seen,
             observer: Some(observer),
+            echo_on_when_fresh,
         }
     }
 
@@ -290,7 +310,7 @@ fn the_terminal_is_restored_after_the_prompt() {
     let mut session = Session::start(&["create-space", &path_str]);
     let observer = session.observer.take().expect("observer fd");
     assert!(
-        echo_is_on(&observer),
+        session.echo_on_when_fresh,
         "a fresh pty should start with ECHO on"
     );
 
@@ -481,7 +501,7 @@ fn the_terminal_is_restored_after_the_repack_prompt() {
     let mut session = Session::start(&["repack", &source_str, &dest_str]);
     let observer = session.observer.take().expect("observer fd");
     assert!(
-        echo_is_on(&observer),
+        session.echo_on_when_fresh,
         "a fresh pty should start with ECHO on"
     );
 

@@ -44,6 +44,17 @@ itself is unaffected.
   open-time maintenance satisfy "the commit dirtied enough decoys" with
   no churn involved at all.
 
+- **`the_terminal_is_restored_after_the_prompt` raced the child it
+  spawned.** Its opening calibration — "a fresh pty should start with
+  ECHO on" — was read after `Command::spawn` returned, and `hv` clears
+  `ECHO` the moment `read_password` reaches its prompt. Nothing ordered
+  the two: the prompt is written BEFORE the guard engages, so not even
+  waiting for the prompt separates them. On a loaded runner the child
+  won and the test failed on its own baseline. The reading is now taken
+  inside `Session::start`, before the child exists, where program order
+  settles it. Reproduced deterministically by inserting a 300 ms delay
+  at the old reading point; the same delay passes after the change.
+
 ## [2.0.0] — 2026-08-12
 
 Major release: 87 commits closing audit reports 5 through 11 and their
