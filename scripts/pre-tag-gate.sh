@@ -58,6 +58,14 @@ gate "tests (all features)" cargo test --workspace --all-features --no-fail-fast
 gate "public API surface" ./scripts/dump-public-api.sh --check
 gate "docs version drift" ./scripts/check-docs-version-drift.sh
 
+# In-repo dependency constraints. Sibling crates are depended on by path AND
+# version; cargo uses the path locally and the version when published, so a
+# stale `version =` costs nothing until the number stops matching. The fuzz
+# crate's said `^1.1.0` through three releases — caret semantics resolved it
+# every time — and the v2.0.0 bump is what finally broke it, in CI, on the
+# release tag. This gate is cheap and would have said so before the push.
+gate "in-repo version constraints" ./scripts/check-intra-repo-versions.sh
+
 # The checksum table is read out of the cdylib, so it has to exist first.
 # A stale table fails the app CLOSED at launch (audit HV-05), and it drifts
 # more easily than it sounds: uniffi hashes the metadata with the DOCSTRING in
