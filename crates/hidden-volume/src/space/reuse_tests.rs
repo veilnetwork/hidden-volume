@@ -49,8 +49,25 @@ fn options(initial_garbage: u64, padding: PaddingPolicy) -> ContainerOptions {
 }
 
 /// Chunk-granular snapshot of the file, for offset-level diffing.
-fn slots(path: &std::path::Path) -> Vec<Vec<u8>> {
-    let bytes = std::fs::read(path).unwrap();
+///
+/// Taken through the container's OWN handle, not by opening the path a
+/// second time. The flock a `Container` holds is advisory on Unix, so
+/// `std::fs::read(path)` sails straight past it; on Windows the same
+/// lock is mandatory and that read fails with os error 33 — "the process
+/// cannot access the file because another process has locked a portion
+/// of the file" — which is how this arrived, as a Windows-only panic on
+/// the `before` snapshot.
+///
+/// The alternative — close the handles, snapshot, reopen — would have
+/// been wrong even where it compiled. `open_space` runs the auto-vacuum
+/// and a self-heal checkpoint refresh, so a reopen WRITES: measured on a
+/// container with five orphans pending, it scrubbed five scattered
+/// whole-chunk offsets. Those are the same shape as a churn, so folding
+/// a reopen into the interval under test would let open-time maintenance
+/// satisfy "the commit dirtied enough decoys" all by itself. Reading
+/// through the live handle brackets the commit and nothing else.
+fn slots(file: &mut crate::container::file::ContainerFile) -> Vec<Vec<u8>> {
+    let bytes = file.read_all_for_test().unwrap();
     bytes.chunks(4096).skip(1).map(<[u8]>::to_vec).collect()
 }
 
@@ -790,16 +807,16 @@ fn a_commit_that_reuses_slots_also_dirties_decoys() {
         "fixture pool too small to observe the split: {pool}"
     );
 
-    let before = slots(&path);
+    // Both snapshots through the open handle, so the interval between
+    // them holds exactly one commit — see `slots` for why neither the
+    // path nor a reopen can stand in for it.
+    let before = slots(s.file);
     let mut tx = s.begin_tx();
     tx.put(Namespace::SETTINGS, b"k0", b"changed").unwrap();
     tx.commit().unwrap();
     let reused = s.state.reuse_count;
     let churned = s.state.churn_count;
-    // Drop the handle so the file on disk is whole before diffing.
-    drop(s);
-    drop(c);
-    let after = slots(&path);
+    let after = slots(s.file);
 
     assert!(reused > 0, "the commit appended instead of reusing");
     assert_eq!(
@@ -961,6 +978,12 @@ fn readonly_handles_neither_reuse_nor_churn() {
     let _c = Cleanup(path.clone());
     build_with_pool(&path, 40);
 
+    // Both reads here are of the CLOSED file — `build_with_pool` has
+    // dropped its handles, and the block below has not opened one yet.
+    // That is what keeps them safe on Windows, where the lock is
+    // mandatory rather than advisory and reading a locked range from a
+    // second handle is refused; `slots` had to stop reading the path for
+    // exactly that reason.
     let before = std::fs::read(&path).unwrap();
     {
         let mut c = Container::open_readonly(&path).unwrap();
