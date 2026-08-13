@@ -498,6 +498,19 @@ cargo clippy --all-targets --all-features -- -D warnings
 - **Memory + plaintext-leak hygiene**: type-level regression-тесты,
   фиксирующие `Zeroizing` обёртки на ключах и транзитном plaintext.
 
+## Сообщество
+
+- **Новости:** [@xVeilNet](https://t.me/xVeilNet) — выпуски и новости проектов.
+- **Обсуждение:** [@chat_veilnet](https://t.me/chat_veilnet) — найденные ошибки,
+  вопросы, предложения.
+
+## Поддержать проект
+
+Донаты в криптовалюте:
+
+- **Ethereum:** `0x5238294aFb8F4e36D7ea091827909E0311879B1A`
+- **Bitcoin:** `bc1qam33yx29et9krqc8jnnu80qvds8jz32wrwr3ph`
+
 ## Лицензия
 
 Двойная лицензия — на ваш выбор:
