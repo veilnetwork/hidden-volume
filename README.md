@@ -486,6 +486,19 @@ cargo clippy --all-targets --all-features -- -D warnings
 - **Memory + plaintext-leak hygiene**: type-level regression tests
   locking in `Zeroizing` wraps for keys and transient plaintext.
 
+## Community
+
+- **News:** [@xVeilNet](https://t.me/xVeilNet) — releases and project updates.
+- **Discussion:** [@chat_veilnet](https://t.me/chat_veilnet) — bug reports,
+  questions, suggestions.
+
+## Support the project
+
+Donations in crypto:
+
+- **Ethereum:** `0x5238294aFb8F4e36D7ea091827909E0311879B1A`
+- **Bitcoin:** `bc1qam33yx29et9krqc8jnnu80qvds8jz32wrwr3ph`
+
 ## License
 
 Dual-licensed under either of:
