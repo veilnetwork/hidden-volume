@@ -92,6 +92,7 @@ impl DecoyPool {
     /// filter" — sizing on it allocated 2 EiB and aborted the process
     /// (every `hv` CLI test died on it, which is how this is here in
     /// words rather than in a bug report).
+    #[cfg(test)]
     pub(crate) fn from_recorded(slots: Vec<u64>, total: u64) -> Self {
         let mut p = Self::default();
         for s in slots {
@@ -101,6 +102,77 @@ impl DecoyPool {
         }
         p.drift = 0;
         p
+    }
+
+    /// Room for slots `0..capacity` without reallocating, for the reader
+    /// that fills the pool one recorded entry at a time.
+    ///
+    /// `capacity` must already be bounded by the file — see
+    /// [`Self::record`]. It is a hint only; [`Self::insert`] still grows past
+    /// it for the padding slots a session appends after the open.
+    pub(crate) fn with_capacity(capacity: u64) -> Self {
+        Self {
+            words: vec![0u64; capacity.div_ceil(64) as usize],
+            len: 0,
+            drift: 0,
+        }
+    }
+
+    /// Record a slot read off a checkpoint, leaving [`Self::drift`] alone.
+    ///
+    /// The difference from [`Self::insert`] is the whole point: drift asks
+    /// "how far has the pool moved since it was last written down", so
+    /// replaying what is written down must answer zero. A recovered pool that
+    /// counted its own recovery would make the first open of every container
+    /// rewrite the checkpoint it just read.
+    pub(crate) fn record(&mut self, slot: u64) {
+        self.set(slot);
+    }
+
+    /// Ascending iteration over the slots in the pool.
+    ///
+    /// The bitmap's own order, without the eight-bytes-per-slot `Vec`
+    /// [`Self::sorted`] hands the checkpoint encoder.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = u64> + '_ {
+        self.words
+            .iter()
+            .enumerate()
+            .flat_map(|(w, &word)| super::slots::slots_in_word(w, word))
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Drop every slot at or past `high_water`, and every slot in `owned`.
+    ///
+    /// The filter the checkpoint writer applies before recording, expressed
+    /// word-wise on the bitmap so that merging a carried record costs no
+    /// second copy of either half.
+    pub(crate) fn retain_below_and_unowned(
+        &mut self,
+        high_water: u64,
+        owned: &super::slots::OwnedSet,
+    ) {
+        let mut len = 0usize;
+        for (w, word) in self.words.iter_mut().enumerate() {
+            // The owned set is grown by `place_chunk` as the file does, so it
+            // can be WIDER than the pool as well as narrower; `word` answers
+            // zero past its end rather than panicking.
+            let mut kept = *word & !owned.word(w);
+            let base = (w as u64) * 64;
+            if base + 64 > high_water {
+                let cutoff = high_water.saturating_sub(base);
+                kept &= if cutoff >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << cutoff) - 1
+                };
+            }
+            *word = kept;
+            len += kept.count_ones() as usize;
+        }
+        self.len = len;
     }
 
     /// How many slots have entered or left since the last
@@ -254,9 +326,15 @@ impl DecoyPool {
     ///
     /// | slots (file size) | per draw | 64 draws |
     /// |---|---|---|
-    /// | 100 K (≈400 MiB) | 2.6 µs | 0.17 ms |
-    /// | 1 M (≈4 GiB) | 6.8 µs | 0.43 ms |
-    /// | 16 M (64 GiB, `MAX_OPEN_SCAN_CHUNKS`) | 84 µs | 5.4 ms |
+    /// | 100 K (≈400 MiB) | 1.4 µs | 0.09 ms |
+    /// | 1 M (≈4 GiB) | 3.2 µs | 0.21 ms |
+    /// | 16 M (64 GiB, `MAX_OPEN_SCAN_CHUNKS`) | 40 µs | 2.5 ms |
+    ///
+    /// Re-measured 2026-08-18 on an Apple-silicon laptop; the previous row of
+    /// numbers (2.6 / 6.8 / 84 µs) was about twice these and came from other
+    /// hardware. Both are recorded because the ratio between the rows is the
+    /// durable part — the cost is linear in the file's WIDTH — and the
+    /// absolute microseconds are not.
     ///
     /// Sixty-four draws is one ILLUSTRATIVE commit — one that reuses
     /// thirty-two slots and churns thirty-two. It is not a worst case, and
@@ -302,6 +380,40 @@ impl DecoyPool {
     /// hands out a LIVE slot — data loss, silently, on the next commit. Two
     /// tenths of a millisecond on a realistic container is not worth that
     /// trade. Re-measure with `measure_select_cost` before revisiting.
+    ///
+    /// ## What "a large commit holds the lock for seconds" needs
+    ///
+    /// Raised a second time as report13 HV13-M5, and the arithmetic above is
+    /// the answer: at the re-measured 40 µs a whole second of draws is 25,000
+    /// of them, so 12,500 reuses, so a single transaction placing 12,500
+    /// chunks — about 50 MiB of data in one `commit_tx` — on a container at
+    /// the format's 64 GiB hard cap. The same transaction on a 1 GiB
+    /// container costs 42 ms. It is bounded, and the bound needs both
+    /// extremes at once.
+    ///
+    /// The three cheaper remedies were considered and refused, each for the
+    /// same reason the linear scan is here in the first place:
+    ///
+    /// - **Cap the draws per commit.** Unbiased in itself — the draws that
+    ///   still happen are still uniform — but past the cap the commit appends
+    ///   instead, which puts file growth back on exactly the commits reuse
+    ///   exists to keep flat. That is a deniability cost paid to save
+    ///   milliseconds, and there is no principled place to put the cap.
+    /// - **Resume the scan where the last one stopped.** The cursor has to
+    ///   carry the cumulative popcount at its position to answer the next
+    ///   rank correctly, and every `set` / `clear` below it invalidates that
+    ///   number. A stale cursor does not return a slower answer, it returns
+    ///   the WRONG slot — a live one. Same hazard as the index above, at a
+    ///   fraction of the benefit, since ranks arrive in no order.
+    /// - **One-pass sequential sampling in [`Self::sample_distinct`].** This
+    ///   one is exactly unbiased over subsets and would halve a commit's draw
+    ///   cost. It yields the subset ASCENDING, though, where the reuse half
+    ///   writes in placement order — so an observer of the live I/O sequence,
+    ///   rather than of two snapshots, would have the reuse/churn
+    ///   distinguisher §9.1 exists to deny. Restoring random order costs a
+    ///   shuffle, and what is left is a rewrite of the deniability-bearing
+    ///   sampler for a factor of two, guarded by tests that pin distinctness
+    ///   and coverage but not the distribution.
     fn select(&self, mut rank: usize) -> Option<u64> {
         for (w, &word) in self.words.iter().enumerate() {
             let count = word.count_ones() as usize;
@@ -416,6 +528,41 @@ mod tests {
                 dt / 64
             );
         }
+    }
+
+    /// The checkpoint writer's filter, across word boundaries.
+    ///
+    /// It is a per-word `AND` with a mask, and both halves have an off-by-one
+    /// that only shows up away from word zero: the owned set may be WIDER or
+    /// narrower than the pool, and the high-water cuts a word in half at an
+    /// arbitrary bit. Every existing caller-level test sits in word 0, where
+    /// a wrong `base` and a right one agree.
+    #[test]
+    fn the_writer_filter_cuts_on_the_right_bit_in_every_word() {
+        let mut p = DecoyPool::default();
+        for s in [1u64, 63, 64, 127, 128, 200, 255, 256, 4096] {
+            p.record(s);
+        }
+        // High-water inside word 3 (slots 192..256): 200 is above it, 128 and
+        // 127 are below. The owned set names one slot in word 1 and one past
+        // the end of the pool's own words.
+        let owned: crate::space::slots::OwnedSet = [64u64, 1 << 20].into_iter().collect();
+        p.retain_below_and_unowned(200, &owned);
+        assert_eq!(p.sorted(), vec![1, 63, 127, 128]);
+        assert_eq!(p.len(), 4, "len disagrees with membership");
+    }
+
+    /// A high-water exactly on a word boundary keeps the last slot below it
+    /// and drops the first slot at it — `1u64 << 64` is the shift that would
+    /// take the whole mask out.
+    #[test]
+    fn a_high_water_on_a_word_boundary_keeps_the_slot_below_it() {
+        let mut p = DecoyPool::default();
+        for s in [63u64, 64, 65] {
+            p.record(s);
+        }
+        p.retain_below_and_unowned(64, &Default::default());
+        assert_eq!(p.sorted(), vec![63]);
     }
 
     #[test]

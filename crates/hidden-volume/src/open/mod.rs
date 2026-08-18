@@ -503,7 +503,7 @@ struct ScanAcc {
     /// that, one refresh from such a session records the emptiness and the
     /// accumulated set is gone for good (report9 HV-14). See
     /// `Space::write_self_heal_checkpoint`.
-    recorded_pool: Vec<u64>,
+    recorded_pool: crate::space::pool::DecoyPool,
     /// Whether this scan READ the checkpoint chain, as opposed to finding
     /// nothing to read. An empty `recorded_pool` cannot tell the two apart —
     /// a chain can honestly record an empty pool — and the checkpoint writer
@@ -536,6 +536,27 @@ fn push_commit_anchor(history: &mut Vec<u64>, seq: u64) {
         history.dedup();
     }
     history.push(seq);
+}
+
+/// Fold one scan's anchors into another's, collapsing replicas across the
+/// join.
+///
+/// The parallel reduce concatenated the two halves, which is the one place
+/// the cap above could not reach: each worker's list is collapsed while it
+/// grows, and then a reduce tree puts every worker's replicas back together
+/// untouched. `push_commit_anchor` per element would be worse, not better —
+/// it re-sorts a list that is about to be sorted anyway — so the join is one
+/// extend and one collapse.
+///
+/// Bounded by the same threshold rather than by a count of workers: what
+/// matters is how big the joined list is, and a reduce tree gives no useful
+/// bound on how many halves have already been joined into either side.
+fn merge_commit_anchors(history: &mut Vec<u64>, other: Vec<u64>) {
+    history.extend(other);
+    if history.len() >= COMMIT_HISTORY_DEDUP_AT {
+        history.sort_unstable();
+        history.dedup();
+    }
 }
 
 /// Fold one owned (AEAD-passing) slot's plaintext into the accumulator.
@@ -632,8 +653,12 @@ fn finalize_scan_at(keys: SpaceKeys, acc: ScanAcc, total: u64) -> Result<SpaceSt
     // decrypts under our key again, so the scan reports it owned and it
     // leaves the pool here, whatever the checkpoint said about it. Without
     // this line a stale pool would hand a live slot to the allocator.
-    let mut pool = crate::space::pool::DecoyPool::from_recorded(recorded_pool, total);
+    let mut pool = recorded_pool;
     pool.subtract_owned(&owned_slots);
+    debug_assert!(
+        total == u64::MAX || pool.iter().all(|s| s < total),
+        "the recorded pool must already be clamped to the file"
+    );
 
     Ok(SpaceState {
         keys,
@@ -739,26 +764,43 @@ pub(crate) struct RecordedCheckpoint {
         reason = "read by the fast scan; the writer wants only the pool"
     )]
     pub(crate) high_water: u64,
-    /// The complete sorted owned-slot set below the high-water.
+    /// The complete owned-slot set below the high-water.
     #[allow(
         dead_code,
         reason = "read by the fast scan; the writer wants only the pool"
     )]
-    pub(crate) owned: Vec<u64>,
+    pub(crate) owned: crate::space::slots::OwnedSet,
     /// The recorded decoy pool — a hint, corrected by subtracting the
     /// scan's owned set. See [`crate::space::pool`].
-    pub(crate) pool: Vec<u64>,
+    pub(crate) pool: crate::space::pool::DecoyPool,
 }
 
 /// Read the checkpoint chain rooted at `head`, returning the slot count
-/// at checkpoint-write time, the complete sorted owned-slot set below
-/// it, and the recorded decoy pool. Returns `None` on ANY inconsistency
+/// at checkpoint-write time, the complete owned-slot set below it, and
+/// the recorded decoy pool. Returns `None` on ANY inconsistency
 /// (unreadable / wrong-kind / malformed chunk, inconsistent high-water
-/// across the chain, over-long chain, or recorded sets exceeding the
-/// open-scan budget), so the caller falls back to the full scan. Every
-/// read is trial-decrypted under this space's key, so an adversary
-/// without the key cannot drive this path. `constant_time` keeps the
-/// per-chunk timing equalizer engaged.
+/// across the chain, a high-water past the end of the file, over-long
+/// chain, or recorded entries exceeding the open-scan budget), so the
+/// caller falls back to the full scan. Every read is trial-decrypted
+/// under this space's key, so an adversary without the key cannot drive
+/// this path. `constant_time` keeps the per-chunk timing equalizer
+/// engaged.
+///
+/// **What is clamped rather than rejected, and why** (report13 HV13-L9).
+/// A recorded slot at or past the high-water is dropped: it names nothing
+/// the checkpoint claims to summarize, and both outputs are sized to the
+/// high-water. Order and duplicates are not checked at all — a bitmap has
+/// no order to be wrong about, which is what the `sort` and `dedup` on the
+/// old `Vec<u64>` form were for. Nor is owned/pool disjointness: the
+/// caller subtracts its scan's owned set from the pool anyway
+/// ([`crate::space::pool`]), and that subtraction is the authority, since
+/// it corrects a stale record as well as a malformed one.
+///
+/// Rejecting instead would be worse than useless here. A chain the reader
+/// refuses is a chain the checkpoint WRITER also refuses — it reads the
+/// record it is superseding through this same function — so the pool
+/// accumulated across every prior session is recorded away as empty and
+/// gone for good, which is report9 HV-14 arrived at from the other side.
 pub(crate) fn read_checkpoint_chain(
     container: &mut ContainerFile,
     keys: &SpaceKeys,
@@ -768,8 +810,25 @@ pub(crate) fn read_checkpoint_chain(
     cancel: Option<&CancelToken>,
     constant_time: bool,
 ) -> Result<Option<RecordedCheckpoint>> {
-    let mut owned: Vec<u64> = Vec::new();
-    let mut pool: Vec<u64> = Vec::new();
+    // Bitmaps, filled entry by entry as the chain is walked. The two lists
+    // used to be `Vec<u64>` here and were poured into a bitmap by the caller
+    // one line later, so the eight-bytes-per-slot form existed only to be
+    // read once — peak `8 * (|owned| + |pool|)` on top of the bitmap that
+    // replaced it, and the pool half was RETAINED for the life of the handle.
+    // Measured over a 1500/6000-commit pair, that was 13.55 bytes per file
+    // slot — 216.8 MiB at the open-scan cap; streaming straight into the
+    // bitmaps reads 0.47, or 7.5 MiB. See
+    // `tests/open_peak_memory_fast_path.rs`.
+    //
+    // Sized once the high-water is known, which is also where it is bounded
+    // by the file — see below.
+    let mut owned = crate::space::slots::OwnedSet::default();
+    let mut pool = crate::space::pool::DecoyPool::default();
+    // Raw entries read, not distinct bits set: the budget below exists to
+    // stop a forged chain making the reader work through more entries than
+    // the file could hold, and collapsing duplicates would let a chain of
+    // repeats run to `MAX_CHECKPOINT_CHAIN` hops for free.
+    let mut entries: usize = 0;
     let mut high_water: Option<u64> = None;
     let mut cur = head;
     let mut hops: u64 = 0;
@@ -797,24 +856,44 @@ pub(crate) fn read_checkpoint_chain(
             Ok(c) => c,
             Err(_) => return Ok(None),
         };
-        match high_water {
-            None => high_water = Some(cc.cp_high_water),
-            Some(hw) if hw == cc.cp_high_water => {},
+        let hw = match high_water {
+            None => {
+                // Checked HERE, before a single bit is set, and not by the
+                // caller after the walk as it used to be: the two bitmaps are
+                // keyed on the slot index, so an over-large high-water is no
+                // longer eight harmless bytes in a `Vec` but a `vec![0u64; n]`
+                // the process aborts on. A checkpoint can only summarize the
+                // past, so its high-water lies within the current file
+                // (equal is fine — nothing appended since).
+                if cc.cp_high_water > total {
+                    return Ok(None);
+                }
+                owned = crate::space::slots::OwnedSet::with_capacity(cc.cp_high_water);
+                pool = crate::space::pool::DecoyPool::with_capacity(cc.cp_high_water);
+                high_water = Some(cc.cp_high_water);
+                cc.cp_high_water
+            },
+            Some(hw) if hw == cc.cp_high_water => hw,
             Some(_) => return Ok(None),
-        }
-        // Both lists count against the same budget, and the budget is
-        // what stops a forged chain from making the reader allocate more
-        // than the file could hold.
-        let accumulated = owned
-            .len()
-            .saturating_add(pool.len())
+        };
+        entries = entries
             .saturating_add(cc.owned.len())
             .saturating_add(cc.pool.len());
-        if accumulated > MAX_OPEN_SCAN_CHUNKS as usize {
+        if entries > MAX_OPEN_SCAN_CHUNKS as usize {
             return Ok(None);
         }
-        owned.extend_from_slice(&cc.owned);
-        pool.extend_from_slice(&cc.pool);
+        // Clamped, not rejected. A recorded slot at or past the high-water
+        // names no slot the checkpoint claims to summarize, and the bitmaps
+        // are sized to the high-water, so it is dropped rather than believed.
+        // Order and duplicates need no check at all now that both sides are
+        // sets: what a `Vec` had to be sorted for, a bitmap is by
+        // construction (report13 HV13-L9).
+        for &slot in cc.owned.iter().filter(|&&s| s < hw) {
+            owned.insert(slot);
+        }
+        for &slot in cc.pool.iter().filter(|&&s| s < hw) {
+            pool.record(slot);
+        }
         cur = cc.next_slot;
     }
     // `None` only if `head == NO_RECORD` (empty chain) — caller already
@@ -879,19 +958,13 @@ fn try_fast_scan_inner(
     };
     let RecordedCheckpoint {
         high_water: cp_high_water,
-        owned: owned_below,
+        owned: mut head_owned,
         pool: pool_below,
     } = recorded;
-    // A checkpoint can only summarize the past: its high-water must lie
-    // within the current file. (Equal is fine — nothing appended since.)
-    if cp_high_water > total {
-        return Ok(None);
-    }
 
     // Phase C: selective scan over the recorded owned set (head), the
-    // recorded pool, and the fresh tail. Defensively clamp recorded
-    // entries to the head region and de-duplicate; the tail is scanned in
-    // full.
+    // recorded pool, and the fresh tail. Both recorded halves were clamped
+    // to the head region as they were read; the tail is scanned in full.
     //
     // **The pool must be scanned, not merely carried.** The completeness
     // induction in `crate::space::checkpoint` used to rest on "no slot
@@ -903,23 +976,14 @@ fn try_fast_scan_inner(
     // as the covered region, and hands `finalize_scan_at` the ownership
     // facts it needs to subtract a stale pool entry that has since gone
     // live.
-    // A bitmap, not a `Vec<u64>`. Chaining both inputs into a vector held a
-    // SECOND eight-bytes-per-slot copy of them alongside the originals — peak
-    // `2 * (|owned| + |pool|) * 8`, memory proportional to the file
-    // (report11 HV-M1). `OwnedSet` is one bit per slot, and it is ascending
-    // and deduplicated by construction, so the `sort_unstable` + `dedup` that
-    // restored an order both inputs already had are gone with it.
-    //
-    // Measured over 30,067-slot and 60,127-slot containers, the fast open's
-    // peak falls from 20.82 to 11.61 bytes per slot in the file. Budgeted by
-    // `tests/open_peak_memory_fast_path.rs`, which asserts the slope over a
-    // 7,522/30,067 pair: 19.27 before, 13.55 after, against a 16.0 bound.
-    let mut head_owned = crate::space::slots::OwnedSet::with_capacity(cp_high_water);
-    for slot in owned_below
-        .into_iter()
-        .chain(pool_below.iter().copied())
-        .filter(|&s| s < cp_high_water)
-    {
+    // The union is the pool half poured onto the owned half, and neither is
+    // copied: both arrive as bitmaps. Held as `Vec<u64>` and chained into a
+    // third vector, this cost eight bytes per recorded slot three times over
+    // — 13.55 bytes per slot in the FILE, measured, against 0.47 now
+    // (report11 HV-M1, report13 HV13-M4). `OwnedSet` is ascending and
+    // deduplicated by construction, which is what the sort and dedup that
+    // used to follow were restoring.
+    for slot in pool_below.iter() {
         head_owned.insert(slot);
     }
 
@@ -1112,7 +1176,7 @@ fn scan_and_recover_parallel_inner(
             })
             .try_reduce(Acc::default, |mut a, b| -> Result<Acc> {
                 a.owned_slots.union_from(&b.owned_slots);
-                a.commit_history.extend(b.commit_history);
+                merge_commit_anchors(&mut a.commit_history, b.commit_history);
                 // Without this the flag survives only if the unreadable
                 // superblock happened to land in the accumulator that won the
                 // reduce — i.e. it would hold on some runs and not others.
@@ -1306,7 +1370,13 @@ fn scan_and_recover_mmap_inner(
         owned_slots.insert(slot);
 
         if pt.kind == ChunkKind::Superblock {
-            commit_history.push(pt.seq);
+            // Through the capped helper, like the other two backends. Raw
+            // `push` here kept every replica of every commit until the sort
+            // at the end of the scan: on a file whose slots are all
+            // superblocks of one era that is `MAX_OPEN_SCAN_CHUNKS * 8` =
+            // 128 MiB of one repeated number, where the sequential scan holds
+            // a few hundred entries for the same input (report13 HV13-L1).
+            push_commit_anchor(&mut commit_history, pt.seq);
             // Audit pass 7 (D4): see sequential variant for rationale.
             // `debug_assert!` catches a writer-bug regression that
             // produces same-seq-different-payload SBs.
@@ -1498,6 +1568,70 @@ mod candidate_bound_tests {
         push_sb_candidate(&mut map, 7, vec![2u8; 48]);
         assert_eq!(map.len(), 1);
         assert_eq!(map[&7], vec![2u8; 48]);
+    }
+}
+
+#[cfg(test)]
+mod commit_anchor_tests {
+    use super::{COMMIT_HISTORY_DEDUP_AT, merge_commit_anchors, push_commit_anchor};
+
+    /// The join must not be the one place replicas survive.
+    ///
+    /// Each worker's list is collapsed while it grows, and the reduce then put
+    /// every worker's replicas back together with a plain `extend`. The
+    /// sequential backend holds a few hundred entries for an input the
+    /// parallel one held every copy of, and the mmap backend — which pushed
+    /// raw — held all of them outright (report13 HV13-L1).
+    #[test]
+    fn joining_two_halves_collapses_the_replicas_across_the_seam() {
+        // Two halves that each look collapsed on their own and share every
+        // seq — a commit's superblock replicas split across workers.
+        let mut a: Vec<u64> = (0..COMMIT_HISTORY_DEDUP_AT as u64).collect();
+        let b: Vec<u64> = (0..COMMIT_HISTORY_DEDUP_AT as u64).collect();
+        merge_commit_anchors(&mut a, b);
+        assert_eq!(
+            a.len(),
+            COMMIT_HISTORY_DEDUP_AT,
+            "the seam kept a second copy of every anchor"
+        );
+        assert_eq!(a, (0..COMMIT_HISTORY_DEDUP_AT as u64).collect::<Vec<_>>());
+    }
+
+    /// And it must not LOSE one. The bound is on replicas, never on reach:
+    /// `commit_history` is the host's rollback evidence, and an anchor
+    /// dropped here is an era a host can no longer name.
+    #[test]
+    fn joining_keeps_every_distinct_anchor() {
+        let mut a: Vec<u64> = vec![9, 4, 4, 1];
+        merge_commit_anchors(&mut a, vec![7, 1, 12]);
+        let mut got = a.clone();
+        got.sort_unstable();
+        got.dedup();
+        assert_eq!(got, vec![1, 4, 7, 9, 12]);
+    }
+
+    /// Small joins are left alone: below the threshold the list fits in a few
+    /// cache lines and the pass costs more than the doubling it saves.
+    #[test]
+    fn a_small_join_is_not_worth_a_sort() {
+        let mut a: Vec<u64> = vec![3, 3];
+        merge_commit_anchors(&mut a, vec![3]);
+        assert_eq!(a, vec![3, 3, 3], "a short list was sorted for nothing");
+    }
+
+    /// The per-element helper the two other backends use, on the same input:
+    /// pushing replicas past the threshold must not grow without bound.
+    #[test]
+    fn pushing_replicas_collapses_rather_than_doubling_forever() {
+        let mut history = Vec::new();
+        for _ in 0..(COMMIT_HISTORY_DEDUP_AT * 8) {
+            push_commit_anchor(&mut history, 42);
+        }
+        assert!(
+            history.capacity() <= COMMIT_HISTORY_DEDUP_AT * 2,
+            "capacity reached {} for one distinct anchor",
+            history.capacity()
+        );
     }
 }
 
