@@ -175,6 +175,90 @@ void main() {
     expect(String.fromCharCodes(v!), 'v');
   });
 
+  test('a negative log id is refused on the async surface too', () async {
+    // The worker catches everything and answers `HvException('Internal')`,
+    // so without a guard on this side the same mistake came back as a
+    // different type, at a different time, with the parameter's name only
+    // inside a message string (audit HV13-M3).
+    final tmp = Directory.systemTemp.createTempSync('hv_async_logid_');
+    addTearDown(() => tmp.deleteSync(recursive: true));
+
+    final space = await HvAsyncSpace.create(
+      path: '${tmp.path}/store.bin',
+      password: Uint8List.fromList('pw'.codeUnits),
+      argon: ArgonPreset.light,
+      dylibPath: dylibPath,
+    );
+    addTearDown(space.close);
+    final payload = Uint8List.fromList('entry'.codeUnits);
+    await space
+        .commit([HvWriteOpAppendLog(namespace: 3, logId: 0, payload: payload)]);
+
+    expect(() => space.readLog(3, -1), throwsA(isA<ArgumentError>()));
+    expect(
+      () => space.iterLogRange(namespace: 3, start: -1, end: null, limit: 10),
+      throwsA(isA<ArgumentError>()),
+    );
+    expect(
+      () => space.iterLogRange(namespace: 3, start: null, end: -1, limit: 10),
+      throwsA(isA<ArgumentError>()),
+    );
+    await expectLater(
+      space.commit(
+          [HvWriteOpAppendLog(namespace: 3, logId: -1, payload: payload)]),
+      throwsA(isA<ArgumentError>()),
+    );
+    await expectLater(
+      space.commit([const HvWriteOpDeleteLog(namespace: 3, logId: -1)]),
+      throwsA(isA<ArgumentError>()),
+    );
+
+    // Control: 0 is an ordinary id and the rejected writes landed nowhere.
+    expect(await space.readLog(3, 0), isNotNull);
+    final got =
+        await space.iterLogRange(namespace: 3, start: 0, end: null, limit: 10);
+    expect(got.length, 1);
+  });
+
+  test('an unservable vacuum window does not strand the worker', () async {
+    // Worse than the sync case: there is no finalizer on this side, and
+    // the worker's own never runs because its isolate never exits. A
+    // handle lost here holds the container's `flock` for the life of the
+    // process (audit HV13-M2).
+    final tmp = Directory.systemTemp.createTempSync('hv_async_window_');
+    final path = '${tmp.path}/store.bin';
+    addTearDown(() => tmp.deleteSync(recursive: true));
+
+    final pw = Uint8List.fromList('pw'.codeUnits);
+    final seed = await HvAsyncSpace.create(
+      path: path,
+      password: pw,
+      argon: ArgonPreset.light,
+      dylibPath: dylibPath,
+    );
+    await seed.close();
+
+    await expectLater(
+      HvAsyncSpace.open(
+        path: path,
+        password: pw,
+        dylibPath: dylibPath,
+        vacuumWindow:
+            const DeferredVacuumWindow(Duration.zero, Duration(days: 50)),
+      ),
+      throwsA(isA<ArgumentError>()),
+    );
+
+    // The container must still be openable.
+    final ok = await HvAsyncSpace.open(
+      path: path,
+      password: pw,
+      dylibPath: dylibPath,
+    );
+    addTearDown(ok.close);
+    expect(await ok.commitSeq(), greaterThan(0));
+  });
+
   test('post-close calls throw StateError', () async {
     final tmp = Directory.systemTemp.createTempSync('hv_async_');
     final path = '${tmp.path}/store.bin';

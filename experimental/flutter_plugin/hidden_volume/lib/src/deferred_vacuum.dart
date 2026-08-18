@@ -46,7 +46,16 @@ class DeferredVacuumWindow {
   /// A window running from [min] to [max]. `max` is clamped up to `min`,
   /// so a degenerate window means "exactly `min`" rather than an error —
   /// callers pinning an exact delay in tests want that, not a throw.
+  ///
+  /// `const`, so nothing is checked here: [validate] is the check, and
+  /// every path that acquires a container before arming runs it first.
   const DeferredVacuumWindow(this.min, this.max);
+
+  /// The widest span [pick] can draw from, in milliseconds.
+  ///
+  /// `Random.nextInt` takes a bound of at most 2^32, so a window wider
+  /// than 2^32 ms — 49.7 days — is one the sampler cannot serve.
+  static const int maxSpanMs = 1 << 32;
 
   /// 30 s to 5 min.
   ///
@@ -64,15 +73,64 @@ class DeferredVacuumWindow {
   /// Latest the scrub may run.
   final Duration max;
 
+  /// Throw [ArgumentError] if this window is not one [pick] can serve as
+  /// written. Two shapes are not:
+  ///
+  ///   - a negative [min]. `Timer` treats a negative delay as zero and
+  ///     fires on the next turn of the event loop, so the scrub lands ON
+  ///     the unlock — precisely the correlation the deferral exists to
+  ///     break, and it would happen silently.
+  ///   - a span of [maxSpanMs] or more, which `Random.nextInt` refuses.
+  ///
+  /// **Call this before acquiring anything.** The arming is the first
+  /// thing to run after a container is open, so a window the sampler
+  /// could not serve threw with the handle already holding the file's
+  /// `flock` and no longer reachable by the caller: every later open
+  /// answered `Busy` for the life of the process — the "correct password
+  /// but won't unlock" trap (audit HV13-M2). [pick] itself no longer
+  /// throws, so this is where a bad window is reported, and it is
+  /// reported before there is anything to strand.
+  void validate() {
+    if (min.isNegative) {
+      throw ArgumentError.value(
+        min,
+        'min',
+        'must not be negative: a timer armed with a negative delay fires '
+            'at once, which puts the scrub back next to the unlock',
+      );
+    }
+    final lo = min.inMilliseconds;
+    final hi = max.inMilliseconds < lo ? lo : max.inMilliseconds;
+    if (hi - lo >= maxSpanMs) {
+      throw ArgumentError.value(
+        max,
+        'max',
+        'window spans ${hi - lo} ms; the sampler draws from at most '
+            '$maxSpanMs ms (~49.7 days)',
+      );
+    }
+  }
+
   /// Draw a delay from this window.
   ///
   /// [random] defaults to [Random.secure]. That is not paranoia about the
   /// value: a delay drawn from a PRNG an observer can seed or predict is a
   /// delay they can subtract, which puts the write burst back next to the
   /// unlock.
+  ///
+  /// **Total.** Every window yields a delay. The callers that arm one are
+  /// holding an open container, and an exception between the open and the
+  /// return strands it (HV13-M2), so a window [validate] would refuse is
+  /// clamped here rather than refused: a negative [min] up to zero, a span
+  /// at or over [maxSpanMs] down to it. Clamping is the degraded answer,
+  /// not the good one — [validate] is what turns such a window into a
+  /// caller's error, at the door, while nothing is held.
   Duration pick([Random? random]) {
-    final lo = min.inMilliseconds;
-    final hi = max.inMilliseconds < lo ? lo : max.inMilliseconds;
+    final lo = min.inMilliseconds < 0 ? 0 : min.inMilliseconds;
+    var hi = max.inMilliseconds < lo ? lo : max.inMilliseconds;
+    if (hi - lo >= maxSpanMs) {
+      hi = lo + maxSpanMs - 1;
+    }
     if (hi == lo) return Duration(milliseconds: lo);
     return Duration(
       milliseconds: lo + (random ?? Random.secure()).nextInt(hi - lo + 1),

@@ -177,6 +177,67 @@ void main() {
     expect(got, isNotEmpty);
   });
 
+  test('a negative log id is refused, not reinterpreted as 2^64-1', () {
+    // Dart's `int` is signed and the FFI parameter is `u64`, so -1 crosses
+    // as 18446744073709551615. Unlike the narrowing above, the width is
+    // right and nothing is lost — the value simply means something else,
+    // and log ids are an ORDERED domain: -1 does not land near zero, it
+    // lands at the top. A read misses an entry that exists, a range query
+    // asking for "from the beginning" covers only the last id there is,
+    // and a delete names a record no writer will ever produce, so it
+    // silently does nothing (audit HV13-M3). Log ids are frequently
+    // timestamps, and an unset clock is the ordinary way a caller comes to
+    // hold a negative one.
+    final tmp = Directory.systemTemp.createTempSync('hv_dart_logid_');
+    addTearDown(() => tmp.deleteSync(recursive: true));
+
+    final space = SpaceHandleBindings.create(
+      path: '${tmp.path}/store.bin',
+      password: Uint8List.fromList('pwd'.codeUnits),
+      argon: ArgonPreset.light,
+    );
+    addTearDown(space.close);
+
+    final payload = Uint8List.fromList('entry'.codeUnits);
+    // The boundary, on both ends of what a Dart int can carry.
+    const maxDartInt = 0x7fffffffffffffff;
+    space.commit([
+      HvWriteOpAppendLog(namespace: 3, logId: 0, payload: payload),
+      HvWriteOpAppendLog(namespace: 3, logId: maxDartInt, payload: payload),
+    ]);
+    expect(space.readLog(3, 0), isNotNull, reason: '0 is an ordinary id');
+    expect(space.readLog(3, maxDartInt), isNotNull);
+
+    // Read side.
+    expect(() => space.readLog(3, -1), throwsA(isA<ArgumentError>()));
+    expect(
+      () => space.iterLogRange(namespace: 3, start: -1, end: null, limit: 10),
+      throwsA(isA<ArgumentError>()),
+      reason: 'a start of -1 asks for the very END of the domain',
+    );
+    expect(
+      () => space.iterLogRange(namespace: 3, start: null, end: -1, limit: 10),
+      throwsA(isA<ArgumentError>()),
+    );
+
+    // Write side, both ops that carry an id.
+    expect(
+      () => space.commit(
+          [HvWriteOpAppendLog(namespace: 3, logId: -1, payload: payload)]),
+      throwsA(isA<ArgumentError>()),
+    );
+    expect(
+      () => space.commit([const HvWriteOpDeleteLog(namespace: 3, logId: -1)]),
+      throwsA(isA<ArgumentError>()),
+    );
+
+    // Control: the guard rejects the value, not the operation, and the
+    // rejected writes landed nowhere.
+    final got =
+        space.iterLogRange(namespace: 3, start: 0, end: null, limit: 10);
+    expect(got.length, 2);
+  });
+
   test('empty commit is no-op', () {
     final tmp = Directory.systemTemp.createTempSync('hv_dart_');
     final path = '${tmp.path}/store.bin';
