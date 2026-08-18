@@ -73,27 +73,51 @@ impl core::fmt::Debug for Plaintext {
 }
 
 impl Plaintext {
-    /// Serialize into exactly [`PLAINTEXT_LEN`] bytes, padding the tail with
-    /// random data. Random padding ensures pre-encryption plaintext is not
-    /// trivially structured (defense-in-depth; AEAD already encrypts).
-    pub fn encode(&self) -> Result<[u8; PLAINTEXT_LEN]> {
-        if self.payload.len() > PAYLOAD_CAP {
+    /// Serialize into a caller-owned [`PLAINTEXT_LEN`] buffer, padding the
+    /// tail with random data. Random padding ensures pre-encryption plaintext
+    /// is not trivially structured (defense-in-depth; AEAD already encrypts).
+    ///
+    /// The buffer is the caller's so it can be wrapped in `Zeroizing` BEFORE
+    /// the first fallible step. Filling one here and returning it by value put
+    /// two unscrubbed copies of the payload on the stack — the local, which a
+    /// CSPRNG failure in the padding left behind fully populated, and the move
+    /// out of it — and only the caller's third copy was ever wiped (report13
+    /// HV13-L5). `payload` is borrowed for the same reason: the caller had to
+    /// own one to build a `Plaintext`, and that copy was wiped by nothing.
+    pub fn encode_into(
+        kind: ChunkKind,
+        seq: u64,
+        payload: &[u8],
+        buf: &mut [u8; PLAINTEXT_LEN],
+    ) -> Result<()> {
+        if payload.len() > PAYLOAD_CAP {
             return Err(Error::Internal("payload exceeds chunk capacity"));
         }
-        let mut buf = [0u8; PLAINTEXT_LEN];
         buf[0..4].copy_from_slice(&MAGIC);
-        buf[4] = self.kind as u8;
-        // buf[5] = 0 (reserved flags byte; see file header doc).
-        // Already zero from array init — no explicit write.
-        LittleEndian::write_u64(&mut buf[6..14], self.seq);
-        LittleEndian::write_u16(&mut buf[14..16], self.payload.len() as u16);
-        buf[PLAINTEXT_HEADER_LEN..PLAINTEXT_HEADER_LEN + self.payload.len()]
-            .copy_from_slice(&self.payload);
+        buf[4] = kind as u8;
+        // Byte 5 is the reserved flags byte (see file header doc) and must be
+        // zero. Written rather than assumed: the buffer is the caller's now,
+        // and a reused one carries whatever was there before.
+        buf[5] = 0;
+        LittleEndian::write_u64(&mut buf[6..14], seq);
+        LittleEndian::write_u16(&mut buf[14..16], payload.len() as u16);
+        buf[PLAINTEXT_HEADER_LEN..PLAINTEXT_HEADER_LEN + payload.len()].copy_from_slice(payload);
         // Random pad the rest. AEAD will encrypt it; this is just to avoid
         // any chance of leaking via plaintext length oracle if a future
         // bug removes the AEAD layer.
-        let pad_start = PLAINTEXT_HEADER_LEN + self.payload.len();
+        let pad_start = PLAINTEXT_HEADER_LEN + payload.len();
         crate::crypto::rng::fill(&mut buf[pad_start..])?;
+        Ok(())
+    }
+
+    /// [`Self::encode_into`] into a fresh buffer, returned by value.
+    ///
+    /// For tests and fuzz targets, which want the bytes rather than a place to
+    /// put them. The write path takes `encode_into` so the frame never exists
+    /// outside a `Zeroizing`.
+    pub fn encode(&self) -> Result<[u8; PLAINTEXT_LEN]> {
+        let mut buf = [0u8; PLAINTEXT_LEN];
+        Self::encode_into(self.kind, self.seq, &self.payload, &mut buf)?;
         Ok(buf)
     }
 
@@ -124,5 +148,43 @@ impl Plaintext {
         }
         let payload = buf[PLAINTEXT_HEADER_LEN..PLAINTEXT_HEADER_LEN + payload_len].to_vec();
         Ok(Self { kind, seq, payload })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The frame must define every byte it owns, because the buffer is the
+    /// caller's now and a caller reuses buffers.
+    ///
+    /// `encode` used to start from a fresh zeroed array, so the reserved flags
+    /// byte at offset 5 was correct by accident of initialization. Filling a
+    /// caller-supplied buffer, that accident is gone: a non-zero byte 5 left
+    /// over from a previous frame is rejected by `decode` as
+    /// "non-zero reserved flags".
+    #[test]
+    fn encoding_into_a_dirty_buffer_leaves_nothing_of_what_was_there() {
+        let mut fresh = [0u8; PLAINTEXT_LEN];
+        Plaintext::encode_into(ChunkKind::IndexNode, 7, b"abc", &mut fresh).unwrap();
+        let mut dirty = [0xAAu8; PLAINTEXT_LEN];
+        Plaintext::encode_into(ChunkKind::IndexNode, 7, b"abc", &mut dirty).unwrap();
+
+        // The random pad differs by design; the defined prefix must not.
+        let defined = PLAINTEXT_HEADER_LEN + 3;
+        assert_eq!(fresh[..defined], dirty[..defined]);
+        let decoded = Plaintext::decode(&dirty).unwrap();
+        assert_eq!(decoded.payload, b"abc");
+        assert_eq!(decoded.seq, 7);
+    }
+
+    /// An over-long payload is refused before the buffer is touched, so the
+    /// caller's `Zeroizing` never holds a partial frame it did not ask for.
+    #[test]
+    fn an_oversized_payload_is_refused_without_writing() {
+        let mut buf = [0u8; PLAINTEXT_LEN];
+        let payload = vec![1u8; PAYLOAD_CAP + 1];
+        assert!(Plaintext::encode_into(ChunkKind::IndexNode, 1, &payload, &mut buf).is_err());
+        assert!(buf.iter().all(|&b| b == 0), "a refused encode wrote anyway");
     }
 }

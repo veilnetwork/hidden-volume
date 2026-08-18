@@ -66,6 +66,10 @@ impl OwnedSet {
         true
     }
 
+    /// Test-only since the checkpoint writer's pool filter became a per-word
+    /// `AND` against [`Self::word`]: a filter that asks a question per slot is
+    /// a filter that walks the file once per slot it keeps.
+    #[cfg(test)]
     pub(crate) fn contains(&self, slot: u64) -> bool {
         let word_idx = (slot / 64) as usize;
         word_idx < self.words.len() && self.words[word_idx] & (1u64 << (slot % 64)) != 0

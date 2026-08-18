@@ -171,21 +171,26 @@ pub(crate) struct CheckpointChunk {
 /// session with no pool cannot have written to a carried slot in the first
 /// place. It is here so that the record is true on its own terms, not only
 /// after a reader repairs it.
+///
+/// Merged ON the carried bitmap rather than into a third `Vec`. The eight
+/// bytes per slot the record is encoded from are unavoidable once, and this
+/// path used to pay them four times over — the live pool as a `Vec`, the
+/// carried one as a second, the concatenation of both as a third, and the
+/// sort that ordered what two sets already had in order.
 fn merge_carried_pool(
-    live: Vec<u64>,
-    carried: Vec<u64>,
+    live: &crate::space::pool::DecoyPool,
+    mut carried: crate::space::pool::DecoyPool,
     owned: &crate::space::slots::OwnedSet,
     high_water: u64,
 ) -> Vec<u64> {
     if carried.is_empty() {
-        return live;
+        return live.sorted();
     }
-    let mut pool = live;
-    pool.extend(carried);
-    pool.retain(|slot| *slot < high_water && !owned.contains(*slot));
-    pool.sort_unstable();
-    pool.dedup();
-    pool
+    for slot in live.iter() {
+        carried.record(slot);
+    }
+    carried.retain_below_and_unowned(high_water, owned);
+    carried.sorted()
 }
 
 impl CheckpointChunk {
@@ -360,7 +365,7 @@ impl<'f> Space<'f> {
         // Emptiness is the wrong test for that: this session's pool is empty
         // only until the first commit frees a slot into it, after which one
         // slot would be recorded over the accumulated forty.
-        let carried_pool: Vec<u64> = if !self.state.pool_recovered && old_head != NO_RECORD {
+        let carried_pool = if !self.state.pool_recovered && old_head != NO_RECORD {
             let container_id = self.state.keys.container_id;
             let keys = self.state.keys.clone();
             crate::open::read_checkpoint_chain(
@@ -377,7 +382,7 @@ impl<'f> Space<'f> {
             .map(|recorded| recorded.pool)
             .unwrap_or_default()
         } else {
-            Vec::new()
+            crate::space::pool::DecoyPool::default()
         };
 
         // Scrub the chain we are about to supersede *first*, so the
@@ -410,7 +415,7 @@ impl<'f> Space<'f> {
         // space has below the high-water", and a reader that mixed one
         // era's owned set with another's pool could see a slot in neither.
         let pool: Vec<u64> = merge_carried_pool(
-            self.state.pool.sorted(),
+            &self.state.pool,
             carried_pool,
             &self.state.owned_slots,
             cp_high_water,
@@ -632,6 +637,15 @@ mod format_doc_agreement_tests {
 #[cfg(test)]
 mod tests {
 
+    /// A pool holding exactly these slots, sized past the largest of them.
+    fn pool_of(slots: &[u64]) -> crate::space::pool::DecoyPool {
+        let mut p = crate::space::pool::DecoyPool::default();
+        for &s in slots {
+            p.record(s);
+        }
+        p
+    }
+
     /// The carried half must never name a slot this era owns.
     ///
     /// Defence-in-depth, and the only place it can be exercised: a session
@@ -642,21 +656,23 @@ mod tests {
     #[test]
     fn a_carried_slot_this_era_owns_is_not_recorded_as_reusable() {
         let owned = [5u64, 9].into_iter().collect();
-        let pool = super::merge_carried_pool(vec![2], vec![5, 7, 9], &owned, 100);
+        let pool = super::merge_carried_pool(&pool_of(&[2]), pool_of(&[5, 7, 9]), &owned, 100);
         assert_eq!(pool, vec![2, 7], "a live slot was recorded as reusable");
     }
 
     /// And past the high-water: the record summarizes only what is below it.
     #[test]
     fn a_carried_slot_above_the_high_water_is_not_recorded() {
-        let pool = super::merge_carried_pool(vec![1], vec![3, 42], &Default::default(), 10);
+        let pool =
+            super::merge_carried_pool(&pool_of(&[1]), pool_of(&[3, 42]), &Default::default(), 10);
         assert_eq!(pool, vec![1, 3]);
     }
 
     /// Merged, not substituted, and deduplicated across the two halves.
     #[test]
     fn the_live_pool_and_the_carried_one_are_both_kept() {
-        let pool = super::merge_carried_pool(vec![4, 1], vec![1, 6], &Default::default(), 10);
+        let pool =
+            super::merge_carried_pool(&pool_of(&[4, 1]), pool_of(&[1, 6]), &Default::default(), 10);
         assert_eq!(pool, vec![1, 4, 6]);
     }
     use super::*;

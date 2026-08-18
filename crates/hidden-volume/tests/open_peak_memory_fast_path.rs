@@ -23,6 +23,14 @@
 //! It is an `OwnedSet` now (one bit per slot, ascending and deduplicated by
 //! construction), so the copy is a bitmap and the sort is gone.
 //!
+//! That left the INPUTS, which is what report13 HV13-M4 came back for. Both
+//! arrived from `read_checkpoint_chain` as `Vec<u64>`, so the union's bitmap
+//! was built beside eight bytes per recorded slot rather than instead of them
+//! — and `pool_below` was retained for the life of the handle on top. The
+//! chain reader fills the bitmaps entry by entry now and the vectors never
+//! exist: measured over the same 1500/6000 pair, 13.55 B/file-slot became
+//! 0.47, which is 216.8 MiB against 7.5 at the open-scan cap.
+//!
 //! ## Why the denominator is file slots, not owned slots
 //!
 //! `audit_owned_chunk_count` PLATEAUS: the orphan vacuum and `ANCHOR_HORIZON`
@@ -242,21 +250,18 @@ fn fast_open_peak_does_not_scale_with_the_recorded_union() {
     let growth = peak_large.saturating_sub(peak_small);
     let per_slot = growth as f64 / extra_slots as f64;
 
-    // The budget separates the two representations without pretending to a
+    // The budget separates the representations without pretending to a
     // precision the fixture has not got.
     //
-    // `owned_below` and `pool_below` arrive from the checkpoint record as
-    // `Vec<u64>`, and `pool_below` is RETAINED — it becomes the space's
-    // recovered pool — so a per-slot floor is inherent here and is not what
-    // this measures. What it measures is the SECOND copy: chaining both into
-    // another `Vec<u64>` added one more eight-byte word per union slot, plus
-    // the doubling that reached it. Measured over 1500/6000 commits, the
-    // `OwnedSet` union reads 13.55 B/file-slot and the `Vec<u64>` it replaced
-    // reads 19.27 (asymptotically 11.61 against 20.82 — see the four-point
-    // sweep in the commit that added this file). Sixteen sits between them
-    // with room on both sides.
+    // What is left on this path is two bitmaps over the recorded high-water —
+    // the owned set and the recovered pool — at one bit per slot each, so the
+    // floor is 0.25 B/file-slot and the measurement is 0.47. Two is four
+    // times that and still an order of magnitude below anything the eight-
+    // bytes-per-slot shape can reach: the vectors read 13.55 here (19.27
+    // before the union itself became a bitmap), and the pool half of that was
+    // held for the life of the handle, not just for the scan.
     assert!(
-        per_slot < 16.0,
+        per_slot < 2.0,
         "the fast open peaked at {peak_small} bytes over {slots_small} file \
          slots and {peak_large} over {slots_large} — {growth} bytes for \
          {extra_slots} extra slots, {per_slot:.2} per slot. At the {} slot \
@@ -272,11 +277,20 @@ fn fast_open_peak_does_not_scale_with_the_recorded_union() {
     // records, where Argon2's working buffer dominated both fixtures and the
     // test reported 0.0 bytes per slot. So: run it again with eight bytes per
     // file slot deliberately held live and require the harness to see it.
+    //
+    // The threshold is SIX and it used to be eighteen, because the control
+    // reads `shadow + whatever the open itself costs` and the second term has
+    // gone from 13.55 to 0.47. It is the one assertion that failed when the
+    // chain reader stopped materializing its lists — the budget passed, as an
+    // upper bound does when the thing it bounds shrinks — which is the whole
+    // reason a control is here. Six is comfortably under the eight the shadow
+    // holds and comfortably over anything a harness that measured nothing
+    // could report.
     let (_, control_small, _) = open_peak_fast(&small, true);
     let (_, control_large, _) = open_peak_fast(&large, true);
     let control_per_slot = control_large.saturating_sub(control_small) as f64 / extra_slots as f64;
     assert!(
-        control_per_slot > 18.0,
+        control_per_slot > 6.0,
         "the harness measures {control_per_slot:.2} bytes per slot for an open \
          that deliberately holds EIGHT per slot ON TOP of the union — it \
          cannot see a per-slot term of that size, so the budget above is not \
