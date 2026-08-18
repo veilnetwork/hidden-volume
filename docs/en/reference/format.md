@@ -2,11 +2,12 @@
 
 🇬🇧 **English** · [🇷🇺 Русский](../../ru/reference/format.md)
 
-**Status.** Pre-freeze. The shape will not change between now and
-v1.0; specific reservation bytes / version markers may still flex.
-After v1.0 release this document is **frozen**: any later change to
-the layout requires a v4 generation and a migration tool (see
-`docs/en/guide/migration.md`).
+**Status.** **Frozen**, and has been since v1.0.0 (2026-05-28) — see
+[`docs/en/guide/migration.md`](../guide/migration.md). Any later change
+to the layout requires a v4 generation and a migration tool. The 2.0.0
+major bump was taken for the public Rust / FFI / Dart APIs and did
+**not** move the format generation; `CHANGELOG.md` names the one
+direction of container compatibility it does not keep.
 
 This document is the canonical, byte-level reference for the on-disk
 format. `DESIGN.md` covers rationale and design choices; this file is
@@ -93,7 +94,7 @@ The `params_version` u32 is **packed** (audit pass 8 S1 full):
 
 | bits   | field                      | semantics                                                                                                                                                                                                                                                                |
 |--------|----------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| 0..16  | `format_version`           | Currently `3` (v3 cluster: #8 kind-tag bytes + #9 cryptographic version-binding + #10 per-space derived `container_id`). Library refuses to open if any other value. v1/v2 containers cannot be opened by a v3 reader; pre-1.0 — breaking is acceptable.                  |
+| 0..16  | `format_version`           | Currently `3` (v3 cluster: #8 kind-tag bytes + #9 cryptographic version-binding + #10 per-space derived `container_id`). Library refuses to open if any other value. v1/v2 containers cannot be opened by a v3 reader. Both bumps predate the v1.0.0 freeze, when breaking the format was still acceptable; since the freeze they cannot recur without a v4 generation.                  |
 | 16..24 | `padding_policy_index`     | Persistent post-commit padding policy. `0` = `None` (default); `1` = 256 KiB buckets; `2` = 1 MiB buckets (DEFAULT preset); `3` = 16 MiB buckets. Unknown values (4..=255) silently degrade to `None` for forward-compat.                                                  |
 | 24..32 | reserved                   | MUST be `0`. The library rejects open if any of these bits are set. Future format-version planning may consume them.                                                                                                                                                     |
 
