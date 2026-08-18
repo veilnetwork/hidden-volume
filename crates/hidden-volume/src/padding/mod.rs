@@ -55,9 +55,9 @@ pub enum PaddingPolicy {
     /// No post-commit padding.
     #[default]
     None,
-    /// Round file size up to the next multiple of `bucket_chunks`.
+    /// Round the SLOT GRID up to the next multiple of `bucket_chunks`.
     /// Concretely, after a commit the library appends garbage chunks
-    /// until `(slot_count + 1) % bucket_chunks == 0`. Pick
+    /// until `slot_count % bucket_chunks == 0`. Pick
     /// `bucket_chunks` matching your target hardware:
     ///
     /// - 64 (256 KiB) for embedded / very weak phones
@@ -66,7 +66,19 @@ pub enum PaddingPolicy {
     BucketGrowth {
         /// Bucket size in chunks. After each commit the file is
         /// padded with garbage chunks until
-        /// `(slot_count + 1) % bucket_chunks == 0`.
+        /// `slot_count % bucket_chunks == 0`.
+        ///
+        /// The grid, not the file. A file is one header chunk plus
+        /// `slot_count` slots, so quantizing the grid puts the file's size at
+        /// `(k * bucket_chunks + 1) * CHUNK_SIZE` — still one discrete jump
+        /// per bucket, which is the whole mitigation, but offset by a chunk
+        /// from an exact multiple of the bucket. These two doc lines used to
+        /// promise `(slot_count + 1) % bucket_chunks == 0` — the file-exact
+        /// version — which is not what `garbage_after_commit` computes and not
+        /// what `tests/padding.rs` has always asserted (report13 HV13-L6). The
+        /// contract is the grid: shifting the code instead would move every
+        /// existing container's padding boundary by one chunk to buy an
+        /// adversary nothing.
         bucket_chunks: u64,
     },
     /// Add `garbage_per_real_x100 / 100` garbage chunks per real chunk
@@ -198,6 +210,24 @@ mod tests {
         let p = PaddingPolicy::None;
         assert_eq!(p.garbage_after_commit(0, 0).unwrap(), 0);
         assert_eq!(p.garbage_after_commit(100, 5).unwrap(), 0);
+    }
+
+    /// The boundary the module doc promises, asserted as the promise reads:
+    /// the post-padding slot count is on a bucket multiple, for every
+    /// starting point in a bucket.
+    #[test]
+    fn bucket_growth_lands_on_the_documented_boundary() {
+        let p = PaddingPolicy::BucketGrowth { bucket_chunks: 64 };
+        for slot_count in 0u64..200 {
+            let padded = slot_count + p.garbage_after_commit(slot_count, 1).unwrap();
+            assert_eq!(
+                padded % 64,
+                0,
+                "slot_count={slot_count} padded to {padded}, off the grid"
+            );
+            assert!(padded >= slot_count);
+            assert!(padded - slot_count < 64, "padded a whole extra bucket");
+        }
     }
 
     #[test]

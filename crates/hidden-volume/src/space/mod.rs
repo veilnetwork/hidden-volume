@@ -559,6 +559,44 @@ impl SpaceState {
     }
 }
 
+/// A slot drawn out of the decoy pool, plus the counter that says the draw
+/// happened, held until the write it was drawn for lands.
+///
+/// The draw is the FIRST thing `place_chunk_with` does and the write is the
+/// last, and everything between them can fail: the frame encode draws random
+/// padding from the CSPRNG, and the AEAD seal is fallible on its own terms.
+/// The single `if let Err(e) = rewrite_slot` this replaces covered the last of
+/// those three and repaired only half of the state — the slot went back, the
+/// counter did not. A slot that never goes back is not recoverable by a later
+/// vacuum either: the vacuum walks slots the space OWNS, and a slot that left
+/// the pool without being written is in neither set.
+///
+/// Repaired on drop, so the repair cannot be lost down an error path nobody
+/// listed. [`Self::commit`] is the only way to keep the draw.
+struct PoolReservation<'a> {
+    pool: &'a mut DecoyPool,
+    reuse_count: &'a mut u64,
+    slot: Option<u64>,
+}
+
+impl PoolReservation<'_> {
+    /// The write landed: the slot is live now, and it must NOT go back.
+    fn commit(mut self) {
+        self.slot = None;
+    }
+}
+
+impl Drop for PoolReservation<'_> {
+    fn drop(&mut self) {
+        // Back into the pool it came from, because it is still a retired slot
+        // and dropping it here leaks it for the life of the container.
+        if let Some(slot) = self.slot.take() {
+            self.pool.insert(slot);
+            *self.reuse_count = self.reuse_count.saturating_sub(1);
+        }
+    }
+}
+
 /// An opened space inside a container.
 ///
 /// Holds an exclusive `&mut` borrow on the underlying file for the
@@ -1712,52 +1750,65 @@ impl<'f> Space<'f> {
         } else {
             None
         };
+        // The draw and the counter are undone by a guard rather than by the
+        // one error branch that used to undo half of them. Between the draw
+        // and the write sit an encode whose random padding comes from the
+        // CSPRNG and an AEAD seal, and either can fail: on that path the slot
+        // was gone from the pool with nothing written to it — leaked for the
+        // life of the container, since no vacuum looks at a slot the space
+        // does not own — and `reuse_count` reported a reuse that never
+        // happened. The rewrite branch's own repair never touched the counter
+        // either (report13 HV13-L4).
+        let SpaceState {
+            pool,
+            reuse_count,
+            keys,
+            owned_slots,
+            ..
+        } = &mut self.state;
+        let mut reservation = None;
         let slot = match reused {
             Some(s) => {
-                self.state.reuse_count = self.state.reuse_count.saturating_add(1);
+                *reuse_count = reuse_count.saturating_add(1);
+                reservation = Some(PoolReservation {
+                    pool,
+                    reuse_count,
+                    slot: Some(s),
+                });
                 s
             },
             None => self.file.slot_count(),
         };
-        let key = derive_chunk_key(
-            &self.state.keys.aead_root,
-            &self.state.keys.container_id,
-            slot,
-        );
+        let key = derive_chunk_key(&keys.aead_root, &keys.container_id, slot);
         let aead = ChunkAead::new(&key);
-        let pt = Plaintext {
-            kind,
-            seq,
-            payload: payload.to_vec(),
-        };
-        // Encoded plaintext sits on the stack as a 4040-byte array; wrap
-        // in Zeroizing so that when this stack slot is reclaimed at end
-        // of function, the plaintext bytes are scrubbed before the slot
-        // can be reused for unrelated data.
-        let pt_bytes: Zeroizing<[u8; crate::PLAINTEXT_LEN]> = Zeroizing::new(pt.encode()?);
-        let aad = make_aad(&self.state.keys.container_id, slot);
+        // Wrapped BEFORE the first thing that can fail, and filled through the
+        // wrapper. `Plaintext::encode` used to build the frame in a bare
+        // `[u8; PLAINTEXT_LEN]` and hand it back by value, so a CSPRNG failure
+        // in its random padding left the caller's payload in a buffer nothing
+        // scrubbed, and the successful path copied the frame once more into
+        // the wrapper (report13 HV13-L5). Borrowing the payload rather than
+        // `to_vec`ing it drops a second unscrubbed copy on the same path.
+        let mut pt_bytes: Zeroizing<[u8; crate::PLAINTEXT_LEN]> =
+            Zeroizing::new([0u8; crate::PLAINTEXT_LEN]);
+        Plaintext::encode_into(kind, seq, payload, &mut pt_bytes)?;
+        let aad = make_aad(&keys.container_id, slot);
         let (nonce, ct) = aead.seal(&pt_bytes[..], aad)?;
         let mut chunk = [0u8; CHUNK_SIZE];
         chunk[..NONCE_LEN].copy_from_slice(&nonce);
         chunk[NONCE_LEN..].copy_from_slice(&ct);
         match reused {
-            Some(s) => {
-                // Put the slot back if the write fails: it is still a
-                // retired slot, and dropping it here would leak it for the
-                // life of the container.
-                if let Err(e) = self.file.rewrite_slot(s, &chunk) {
-                    self.state.pool.insert(s);
-                    return Err(e);
-                }
-            },
+            Some(s) => self.file.rewrite_slot(s, &chunk)?,
             None => {
                 self.file.append_slot(&chunk)?;
             },
         }
+        if let Some(reservation) = reservation.take() {
+            reservation.commit();
+        }
         // A slot already in the set would mean the allocator handed out a
         // live one — the hazard `subtract_owned` exists to prevent. The set
         // absorbs the duplicate either way; this says so out loud in tests.
-        let fresh = self.state.owned_slots.insert(slot);
+        let fresh = owned_slots.insert(slot);
         debug_assert!(fresh, "slot {slot} was allocated while already owned");
         Ok(slot)
     }

@@ -1149,7 +1149,7 @@ fn recorded_checkpoint(s: &mut crate::space::Space<'_>) -> (Vec<u64>, Vec<u64>) 
         crate::open::read_checkpoint_chain(s.file, &keys, &container_id, head, total, None, false)
             .unwrap()
             .expect("the chain this session just wrote is unreadable");
-    (recorded.owned, recorded.pool)
+    (recorded.owned.to_sorted_vec(), recorded.pool.sorted())
 }
 
 /// A checkpoint refresh must not record an empty pool over the accumulated
@@ -1218,7 +1218,7 @@ fn a_refresh_from_a_pool_less_session_keeps_the_recorded_pool() {
             tx.commit().unwrap();
         }
         assert!(
-            s.state.pool.len() > 0,
+            !s.state.pool.is_empty(),
             "the constant-time session freed nothing into its pool, so a \
              narrower carry condition would be indistinguishable here"
         );
@@ -1325,4 +1325,80 @@ fn a_refresh_never_records_a_slot_that_is_live() {
              same breath — a writer would overwrite a live chunk"
         );
     }
+}
+
+/// A placement that fails BETWEEN the draw and the write must put the slot
+/// back and leave the reuse counter where it found it.
+///
+/// The window is real and it is not one step wide: the draw is the first
+/// thing `place_chunk_with` does, and between it and the `rewrite_slot` that
+/// was the only repaired failure sit the frame encode — whose random padding
+/// comes from the CSPRNG — and the AEAD seal. A slot lost here is lost for
+/// the life of the container, because the vacuum only ever walks slots the
+/// space OWNS, and this one belongs to neither set (report13 HV13-L4).
+#[test]
+fn a_draw_whose_encode_fails_goes_back_into_the_pool() {
+    let path = scratch();
+    let _c = Cleanup(path.clone());
+    let mut c = Container::create_with_options(
+        &path,
+        options(0, PaddingPolicy::BucketGrowth { bucket_chunks: 64 }),
+    )
+    .unwrap();
+    let mut s = c.create_space(b"pw").unwrap();
+    let mut tx = s.begin_tx();
+    tx.put(Namespace::SETTINGS, b"k", b"v").unwrap();
+    tx.commit().unwrap();
+    assert!(
+        s.state.pool.len() >= 32,
+        "the fixture retired nothing to draw from"
+    );
+
+    // `place_chunk` outside a commit draws nothing — the floor is `usize::MAX`
+    // for every path that is not `commit_tx`. Armed here the way `commit_tx`
+    // arms it, because the window under test opens at the draw.
+    s.state.reuse_floor = super::reuse_floor_for(s.state.pool.len());
+    let pool_before = s.state.pool.sorted();
+    let reuse_before = s.state.reuse_count;
+    let owned_before = s.state.owned_slots.len();
+    let slots_before = s.file.slot_count();
+    let seq = s.state.superblock.seq + 1;
+
+    // Two fills stand between the arm and the failure: the draw's own
+    // `uniform_below`, then the frame's random padding. Failing the SECOND is
+    // failing inside the window — after the slot has left the pool and before
+    // a byte of it has been rewritten.
+    {
+        let _fault = crate::crypto::rng::ForcedRngFailure::arm(2);
+        let placed = s.place_chunk(crate::chunk::ChunkKind::IndexNode, seq, b"payload");
+        assert!(placed.is_err(), "the armed CSPRNG failure never fired");
+    }
+
+    assert_eq!(
+        s.state.pool.sorted(),
+        pool_before,
+        "the drawn slot never came back: it is out of the pool with nothing \
+         written to it, and no vacuum will ever look at it"
+    );
+    assert_eq!(
+        s.state.reuse_count, reuse_before,
+        "a reuse that did not happen was counted, and the churn is sized from \
+         this number"
+    );
+    assert_eq!(
+        s.state.owned_slots.len(),
+        owned_before,
+        "a slot nothing was written to was recorded as owned"
+    );
+    assert_eq!(s.file.slot_count(), slots_before, "the file grew");
+
+    // And the handle is still usable afterwards: the repair restored state,
+    // not just accounting.
+    let mut tx = s.begin_tx();
+    tx.put(Namespace::SETTINGS, b"k2", b"v2").unwrap();
+    tx.commit().unwrap();
+    assert_eq!(
+        s.get(Namespace::SETTINGS, b"k2").unwrap().as_deref(),
+        Some(&b"v2"[..])
+    );
 }
