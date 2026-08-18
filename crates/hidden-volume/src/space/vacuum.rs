@@ -9,6 +9,7 @@ use crate::{Error, Result};
 
 use super::Space;
 use super::index::IndexNode;
+use super::slots::DenseSlotSet;
 use super::superblock::{NO_RECORD, Superblock};
 use super::walk::TreeWalk;
 
@@ -23,86 +24,6 @@ use super::walk::TreeWalk;
 /// re-descends the tree from the cursor, and at this width that is a
 /// handful of descents per namespace.
 const BATCH_POINTER_PAGE: usize = 512;
-
-/// Membership over chunk slot indices, one bit per slot.
-///
-/// Every set a vacuum builds — reachable, referenced, to-drop — is
-/// keyed on a slot index, and slot indices are dense and bounded by the
-/// file's own [`ContainerFile::slot_count`][crate::container::file::ContainerFile::slot_count].
-/// A `HashSet<u64>` over that costs on the order of 32-48 bytes per
-/// member plus its load-factor slack, and a vacuum built three of them
-/// at once on top of a clone of `owned_slots`: for the container sizes
-/// this format now permits (audit HV-15 removed the per-namespace index
-/// cap; [`crate::MAX_OPEN_SCAN_CHUNKS`] is all that is left) that is
-/// hundreds of MiB where one bit per slot is 2 MiB at the very ceiling
-/// (audit HV-03).
-///
-/// This matters more than an ordinary allocation win because
-/// `vacuum_orphans` runs automatically on every writable open: a
-/// container that has grown to where the vacuum cannot allocate stops
-/// opening at all, and the person who filled it has locked themselves
-/// out with no adversary involved.
-struct SlotSet {
-    words: Vec<u64>,
-    capacity: u64,
-    len: usize,
-}
-
-impl SlotSet {
-    /// Room for slots `0..capacity`. `capacity` is the file's slot
-    /// count, so `Vec` allocates `capacity / 8` bytes.
-    fn with_capacity(capacity: u64) -> Self {
-        Self {
-            words: vec![0u64; capacity.div_ceil(64) as usize],
-            capacity,
-            len: 0,
-        }
-    }
-
-    /// Record `slot`; returns whether it was in range and therefore
-    /// recorded.
-    ///
-    /// Out-of-range is not an error for every caller: the batch-pointer
-    /// scan feeds this arbitrary 8-byte KV values, which need not name
-    /// a real slot. Such a value can never match an owned slot either,
-    /// so dropping it changes no answer. Callers for whom a dropped
-    /// slot WOULD change an answer — anything feeding the reachable set,
-    /// where a miss means scrubbing live data — must check the result.
-    fn insert(&mut self, slot: u64) -> bool {
-        if slot >= self.capacity {
-            return false;
-        }
-        let word = &mut self.words[(slot / 64) as usize];
-        let bit = 1u64 << (slot % 64);
-        if *word & bit == 0 {
-            *word |= bit;
-            self.len += 1;
-        }
-        true
-    }
-
-    fn contains(&self, slot: u64) -> bool {
-        slot < self.capacity && self.words[(slot / 64) as usize] & (1u64 << (slot % 64)) != 0
-    }
-
-    fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    /// The recorded slots, ascending. Used to hand the retired set to the
-    /// decoy pool after a vacuum pass.
-    fn iter(&self) -> impl Iterator<Item = u64> + '_ {
-        self.words.iter().enumerate().flat_map(|(w, &word)| {
-            (0..64u64).filter_map(move |b| {
-                if word & (1u64 << b) != 0 {
-                    Some(w as u64 * 64 + b)
-                } else {
-                    None
-                }
-            })
-        })
-    }
-}
 
 impl<'f> Space<'f> {
     /// Scrub orphan IndexNode chunks — owned chunks (decrypt under our
@@ -187,11 +108,11 @@ impl<'f> Space<'f> {
         // — the clone was a second copy of the whole slot list, live
         // for the duration of the pass).
         let mut scrubbed = 0;
-        // A second `SlotSet`, so the `retain` below stays O(N) rather
+        // A second `DenseSlotSet`, so the `retain` below stays O(N) rather
         // than the O(N²) a `Vec::contains` would make it. Audit F1
         // (2026-05-03): matters for heavy-history containers (100K
         // owned + 1K to-scrub = 100M comparisons with Vec::contains).
-        let mut to_drop = SlotSet::with_capacity(self.file.slot_count());
+        let mut to_drop = DenseSlotSet::with_capacity(self.file.slot_count());
         // Eras older than the anchor horizon are retired here, superblock and
         // Commit chunk together. See [`crate::ANCHOR_HORIZON`] for why the two
         // travel as a pair and what the horizon costs.
@@ -204,8 +125,8 @@ impl<'f> Space<'f> {
             .superblock
             .seq
             .saturating_sub(crate::ANCHOR_HORIZON);
-        let mut kept_roots = SlotSet::with_capacity(self.file.slot_count());
-        let mut doomed_roots = SlotSet::with_capacity(self.file.slot_count());
+        let mut kept_roots = DenseSlotSet::with_capacity(self.file.slot_count());
+        let mut doomed_roots = DenseSlotSet::with_capacity(self.file.slot_count());
         // Explicit, though the loop would also reach it: the current era's
         // Commit chunk is the one thing that must survive whatever else does.
         kept_roots.insert(self.state.superblock.root_slot);
@@ -457,9 +378,9 @@ impl<'f> Space<'f> {
         //    negative window. With kind-bound iteration that window
         //    is structurally closed.
         let prior_roots = self.load_prior_roots()?;
-        // One bit per slot, not a `HashSet<u64>` — see [`SlotSet`]
+        // One bit per slot, not a `HashSet<u64>` — see [`DenseSlotSet`]
         // (audit HV-03).
-        let mut referenced = SlotSet::with_capacity(self.file.slot_count());
+        let mut referenced = DenseSlotSet::with_capacity(self.file.slot_count());
         for root in &prior_roots {
             if root.kind != crate::tx::NamespaceKind::Log {
                 continue;
@@ -494,11 +415,11 @@ impl<'f> Space<'f> {
         //    Indexed rather than cloned — the loop body never touches
         //    `owned_slots` (audit HV-03).
         let mut scrubbed = 0;
-        // A second `SlotSet`, so the `retain` below stays O(N) rather
+        // A second `DenseSlotSet`, so the `retain` below stays O(N) rather
         // than the O(N²) a `Vec::contains` would make it. Audit F1
         // (2026-05-03): matters for heavy-history containers (100K
         // owned + 1K to-scrub = 100M comparisons with Vec::contains).
-        let mut to_drop = SlotSet::with_capacity(self.file.slot_count());
+        let mut to_drop = DenseSlotSet::with_capacity(self.file.slot_count());
         // Word-wise for the same reason as `vacuum_orphans` above: the body
         // needs `&mut self`, and a whole-list copy is what audit HV-03 removed.
         for w in 0..self.state.owned_slots.word_count() {
