@@ -198,6 +198,17 @@ class _ErrorReply extends _Reply {
   final String message;
 }
 
+/// Stands in for "the worker did not answer within the deadline" so that
+/// [HvAsyncSpace.close] can match on the reply's TYPE.
+///
+/// The sentinel used to be `null`, which made the timeout the only case the
+/// close distinguished — every reply that was not null was taken for a clean
+/// one, including the error reply the worker sends when the native close
+/// throws.
+class _CloseTimedOut extends _Reply {
+  const _CloseTimedOut();
+}
+
 // ------------------------------------------------------------------
 // Operation identity and outcomes (audit HV-07)
 // ------------------------------------------------------------------
@@ -595,18 +606,45 @@ class HvAsyncSpace {
   /// (audit HV-07).
   int _nextOpId = 1;
 
-  /// Outcome per submitted operation, oldest evicted first.
+  /// Operations submitted and not yet answered.
   ///
-  /// A `LinkedHashMap` (Dart's default) keeps insertion order, and ids
-  /// are issued in order, so evicting `keys.first` evicts the oldest.
-  final Map<int, HvOpOutcome> _outcomes = <int, HvOpOutcome>{};
+  /// Separate from [_finished] because the two need opposite treatment, and
+  /// one bounded map gave them the same. An entry here is a LIVE call: the
+  /// worker still holds it, the reply port is still open, and answering
+  /// [HvOpUnknown] for it is answering the one question `outcomeOf` exists
+  /// to answer — wrongly. The single 128-entry map evicted these along with
+  /// everything else, so the 129th submission made the first one vanish
+  /// while it was still running, and its late result then re-entered the map
+  /// at the tail and evicted somebody else's live entry in its turn
+  /// (report13 HV13-L7).
+  ///
+  /// Bounded at admission instead of by eviction — see [_maxInFlight].
+  final Map<int, HvOpOutcome> _inFlight = <int, HvOpOutcome>{};
 
-  /// How many operations' outcomes are kept. Bounded on purpose: an
+  /// Outcome per FINISHED operation, oldest evicted first.
+  ///
+  /// A `LinkedHashMap` (Dart's default) keeps insertion order, and entries
+  /// arrive here in completion order, so evicting `keys.first` evicts the
+  /// one that finished longest ago.
+  final Map<int, HvOpOutcome> _finished = <int, HvOpOutcome>{};
+
+  /// How many finished operations' outcomes are kept. Bounded on purpose: an
   /// unbounded map would be a leak on a long-lived handle, and an
   /// outcome nobody asked about within the last [_outcomeHistory]
-  /// operations is one nobody is going to. Past that the getter says
+  /// completions is one nobody is going to. Past that the getter says
   /// [HvOpUnknown] rather than inventing an answer.
   static const int _outcomeHistory = 128;
+
+  /// How many operations may be in flight at once.
+  ///
+  /// A ceiling and not a queue depth: the worker serves one call at a time,
+  /// so every entry past the first is a caller that has already sent and is
+  /// waiting, holding an open `ReceivePort` each. A handle that reaches this
+  /// number is not going to be rescued by a larger one — either the worker is
+  /// wedged inside a synchronous FFI frame, or the caller is submitting
+  /// faster than the container can commit. Refusing says so, where dropping
+  /// the oldest pending entry said nothing and lost the record.
+  static const int _maxInFlight = 4096;
 
   /// What became of the operation [opId] (audit HV-07).
   ///
@@ -620,12 +658,21 @@ class HvAsyncSpace {
   /// [HvOpSucceeded] / [HvOpFailed] once it has answered, and
   /// [HvOpUnknown] for an id this handle never issued or has since
   /// evicted.
-  HvOpOutcome outcomeOf(int opId) => _outcomes[opId] ?? const HvOpUnknown();
+  HvOpOutcome outcomeOf(int opId) =>
+      _inFlight[opId] ?? _finished[opId] ?? const HvOpUnknown();
+
+  /// File an operation as pending. Called after the [_maxInFlight] check in
+  /// [_submit] and before the send, so an id exists in exactly one of the two
+  /// maps from the moment it is issued.
+  void _admit(int opId) {
+    _inFlight[opId] = const HvOpPending();
+  }
 
   void _record(int opId, HvOpOutcome outcome) {
-    _outcomes[opId] = outcome;
-    while (_outcomes.length > _outcomeHistory) {
-      _outcomes.remove(_outcomes.keys.first);
+    _inFlight.remove(opId);
+    _finished[opId] = outcome;
+    while (_finished.length > _outcomeHistory) {
+      _finished.remove(_finished.keys.first);
     }
   }
 
@@ -744,8 +791,15 @@ class HvAsyncSpace {
     if (_closed) {
       throw StateError('HvAsyncSpace is closed');
     }
+    // Refused BEFORE the id is issued, so a rejected submission leaves no gap
+    // in the sequence and nothing filed under an id that was never sent.
+    if (_inFlight.length >= _maxInFlight) {
+      throw StateError(
+          'HvAsyncSpace has $_maxInFlight operations in flight; the worker '
+          'serves one at a time, so it is either wedged or being outrun');
+    }
     final opId = _nextOpId++;
-    _record(opId, const HvOpPending());
+    _admit(opId);
     final result = _run<T>(opId, build);
     return HvOperation<T>(opId, result);
   }
@@ -950,6 +1004,25 @@ class HvAsyncSpace {
   Future<HvIntegrityResult> verifyIntegrity() => _call<HvIntegrityResult>(
       (reply) => _VerifyIntegrityRequest(reply: reply));
 
+  /// **Test-only.** The two replies a worker may send to a close, as objects
+  /// a stub worker can send back over the reply port.
+  ///
+  /// [close] now matches on the reply's TYPE, so a stub that answers with
+  /// some convenient truthy value is no longer answering the question. It
+  /// never was — that is the finding (report13 HV13-L2) — but until the match
+  /// existed, a bare `true` and a real success were indistinguishable, and so
+  /// were a real success and a real FAILURE.
+  ///
+  /// Not part of the supported API. The reply types themselves stay private:
+  /// nothing outside this library has business constructing one, and a test
+  /// needs exactly these two.
+  static Object debugCloseOk() => const _OkReply(null);
+
+  /// Companion to [debugCloseOk] — what the worker sends when the native
+  /// close throws.
+  static Object debugCloseError(String kind, String message) =>
+      _ErrorReply(kind, message);
+
   /// **Test-only.** Kill the worker isolate outright, without the
   /// orderly shutdown [close] performs.
   ///
@@ -1000,17 +1073,14 @@ class HvAsyncSpace {
     // the background drain below can wait on the same reply this did.
     final done = reply.first;
     _toWorker.send(_CloseRequest(reply: reply.sendPort));
-    Object? r;
+    Object? raw;
     try {
       // Raced against the worker's death as well as the timeout: a worker that
       // has already died will never answer, and `errorsAreFatal` makes it die
       // QUIETLY, so watching the reply alone burns the whole timeout and then
       // queues a drain for an answer that cannot come.
-      //
-      // The worker never replies a bare null (`_OkReply` / `_ErrorReply` are
-      // objects), so null unambiguously means the timeout fired.
-      r = await Future.any<Object?>([done, _death.future])
-          .timeout(closeTimeout, onTimeout: () => null);
+      raw = await Future.any<Object?>([done, _death.future])
+          .timeout(closeTimeout, onTimeout: () => const _CloseTimedOut());
     } catch (e) {
       // The worker died mid-close. Nothing is left to wait for, and whether
       // the container handle was released with it is not something this is in
@@ -1021,14 +1091,41 @@ class HvAsyncSpace {
       throw HvException(
           'Internal', 'hidden-volume worker died during close: $e');
     }
-    if (r != null) {
-      reply.close();
-      // Stop watching BEFORE the kill: an expected shutdown is not a death to
-      // report, and leaving the watcher armed turns every clean close into an
-      // error future with nobody listening (audit HV-09).
-      _death.dispose();
-      _isolate.kill(priority: Isolate.immediate);
-      return;
+    // A shape this build cannot read is not a close that worked. Nothing but
+    // this file sends into that port, so the fall-back is unreachable rather
+    // than defensive — it is here to make the match below exhaustive over the
+    // sealed reply type, which is the whole point.
+    final _Reply r = raw is _Reply
+        ? raw
+        : const _ErrorReply(
+            'Internal', 'worker sent an unrecognised reply to close');
+    // Matched on the TYPE the worker sent, not on "is it null". `_CloseRequest`
+    // is answered with `_ErrorReply` when the native close throws, and a
+    // non-null test read that as a clean close: the container's handle was
+    // never released, the worker killed itself anyway so no finalizer would
+    // ever release it, and the caller was told the close succeeded. That is
+    // the "correct password but won't unlock" trap this method's own doc
+    // warns about, reported as success (report13 HV13-L2).
+    switch (r) {
+      case _OkReply():
+        reply.close();
+        // Stop watching BEFORE the kill: an expected shutdown is not a death
+        // to report, and leaving the watcher armed turns every clean close
+        // into an error future with nobody listening (audit HV-09).
+        _death.dispose();
+        _isolate.kill(priority: Isolate.immediate);
+        return;
+      case _ErrorReply(:final kind, :final message):
+        // The worker answered, so it is already tearing itself down and the
+        // kill is safe — but the container is NOT closed, and the lock is
+        // still held by this process.
+        reply.close();
+        _death.dispose();
+        _isolate.kill(priority: Isolate.immediate);
+        throw HvException(kind,
+            'hidden-volume worker could not close the container: $message');
+      case _CloseTimedOut():
+        break;
     }
     // Timed out. Leave the worker alive (see the doc above) and drain its
     // answer in the background, so the watcher and the port are released when

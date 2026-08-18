@@ -133,6 +133,43 @@ void main() {
     expect(seen, contains('close-requested'));
   });
 
+  test('a worker that ANSWERS its close with a failure is reported as a '
+      'failure, not as a clean close', () async {
+    // The reply is there, it is an object, and it says the container was not
+    // released — the native `close` threw, the Rust handle was never dropped,
+    // and the worker killed itself anyway so no finalizer will ever drop it.
+    // `if (r != null)` read that as success and returned normally, which is
+    // the "correct password but won't unlock" trap reported as a clean
+    // teardown (report13 HV13-L2).
+    final events = ReceivePort();
+    final seen = <String>[];
+    events.listen((dynamic m) => seen.add('$m'));
+    addTearDown(events.close);
+
+    final live = await _spawnStubWorker(
+      events.sendPort,
+      answerClose: true,
+      failClose: true,
+    );
+    final space = HvAsyncSpace.debugOverWorker(
+      isolate: live.isolate,
+      toWorker: live.port,
+      watch: live.watch,
+    );
+
+    await expectLater(
+      space.close(),
+      throwsA(isA<HvException>().having(
+          (e) => e.message, 'message', contains('native close threw'))),
+      reason: 'a close the worker refused was reported as a clean close',
+    );
+    expect(seen, contains('close-requested'));
+    // Still idempotent, and the handle is still shut: a failure to release the
+    // container is not a reason to keep accepting calls on it.
+    await space.close();
+    expect(() => space.commitSeq(), throwsA(isA<StateError>()));
+  });
+
   test('close stays idempotent, and a failed close still closes the handle',
       () async {
     // The second call must not re-send, re-wait or re-throw: a caller that
@@ -166,12 +203,13 @@ Future<({Isolate isolate, SendPort port, HvWorkerDeath watch})>
   SendPort events, {
   required bool answerClose,
   bool dieOnClose = false,
+  bool failClose = false,
 }) async {
   final boot = ReceivePort();
   final death = HvWorkerDeath();
   final isolate = await Isolate.spawn<List<Object>>(
     _stubWorkerEntry,
-    [boot.sendPort, events, answerClose, dieOnClose],
+    [boot.sendPort, events, answerClose, dieOnClose, failClose],
     errorsAreFatal: true,
     onExit: death.exitPort.sendPort,
     onError: death.errorPort.sendPort,
@@ -187,6 +225,7 @@ void _stubWorkerEntry(List<Object> args) {
   final events = args[1] as SendPort;
   final answerClose = args[2] as bool;
   final dieOnClose = args[3] as bool;
+  final failClose = args[4] as bool;
   final rx = ReceivePort();
   boot.send(rx.sendPort);
   rx.listen((dynamic msg) {
@@ -202,12 +241,17 @@ void _stubWorkerEntry(List<Object> args) {
         return;
       }
       if (!answerClose) return; // still inside the FFI, like the real thing
-      reply.send(true);
+      // The reply the REAL worker sends, not a convenient truthy stand-in:
+      // `close` matches on the type now, and the whole point of the match is
+      // that the failure reply below is a different one.
+      reply.send(failClose
+          ? HvAsyncSpace.debugCloseError('Internal', 'native close threw')
+          : HvAsyncSpace.debugCloseOk());
       rx.close();
       Isolate.current.kill(priority: Isolate.immediate);
       return;
     }
     events.send('call');
-    reply.send(true);
+    reply.send(HvAsyncSpace.debugCloseOk());
   });
 }
