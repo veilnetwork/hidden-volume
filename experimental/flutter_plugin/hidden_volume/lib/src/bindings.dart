@@ -82,22 +82,41 @@ int _u32(int v, String name) {
   return v;
 }
 
-/// Refuse a chunk count that will not survive the trip as a `u64`.
+/// Refuse a value that will not survive the trip as a `u64`.
 ///
 /// Dart's `int` is exactly 64 bits, so the width matches — but it is
 /// **signed**, and it wraps. `1 << 64` evaluates to `0` in Dart, and a
-/// negative value reinterprets as an enormous unsigned one. Both matter here:
-/// `initialGarbageChunks` is the decoy size, so a request that wraps to zero
-/// turns off the deniability padding the caller explicitly asked for, and
-/// says nothing about it. Failing loudly is the only way that request can be
-/// seen to have failed.
-int _u64(int v, String name) {
+/// negative value reinterprets as an enormous unsigned one: `-1` arrives in
+/// Rust as 18446744073709551615.
+///
+/// Every u64 that crosses this boundary is one of two things, and the
+/// reinterpretation ruins both:
+///
+///   - **A count.** `initialGarbageChunks` is the decoy size, so a request
+///     that wraps turns off the deniability padding the caller explicitly
+///     asked for, and says nothing about it.
+///   - **A point in an ORDERED domain** — a `logId`, or a `start` / `end`
+///     bound over one. `-1` does not land near zero, it lands at the top of
+///     the domain: a read misses an entry that exists, a range query that
+///     should have covered the earliest records covers only the last
+///     possible one, and a `DeleteLog` names a record no writer will ever
+///     produce, so the delete silently does nothing (audit HV13-M3). Log ids
+///     are frequently timestamps, and a clock that has not been set yet is
+///     the ordinary way a caller ends up holding a negative one.
+///
+/// Failing loudly is the only way such a request can be seen to have failed.
+/// Public within the package so [`async_bindings.dart`](async_bindings.dart)
+/// applies the same guard at the same width: without it a negative id is
+/// caught only inside the worker isolate, and comes back as a generic
+/// `HvException('Internal', ...)` instead of an `ArgumentError` naming the
+/// parameter.
+int requireU64(int v, String name) {
   if (v < 0) {
     throw ArgumentError.value(
         v,
         name,
         'must be >= 0 (FFI is u64; a negative Dart int reinterprets '
-        'as an enormous count)');
+        'as an enormous unsigned value)');
   }
   return v;
 }
@@ -795,7 +814,7 @@ final class HvWriteOpAppendLog extends HvWriteOp {
     w
       ..writeI32(3)
       ..writeU8(_ns(namespace))
-      ..writeU64(logId)
+      ..writeU64(requireU64(logId, 'logId'))
       ..writeByteVec(payload);
   }
 }
@@ -811,7 +830,7 @@ final class HvWriteOpDeleteLog extends HvWriteOp {
     w
       ..writeI32(4)
       ..writeU8(_ns(namespace))
-      ..writeU64(logId);
+      ..writeU64(requireU64(logId, 'logId'));
   }
 }
 
@@ -1480,13 +1499,17 @@ RustBuffer _optByteVec(Uint8List? v) {
 }
 
 /// Encode an `Option<u64>` as: 1 byte tag (0=None, 1=Some) + (if Some) u64 BE.
-RustBuffer _optU64(int? v) {
+///
+/// `name` is required rather than optional so that a bound cannot be lowered
+/// without saying which one it is — the guard is then part of the signature
+/// instead of something a later call site can forget (audit HV13-M3).
+RustBuffer _optU64(int? v, String name) {
   final w = _Writer();
   if (v == null) {
     w.writeU8(0);
   } else {
     w.writeU8(1);
-    w.writeU64(v);
+    w.writeU64(requireU64(v, name));
   }
   return _bufferFromBytes(w.toBytes());
 }
@@ -1516,7 +1539,7 @@ class SpaceHandleBindings {
         pathBuf,
         pwdBuf,
         argonBuf,
-        _u64(initialGarbageChunks, 'initialGarbageChunks'),
+        requireU64(initialGarbageChunks, 'initialGarbageChunks'),
         _u8(superblockReplicas, 'superblockReplicas'),
         s));
     return SpaceHandleBindings._(h);
@@ -1612,8 +1635,8 @@ class SpaceHandleBindings {
     required int limit,
   }) {
     _ensureOpen();
-    final startBuf = _optU64(start);
-    final endBuf = _optU64(end);
+    final startBuf = _optU64(start, 'start');
+    final endBuf = _optU64(end, 'end');
     final h = _cloneHandle();
     final out = rustCall<RustBuffer>((s) => _spIterLogRange(
         h, _ns(namespace), startBuf, endBuf, _u32(limit, 'limit'), s));
@@ -1684,8 +1707,8 @@ class SpaceHandleBindings {
   Uint8List? readLog(int namespace, int logId) {
     _ensureOpen();
     final h = _cloneHandle();
-    final out =
-        rustCall<RustBuffer>((s) => _spReadLog(h, _ns(namespace), logId, s));
+    final out = rustCall<RustBuffer>(
+        (s) => _spReadLog(h, _ns(namespace), requireU64(logId, 'logId'), s));
     return _readOptByteVec(_bufferToBytes(out));
   }
 
@@ -2014,8 +2037,8 @@ class MultiSpaceHandleBindings {
   Uint8List? readLog(int id, int namespace, int logId) {
     _ensureOpen();
     final h = _clone();
-    final out = rustCall<RustBuffer>(
-        (s) => _msReadLog(h, _sid(id), _ns(namespace), logId, s));
+    final out = rustCall<RustBuffer>((s) => _msReadLog(
+        h, _sid(id), _ns(namespace), requireU64(logId, 'logId'), s));
     return _decodeOptionBytes(out);
   }
 
@@ -2028,8 +2051,8 @@ class MultiSpaceHandleBindings {
     required int limit,
   }) {
     _ensureOpen();
-    final startBuf = _optU64(start);
-    final endBuf = _optU64(end);
+    final startBuf = _optU64(start, 'start');
+    final endBuf = _optU64(end, 'end');
     final h = _clone();
     final out = rustCall<RustBuffer>((s) => _msIterLogRange(h, _sid(id),
         _ns(namespace), startBuf, endBuf, _u32(limit, 'limit'), s));

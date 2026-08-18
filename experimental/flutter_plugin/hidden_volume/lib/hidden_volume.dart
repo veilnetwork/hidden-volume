@@ -139,12 +139,13 @@ class HvSpace {
     required Uint8List password,
     DeferredVacuumWindow vacuumWindow = DeferredVacuumWindow.standard,
   }) {
+    // Before the open, not after it: see `_armOrRelease`.
+    vacuumWindow.validate();
     final s = HvSpace._(ffi.SpaceHandleBindings.open(
       path: path,
       password: password,
     ));
-    s.scheduleDeferredVacuum(window: vacuumWindow);
-    return s;
+    return _armOrRelease(s, vacuumWindow);
   }
 
   /// Add a **new parallel space** to an **existing** container at [path],
@@ -182,12 +183,35 @@ class HvSpace {
     required Uint8List keys,
     DeferredVacuumWindow vacuumWindow = DeferredVacuumWindow.standard,
   }) {
+    vacuumWindow.validate();
     final s = HvSpace._(ffi.SpaceHandleBindings.openWithKeys(
       path: path,
       keys: keys,
     ));
-    s.scheduleDeferredVacuum(window: vacuumWindow);
-    return s;
+    return _armOrRelease(s, vacuumWindow);
+  }
+
+  /// Arm [space]'s deferred scrub, closing it if the arming throws.
+  ///
+  /// Between the open and the `return` the handle holds the container's
+  /// `flock` and the caller has no reference to it: anything thrown in
+  /// that gap leaks the lock for the life of the process, and every later
+  /// open answers `Busy` — the "correct password but won't unlock" trap.
+  /// The GC finalizer on `SpaceHandleBindings` would eventually free it,
+  /// on no schedule anybody can wait for.
+  ///
+  /// The window is validated before the open as well, which is what
+  /// actually removed the known way to get here (audit HV13-M2); this is
+  /// the structural half, so the next thing that learns to throw in this
+  /// gap does not re-open the finding.
+  static HvSpace _armOrRelease(HvSpace space, DeferredVacuumWindow window) {
+    try {
+      space.scheduleDeferredVacuum(window: window);
+    } catch (_) {
+      space.close();
+      rethrow;
+    }
+    return space;
   }
 
   /// Apply a batch of writes atomically as one commit. Returns the new
@@ -299,6 +323,9 @@ class HvSpace {
     DeferredVacuumWindow window = DeferredVacuumWindow.standard,
     Random? random,
   }) {
+    // A window `pick` would have to clamp is the caller's error, and this
+    // is a handle they hold — so it is safe to say so here.
+    window.validate();
     return _deferredVacuum.arm(window, () {
       try {
         _inner.vacuumAfterOpen();
