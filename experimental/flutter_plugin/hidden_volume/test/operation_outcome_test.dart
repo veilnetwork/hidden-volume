@@ -305,6 +305,41 @@ void main() {
         reason: '0 is never issued, so it must not resolve to an outcome');
   });
 
+  test('a LIVE operation is not evicted by the ones submitted after it',
+      () async {
+    final space = await makeSpace();
+    addTearDown(space.close);
+
+    // Submitted in one turn, so the worker — which serves one call at a time
+    // — has answered none of them: 200 genuinely in-flight operations, past
+    // the 128 the outcome map holds.
+    //
+    // One map for both states meant the 129th submission dropped the first
+    // one WHILE IT WAS RUNNING, and `outcomeOf` then answered Unknown — "an
+    // id this handle never issued" — for a commit the worker was in the
+    // middle of. A caller reading that is back to guessing whether the write
+    // landed, which is the one question this getter exists to answer
+    // (report13 HV13-L7).
+    final ops = [
+      for (var i = 0; i < 200; i++) space.commitOperation([put('k$i', 'v$i')])
+    ];
+    for (final op in ops) {
+      expect(space.outcomeOf(op.id), isA<HvOpPending>(),
+          reason: 'operation ${op.id} is still running and reads as evicted');
+    }
+
+    for (final op in ops) {
+      await op.result;
+    }
+
+    // And the finished half is still bounded — the fix separates the two, it
+    // does not make either unbounded.
+    expect(space.outcomeOf(ops.last.id), isA<HvOpSucceeded>());
+    expect(space.outcomeOf(ops.first.id), isA<HvOpUnknown>(),
+        reason: 'the terminal history keeps 128, so the oldest of 200 '
+            'completions must have aged out');
+  });
+
   test('an outcome is filed before the worker answers, as pending',
       () async {
     final space = await makeSpace();
