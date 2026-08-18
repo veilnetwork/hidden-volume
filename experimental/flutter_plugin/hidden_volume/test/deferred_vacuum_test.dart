@@ -40,6 +40,16 @@ const _fast = DeferredVacuumWindow(
 const _never =
     DeferredVacuumWindow(Duration(minutes: 10), Duration(minutes: 10));
 
+/// Wider than the sampler can draw from: `Random.nextInt` takes a bound of
+/// at most 2^32, so a 50-day span is one it refuses (audit HV13-M2).
+const _tooWide = DeferredVacuumWindow(Duration.zero, Duration(days: 50));
+
+/// A window in the past. `Timer` treats a negative delay as zero and fires
+/// on the next turn of the event loop, which puts the scrub back on the
+/// unlock — the correlation the deferral exists to break.
+const _inThePast =
+    DeferredVacuumWindow(Duration(seconds: -5), Duration(seconds: -1));
+
 Uint8List _pw(String s) => Uint8List.fromList(s.codeUnits);
 
 /// A container that owes a scrub: 20 entries written, then deleted. The
@@ -171,6 +181,69 @@ void main() {
     space.close();
     expect(space.pendingVacuumDelay, isNull);
     await Future<void>.delayed(const Duration(milliseconds: 200));
+  });
+
+  test('a window the sampler cannot serve is refused with nothing held',
+      () async {
+    // The finding is not the throw, it is WHEN it happened: the arming ran
+    // after the container was open, so a window `pick` could not draw from
+    // threw with the handle holding the file's `flock` and no longer
+    // reachable by the caller. Every later open then answered `Busy` for
+    // the life of the process — the "correct password but won't unlock"
+    // trap (audit HV13-M2).
+    final tmp = Directory.systemTemp.createTempSync('hv_dart_window_');
+    addTearDown(() => tmp.deleteSync(recursive: true));
+    final path = _containerOwingAScrub(tmp);
+
+    expect(
+      () =>
+          HvSpace.open(path: path, password: _pw('pwd'), vacuumWindow: _tooWide),
+      throwsA(isA<ArgumentError>()),
+      reason: 'a 50-day span is wider than the sampler will draw from',
+    );
+    expect(
+      () => HvSpace.open(
+          path: path, password: _pw('pwd'), vacuumWindow: _inThePast),
+      throwsA(isA<ArgumentError>()),
+      reason: 'a negative delay fires at once, next to the unlock',
+    );
+
+    // The half that matters: neither refusal took the container with it.
+    final ok =
+        HvSpace.open(path: path, password: _pw('pwd'), vacuumWindow: _never);
+    addTearDown(ok.close);
+    expect(ok.pendingVacuumDelay, const Duration(minutes: 10));
+
+    // And the same window is refused on a handle the caller already holds,
+    // where there is nothing to strand and everything to say.
+    expect(() => ok.scheduleDeferredVacuum(window: _tooWide),
+        throwsA(isA<ArgumentError>()));
+    expect(ok.pendingVacuumDelay, const Duration(minutes: 10),
+        reason: 'a refused re-arm must leave the armed one alone');
+  });
+
+  test('the sampler is total: every window yields a delay', () {
+    // `pick` runs with a container open, so it does not get to throw —
+    // `validate` is where a bad window is reported. What `pick` owes is a
+    // usable answer for one that got this far.
+    final wide = _tooWide.pick(Random(7));
+    expect(wide, greaterThanOrEqualTo(Duration.zero));
+    expect(wide.inMilliseconds, lessThan(DeferredVacuumWindow.maxSpanMs));
+
+    final past = _inThePast.pick(Random(7));
+    expect(past, greaterThanOrEqualTo(Duration.zero),
+        reason: 'a delay in the past arms a timer that fires immediately');
+
+    // The exact boundary: the widest span the sampler serves is served,
+    // and one millisecond more is refused.
+    const widest = DeferredVacuumWindow(Duration.zero,
+        Duration(milliseconds: DeferredVacuumWindow.maxSpanMs - 1));
+    widest.validate();
+    expect(widest.pick(Random(7)).inMilliseconds,
+        inInclusiveRange(0, DeferredVacuumWindow.maxSpanMs - 1));
+    const justOver = DeferredVacuumWindow(
+        Duration.zero, Duration(milliseconds: DeferredVacuumWindow.maxSpanMs));
+    expect(justOver.validate, throwsA(isA<ArgumentError>()));
   });
 
   test('a degenerate window means exactly its lower bound', () {

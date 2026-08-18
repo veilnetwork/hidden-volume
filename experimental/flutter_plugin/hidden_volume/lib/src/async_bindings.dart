@@ -524,6 +524,29 @@ void _dispatch(SpaceHandleBindings space, _Request msg, ReceivePort rx) {
 // Public async API
 // ------------------------------------------------------------------
 
+/// Refuse a write op carrying an id that cannot be lowered, before the batch
+/// crosses to the worker.
+///
+/// The sync bindings check the same ids inside `HvWriteOp._write`, which on
+/// this path runs in the worker isolate — where an `ArgumentError` is caught
+/// by the dispatch loop and returned as `HvException('Internal', ...)`. The
+/// caller then gets a different type, at a different time, for the same
+/// mistake. Checking here makes the async surface answer as the sync one does
+/// (audit HV13-M3).
+void _requireLowerableIds(List<HvWriteOp> ops) {
+  for (final op in ops) {
+    switch (op) {
+      case HvWriteOpAppendLog():
+        requireU64(op.logId, 'logId');
+      case HvWriteOpDeleteLog():
+        requireU64(op.logId, 'logId');
+      case HvWriteOpPut():
+      case HvWriteOpDelete():
+        break;
+    }
+  }
+}
+
 /// Async equivalent of [HvSpace] (in `lib/hidden_volume.dart`). Backed
 /// by a dedicated worker isolate that owns the underlying Rust handle.
 /// Every method offloads work — the calling isolate (Flutter UI) stays
@@ -649,6 +672,9 @@ class HvAsyncSpace {
     String? dylibPath,
     DeferredVacuumWindow vacuumWindow = DeferredVacuumWindow.standard,
   }) async {
+    // Before the worker is spawned, not after: an exception once it is up
+    // strands both it and the lock it took.
+    vacuumWindow.validate();
     final bootReply = ReceivePort();
     final boot = _BootstrapOpen(
       path: path,
@@ -656,7 +682,17 @@ class HvAsyncSpace {
       reply: bootReply.sendPort,
     );
     final space = await _spawn(boot, bootReply, dylibPath);
-    space.scheduleDeferredVacuum(window: vacuumWindow);
+    try {
+      space.scheduleDeferredVacuum(window: vacuumWindow);
+    } catch (_) {
+      // The worker is up and holding the container's `flock`, and nobody
+      // else has a reference to it: without this the lock is held for the
+      // life of the PROCESS — there is no finalizer on this side, and the
+      // worker's own never runs because its isolate never exits. Every
+      // later open then answers `Busy` (audit HV13-M2).
+      await space.close().catchError((Object _) {});
+      rethrow;
+    }
     return space;
   }
 
@@ -767,8 +803,10 @@ class HvAsyncSpace {
   ///   final what = space.outcomeOf(op.id);
   /// }
   /// ```
-  HvOperation<int> commitOperation(List<HvWriteOp> ops) =>
-      _submit<int>((reply) => _CommitRequest(ops: ops, reply: reply));
+  HvOperation<int> commitOperation(List<HvWriteOp> ops) {
+    _requireLowerableIds(ops);
+    return _submit<int>((reply) => _CommitRequest(ops: ops, reply: reply));
+  }
 
   /// Read a KV value, or null if absent.
   Future<Uint8List?> get(int namespace, Uint8List key) => _call<Uint8List?>(
@@ -780,14 +818,21 @@ class HvAsyncSpace {
     int? start,
     int? end,
     required int limit,
-  }) =>
-      _call<List<HvLogEntry>>((reply) => _IterLogRangeRequest(
-            namespace: namespace,
-            start: start,
-            end: end,
-            limit: limit,
-            reply: reply,
-          ));
+  }) {
+    if (start != null) {
+      requireU64(start, 'start');
+    }
+    if (end != null) {
+      requireU64(end, 'end');
+    }
+    return _call<List<HvLogEntry>>((reply) => _IterLogRangeRequest(
+          namespace: namespace,
+          start: start,
+          end: end,
+          limit: limit,
+          reply: reply,
+        ));
+  }
 
   /// Current commit sequence.
   Future<int> commitSeq() =>
@@ -812,9 +857,11 @@ class HvAsyncSpace {
       (reply) => _EraseNamespaceRequest(namespace: namespace, reply: reply));
 
   /// Read one log entry by `(namespace, logId)`. Null if absent.
-  Future<Uint8List?> readLog(int namespace, int logId) =>
-      _call<Uint8List?>((reply) =>
-          _ReadLogRequest(namespace: namespace, logId: logId, reply: reply));
+  Future<Uint8List?> readLog(int namespace, int logId) {
+    requireU64(logId, 'logId');
+    return _call<Uint8List?>((reply) =>
+        _ReadLogRequest(namespace: namespace, logId: logId, reply: reply));
+  }
 
   /// All namespace tags currently in use.
   Future<Uint8List> listNamespaces() =>
@@ -879,6 +926,9 @@ class HvAsyncSpace {
     DeferredVacuumWindow window = DeferredVacuumWindow.standard,
     Random? random,
   }) {
+    // A window `pick` would have to clamp is the caller's error, and this
+    // is a handle they hold — so it is safe to say so here.
+    window.validate();
     return _deferredVacuum.arm(window, () {
       if (_closed) return;
       unawaited(vacuumAfterOpen().catchError((Object _) => 0));
