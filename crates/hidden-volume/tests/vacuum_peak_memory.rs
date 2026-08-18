@@ -80,12 +80,16 @@ const NAMESPACE: Namespace = Namespace::SETTINGS;
 /// removed three structures whose size followed the owned-slot count:
 /// the `owned_slots` clone, the drop set, and a reachable set that was
 /// a duplicate of the traversal guard's own visited set. What remains
-/// is that guard — one hashed `u64` per chunk the LIVE tree holds —
-/// and it is shared with every other walker in the crate, so shrinking
-/// it is a different question with different trade-offs (a point `get`
-/// would then pay a slot-count-sized allocation to read three nodes).
+/// is that guard, which follows the LIVE tree rather than the history.
 /// A fixture whose live tree grew alongside its history would let that
 /// term dominate the measurement and hide the ones this pass is about.
+///
+/// The guard's own representation was the second half of the same
+/// finding and is settled separately (HV13-M1): it is hashed while a
+/// walk is small — a point `get` must not pay a slot-count-sized
+/// allocation to read three nodes — and one bit per slot of file once
+/// a walk is not, so a full walk is bounded by the container instead of
+/// by its own length. `space::walk`'s unit tests pin both halves.
 const SMALL_COMMITS: usize = 200;
 const LARGE_COMMITS: usize = 800;
 

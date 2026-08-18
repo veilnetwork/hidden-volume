@@ -1203,12 +1203,14 @@ impl<'f> Space<'f> {
     // documented here.
 
     /// A fresh traversal guard sized for this space: at most one read
-    /// per owned chunk, and no deeper than that many chunks could be
-    /// arranged into. Every tree walk starts here — see [`walk`] for
-    /// why one of those bounds alone is not enough, and why the depth
-    /// bound is derived from the chunk count rather than fixed.
+    /// per owned chunk, no chunk at or past the file's slot count, and
+    /// no deeper than that many chunks could be arranged into. Every
+    /// tree walk starts here — see [`walk`] for why one of those bounds
+    /// alone is not enough, why the depth bound is derived from the
+    /// chunk count rather than fixed, and why the visited set is sized
+    /// against the FILE rather than against the walk.
     pub(in crate::space) fn new_tree_walk(&self) -> TreeWalk {
-        TreeWalk::with_budget(self.state.owned_slots.len())
+        TreeWalk::new(self.state.owned_slots.len(), self.file.slot_count())
     }
 
     /// Recursively flatten every IndexNode subtree rooted at `slot`

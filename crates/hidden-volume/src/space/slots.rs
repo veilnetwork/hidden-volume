@@ -14,16 +14,20 @@
 //! in sixty-four. Every real container is far denser than that: an open that
 //! found almost nothing owned had almost nothing to hold either.
 //!
-//! ## Why this is not `vacuum::SlotSet`
+//! ## Two bitmaps, and why they are not one
 //!
-//! Vacuum's bitmap is sized to the file and REFUSES a slot beyond it, which is
-//! right there — it is fed arbitrary 8-byte KV values that need not name a
-//! real slot, and a value that names no slot can match no owned slot either.
+//! [`DenseSlotSet`] below is the same idea with the opposite bound: it is
+//! sized to the file and REFUSES a slot beyond it. That is right for its
+//! callers. The vacuum's pointer scan is fed arbitrary 8-byte KV values that
+//! need not name a real slot, and a value naming no slot can match no owned
+//! slot either; the tree walk's guard is fed child pointers decoded off the
+//! disk, where a slot past the end of the file is a structural failure to
+//! report rather than a chunk to go looking for.
 //!
-//! This set is written to by `place_chunk` as the file grows, so a slot beyond
-//! the current capacity is not a stray value but the next append. Refusing it
-//! would silently forget a live chunk, which is the failure mode that ends in
-//! a vacuum scrubbing data. It grows instead.
+//! [`OwnedSet`] is written to by `place_chunk` as the file grows, so a slot
+//! beyond the current capacity is not a stray value but the next append.
+//! Refusing it would silently forget a live chunk, which is the failure mode
+//! that ends in a vacuum scrubbing data. It grows instead.
 
 /// A set of slot indices, one bit each.
 ///
@@ -157,6 +161,101 @@ impl OwnedSet {
     }
 }
 
+/// Membership over chunk slot indices, one bit per slot, bounded by the
+/// file.
+///
+/// Every set keyed on a slot index — the vacuum's reachable / referenced /
+/// to-drop sets, the tree walk's visited set — is a set over a range that is
+/// dense and bounded by the file's own
+/// [`ContainerFile::slot_count`][crate::container::file::ContainerFile::slot_count].
+/// A `HashSet<u64>` over that range costs, measured against the system
+/// allocator, 18.9 bytes per member live and 28.3 at the rehash that gets
+/// there — hashbrown rounds a `u64` set up to a power of two buckets of nine
+/// bytes each. One bit per slot is 0.125 bytes per slot of FILE, whatever the
+/// set holds: 2 MiB at [`crate::MAX_OPEN_SCAN_CHUNKS`], against 302 MiB live
+/// and 453 MiB peak for a hashed set of the same 16 M members.
+///
+/// This matters more than an ordinary allocation win because both callers run
+/// on the open path: `vacuum_orphans` runs automatically on every writable
+/// open, and every walk of a full tree goes through the guard. A container
+/// that has grown to where either cannot allocate stops opening at all, and
+/// the person who filled it has locked themselves out with no adversary
+/// involved — under `panic = "abort"`, as a process abort (audit HV-03,
+/// HV13-M1).
+pub(crate) struct DenseSlotSet {
+    words: Vec<u64>,
+    capacity: u64,
+    len: usize,
+}
+
+impl DenseSlotSet {
+    /// Room for slots `0..capacity`. `capacity` is the file's slot
+    /// count, so `Vec` allocates `capacity / 8` bytes.
+    pub(crate) fn with_capacity(capacity: u64) -> Self {
+        Self {
+            words: vec![0u64; capacity.div_ceil(64) as usize],
+            capacity,
+            len: 0,
+        }
+    }
+
+    /// Record `slot`; returns whether it was in range and therefore
+    /// recorded.
+    ///
+    /// Out-of-range is not an error for every caller: the batch-pointer
+    /// scan feeds this arbitrary 8-byte KV values, which need not name
+    /// a real slot. Such a value can never match an owned slot either,
+    /// so dropping it changes no answer. Callers for whom a dropped
+    /// slot WOULD change an answer — anything feeding the reachable set,
+    /// where a miss means scrubbing live data, and the tree walk, where
+    /// a miss means a chunk admitted twice — must check the result or
+    /// range-check ahead of it.
+    pub(crate) fn insert(&mut self, slot: u64) -> bool {
+        if slot >= self.capacity {
+            return false;
+        }
+        let word = &mut self.words[(slot / 64) as usize];
+        let bit = 1u64 << (slot % 64);
+        if *word & bit == 0 {
+            *word |= bit;
+            self.len += 1;
+        }
+        true
+    }
+
+    pub(crate) fn contains(&self, slot: u64) -> bool {
+        slot < self.capacity && self.words[(slot / 64) as usize] & (1u64 << (slot % 64)) != 0
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The recorded slots, ascending. Used to hand the retired set to the
+    /// decoy pool after a vacuum pass.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = u64> + '_ {
+        self.words.iter().enumerate().flat_map(|(w, &word)| {
+            (0..64u64).filter_map(move |b| {
+                if word & (1u64 << b) != 0 {
+                    Some(w as u64 * 64 + b)
+                } else {
+                    None
+                }
+            })
+        })
+    }
+
+    /// Bytes this set holds on the heap.
+    ///
+    /// A function of the FILE and of nothing else — the property
+    /// `space::walk`'s memory-shape test pins, and the whole reason the
+    /// representation was worth changing.
+    #[cfg(test)]
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.words.len() * std::mem::size_of::<u64>()
+    }
+}
+
 /// The slots named by one word of a bitmap, ascending.
 ///
 /// Companion to [`OwnedSet::word`] — free rather than a method so a caller
@@ -192,7 +291,7 @@ impl std::fmt::Debug for OwnedSet {
 
 #[cfg(test)]
 mod tests {
-    use super::OwnedSet;
+    use super::{DenseSlotSet, OwnedSet};
 
     #[test]
     fn a_slot_past_the_capacity_grows_the_set() {
@@ -253,6 +352,45 @@ mod tests {
             walked.extend(super::slots_in_word(w, s.word(w)));
         }
         assert_eq!(walked, s.to_sorted_vec());
+    }
+
+    #[test]
+    fn a_dense_set_refuses_a_slot_past_the_file() {
+        // The difference from `OwnedSet`, and the one that matters: this
+        // set is fed arbitrary values decoded off the disk. A slot past
+        // the end of the file is not a set to grow, it is an answer.
+        let mut s = DenseSlotSet::with_capacity(128);
+        assert!(s.insert(127));
+        assert!(!s.insert(128));
+        assert!(!s.contains(128));
+        assert!(s.contains(127));
+    }
+
+    #[test]
+    fn a_dense_set_costs_one_bit_per_slot_of_file() {
+        // Not per member: the same set, empty and full, is the same size.
+        let mut empty = DenseSlotSet::with_capacity(1 << 20);
+        let full = {
+            let mut s = DenseSlotSet::with_capacity(1 << 20);
+            for slot in 0..(1u64 << 20) {
+                s.insert(slot);
+            }
+            s
+        };
+        assert_eq!(empty.heap_bytes(), full.heap_bytes());
+        assert_eq!(empty.heap_bytes(), (1 << 20) / 8);
+        assert!(empty.is_empty());
+        empty.insert(3);
+        assert!(!empty.is_empty());
+    }
+
+    #[test]
+    fn a_dense_set_iterates_ascending() {
+        let mut s = DenseSlotSet::with_capacity(8192);
+        for slot in [4097u64, 0, 63, 64] {
+            s.insert(slot);
+        }
+        assert_eq!(s.iter().collect::<Vec<_>>(), vec![0, 63, 64, 4097]);
     }
 
     #[test]

@@ -28,6 +28,10 @@
 //!   a slot is a structural violation to report, not a duplicate to
 //!   silently skip. This also covers the narrower "two children of one
 //!   node share a `child_slot`" case without a separate per-node check.
+//!   A slot at or past the file's own slot count is refused here too:
+//!   the reader would refuse the same pointer a line later
+//!   (`ContainerFile::read_slot`), and refusing it in the guard is what
+//!   lets the set be an array indexed by slot — see below.
 //! - **`budget`** bounds total chunk reads independently of the shape
 //!   of the input, so the walk stays finite even if a future refactor
 //!   loosens the visited check. The ceiling is the number of chunks
@@ -78,6 +82,37 @@
 //! guaranteed 4 moves the bound from 7 descents to 12; both are far
 //! below what the recursion or the budget care about.
 //!
+//! ## What the visited set costs
+//!
+//! `visited` holds one entry per chunk the walk reads, and the walk can
+//! legitimately read every chunk the space owns — a `verify_integrity`
+//! or a `vacuum_orphans` over a healthy tree does exactly that. As a
+//! `HashSet<u64>` that measured 18.9 bytes per member live and 28.3 at
+//! the rehash that gets there (hashbrown rounds up to a power of two
+//! buckets of nine bytes each), so a walk of a container at the
+//! format's ceiling — [`crate::MAX_OPEN_SCAN_CHUNKS`], 16 M chunks —
+//! held 302 MiB and peaked at 453. The workspace builds with
+//! `panic = "abort"`, so failing to allocate that is not an error a
+//! host app can report; it is the process going away on the open path,
+//! for a container the format explicitly permits (audit HV13-M1).
+//!
+//! Slot indices are dense and bounded by the file, so the same
+//! membership is one bit per slot — 2 MiB at that ceiling, whatever the
+//! walk reads. That is [`super::slots::DenseSlotSet`], which the vacuum
+//! already used for its own slot sets.
+//!
+//! **Why the set is not dense from the first slot.** A bitmap costs
+//! `slot_count / 8` bytes whether it holds one member or all of them,
+//! and most walks are small: `Space::get` descends to a leaf and reads
+//! at most `max_depth + 1` chunks, and each one builds its own guard. A
+//! set that was dense from the start would hand every point read on a
+//! 64 GiB container a 2 MiB allocation to record thirteen slots — the
+//! trade-off that left this set hashed when audit HV-03 shrank the
+//! vacuum's. So it stays hashed while it is small and switches once, at
+//! [`dense_threshold`], where the two representations cost about the
+//! same. Small walks keep the allocation they had; a full walk is
+//! bounded by the file rather than by its own length.
+//!
 //! ## Scope
 //!
 //! One `TreeWalk` covers one logical traversal, which may span several
@@ -91,6 +126,8 @@
 use std::collections::HashSet;
 
 use crate::{Error, Result};
+
+use super::slots::DenseSlotSet;
 
 /// The deepest B+ tree a space owning `budget` chunks can hold.
 ///
@@ -133,23 +170,104 @@ pub(in crate::space) fn max_depth_for_budget(budget: usize) -> u8 {
     }
 }
 
+/// One hashed member per this many slots of file is where
+/// [`TreeWalk`]'s visited set stops hashing and starts indexing.
+///
+/// At the switch the hashed set holds `slot_count / 512` members of 18.9
+/// bytes, which is 37 % of the `slot_count / 8` bytes the bitmap will
+/// cost — both are live for the length of the copy, so the peak of the
+/// switch is 1.4 bitmaps, and everything after it is exactly one. Any
+/// walk that never reaches the ratio never allocates a bitmap at all,
+/// which is every point read and every bounded page of leaves.
+const SLOTS_PER_HASHED_MEMBER: u64 = 512;
+
+/// Floor under that ratio, so a small container does not switch on its
+/// second chunk. Below this many members the question is moot in both
+/// directions — 32 hashed slots is under a kilobyte, and the bitmap of a
+/// file small enough to make 32 the binding number is under 64 bytes.
+const MIN_HASHED_SLOTS: usize = 32;
+
+/// How many slots a walk over a `slot_count`-slot file may hash before
+/// the bitmap is the cheaper of the two.
+fn dense_threshold(slot_count: u64) -> usize {
+    ((slot_count / SLOTS_PER_HASHED_MEMBER) as usize).max(MIN_HASHED_SLOTS)
+}
+
+/// The visited set in whichever of its two shapes currently fits.
+///
+/// See the module docs: hashed while the walk is small, one bit per slot
+/// of file once it is not.
+enum Visited {
+    Hashed(HashSet<u64>),
+    Dense(DenseSlotSet),
+}
+
+impl Visited {
+    fn contains(&self, slot: u64) -> bool {
+        match self {
+            Visited::Hashed(h) => h.contains(&slot),
+            Visited::Dense(d) => d.contains(slot),
+        }
+    }
+
+    /// Record `slot`, which the caller has already checked is below
+    /// `capacity`, switching representation once the hashed set reaches
+    /// `promote_at`. Returns whether it was newly recorded.
+    fn insert(&mut self, slot: u64, capacity: u64, promote_at: usize) -> bool {
+        match self {
+            Visited::Hashed(h) => {
+                if !h.insert(slot) {
+                    return false;
+                }
+                if h.len() >= promote_at {
+                    let mut dense = DenseSlotSet::with_capacity(capacity);
+                    for s in h.iter() {
+                        // In range by the caller's check, so every
+                        // member carries over — a dropped one would be a
+                        // chunk the walk could then read twice.
+                        debug_assert!(*s < capacity);
+                        dense.insert(*s);
+                    }
+                    *self = Visited::Dense(dense);
+                }
+                true
+            },
+            Visited::Dense(d) => {
+                if d.contains(slot) {
+                    return false;
+                }
+                d.insert(slot);
+                true
+            },
+        }
+    }
+}
+
 /// Per-traversal guard: which slots this walk has already read, how
 /// many reads it has left, and how deep it may descend. See the module
 /// docs for why all three are needed.
 pub(super) struct TreeWalk {
-    visited: HashSet<u64>,
+    visited: Visited,
+    /// The file's slot count: the first slot index no chunk can have,
+    /// and the width of the bitmap `visited` switches to.
+    capacity: u64,
+    /// Hashed members at which that switch happens.
+    promote_at: usize,
     budget: usize,
     max_depth: u8,
 }
 
 impl TreeWalk {
-    /// New guard permitting at most `budget` distinct chunk reads, and
-    /// a descent no deeper than that many chunks could hold. Callers
-    /// pass the space's owned-chunk count
+    /// New guard permitting at most `budget` distinct chunk reads, none
+    /// of them at or past `slot_count`, and a descent no deeper than
+    /// `budget` chunks could hold. Callers pass the space's owned-chunk
+    /// count and its file's slot count
     /// ([`super::Space::new_tree_walk`]).
-    pub(super) fn with_budget(budget: usize) -> Self {
+    pub(super) fn new(budget: usize, slot_count: u64) -> Self {
         Self {
-            visited: HashSet::new(),
+            visited: Visited::Hashed(HashSet::new()),
+            capacity: slot_count,
+            promote_at: dense_threshold(slot_count),
             budget,
             max_depth: max_depth_for_budget(budget),
         }
@@ -181,7 +299,19 @@ impl TreeWalk {
     /// commit" name the same slots, so the vacuum asks here instead of
     /// building a second set beside this one (audit HV-03).
     pub(super) fn has_visited(&self, slot: u64) -> bool {
-        self.visited.contains(&slot)
+        self.visited.contains(slot)
+    }
+
+    /// Bytes the visited set holds on the heap. Hashed capacity is
+    /// hashbrown's own layout — buckets, at `size_of::<u64>()` plus one
+    /// control byte each, at the 7/8 load factor `capacity()` reports
+    /// against.
+    #[cfg(test)]
+    fn visited_heap_bytes(&self) -> usize {
+        match &self.visited {
+            Visited::Hashed(h) => h.capacity() * (std::mem::size_of::<u64>() + 1) * 8 / 7,
+            Visited::Dense(d) => d.heap_bytes(),
+        }
     }
 
     fn check(&mut self, slot: u64, depth: u8) -> std::result::Result<(), &'static str> {
@@ -191,8 +321,14 @@ impl TreeWalk {
         if self.budget == 0 {
             return Err("tree walk exceeded its traversal budget");
         }
+        // Ahead of the read that would refuse it anyway, because the
+        // visited set is indexed by slot and cannot hold what the file
+        // cannot hold.
+        if slot >= self.capacity {
+            return Err("chunk pointer outside the container");
+        }
         self.budget -= 1;
-        if !self.visited.insert(slot) {
+        if !self.visited.insert(slot, self.capacity, self.promote_at) {
             return Err("chunk reachable more than once in one tree walk");
         }
         Ok(())
@@ -205,7 +341,7 @@ mod tests {
 
     #[test]
     fn a_second_visit_to_a_slot_is_rejected() {
-        let mut w = TreeWalk::with_budget(16);
+        let mut w = TreeWalk::new(16, 4096);
         w.admit(7, 0).unwrap();
         w.admit(8, 1).unwrap();
         let err = w.admit(7, 2).unwrap_err();
@@ -214,7 +350,7 @@ mod tests {
 
     #[test]
     fn the_budget_permits_exactly_its_count_then_stops() {
-        let mut w = TreeWalk::with_budget(2);
+        let mut w = TreeWalk::new(2, 4096);
         w.admit(1, 0).unwrap();
         w.admit(2, 0).unwrap();
         let err = w.admit(3, 0).unwrap_err();
@@ -225,7 +361,7 @@ mod tests {
     /// admit a first read rather than underflowing to `usize::MAX`.
     #[test]
     fn a_zero_budget_admits_nothing() {
-        let mut w = TreeWalk::with_budget(0);
+        let mut w = TreeWalk::new(0, 4096);
         assert!(w.admit(1, 0).is_err());
         assert!(w.admit(2, 0).is_err());
     }
@@ -234,7 +370,7 @@ mod tests {
     /// integrity error shape, naming the offending slot.
     #[test]
     fn the_verify_variant_names_the_slot() {
-        let mut w = TreeWalk::with_budget(4);
+        let mut w = TreeWalk::new(4, 4096);
         w.admit_for_verify(9, 0).unwrap();
         let err = w.admit_for_verify(9, 0).unwrap_err();
         match err {
@@ -252,7 +388,7 @@ mod tests {
     #[test]
     fn depth_is_bounded_by_what_the_budget_could_hold() {
         // 3 chunks is exactly a depth-1 tree (root + 2 leaves).
-        let mut w = TreeWalk::with_budget(3);
+        let mut w = TreeWalk::new(3, 4096);
         w.admit(1, 0).unwrap();
         w.admit(2, 1).unwrap();
         let err = w.admit(3, 2).unwrap_err();
@@ -266,12 +402,145 @@ mod tests {
     /// allowed down. Nothing but the budget decides this.
     #[test]
     fn a_bigger_budget_buys_the_depth_it_pays_for() {
-        let mut w = TreeWalk::with_budget(16);
+        let mut w = TreeWalk::new(16, 4096);
         for depth in 0..=2 {
             w.admit(depth as u64 + 100, depth).unwrap();
         }
         let err = w.admit(200, 3).unwrap_err();
         assert!(matches!(err, Error::Malformed(d) if d.contains("deeper than")));
+    }
+
+    /// A child pointer naming a slot the file does not have is a
+    /// structural failure, not a read to attempt. `ContainerFile` says
+    /// the same thing one line later; saying it here is what lets the
+    /// visited set be indexed by slot.
+    #[test]
+    fn a_pointer_past_the_end_of_the_file_is_refused() {
+        let mut w = TreeWalk::new(64, 64);
+        let err = w.admit(64, 0).unwrap_err();
+        assert!(matches!(err, Error::Malformed(d) if d.contains("outside the container")));
+        // The last slot the file DOES have is still admitted.
+        w.admit(63, 0).unwrap();
+
+        let mut v = TreeWalk::new(64, 64);
+        match v.admit_for_verify(u64::MAX, 0).unwrap_err() {
+            Error::IntegrityFailure { detail, slot } => {
+                assert_eq!(slot, u64::MAX);
+                assert!(detail.contains("outside the container"));
+            },
+            other => panic!("expected IntegrityFailure, got {other:?}"),
+        }
+    }
+
+    /// The visited set's footprint is a function of the CONTAINER, not
+    /// of the walk (audit HV13-M1). A `verify_integrity` or an
+    /// auto-`vacuum_orphans` over a healthy tree reads every chunk the
+    /// space owns, and at the format's ceiling a hashed `u64` each
+    /// measured 18.9 bytes live — 302 MiB, peaking at 453 through the
+    /// rehash — under `panic = "abort"`, on the open path.
+    #[test]
+    fn the_visited_set_is_sized_by_the_file_not_by_the_walk() {
+        let slots = crate::MAX_OPEN_SCAN_CHUNKS;
+        let promote_at = dense_threshold(slots) as u64;
+        let mut w = TreeWalk::new(slots as usize, slots);
+        for slot in 0..promote_at * 4 {
+            w.admit(slot, 0).unwrap();
+        }
+        let bytes = w.visited_heap_bytes();
+        assert_eq!(
+            bytes,
+            (slots / 8) as usize,
+            "one bit per slot of file and nothing else"
+        );
+        // Four times the chunks again, and not one byte more.
+        for slot in promote_at * 4..promote_at * 16 {
+            w.admit(slot, 0).unwrap();
+        }
+        assert_eq!(w.visited_heap_bytes(), bytes);
+
+        // Measured against the system allocator, `HashSet<u64>` held
+        // this many bytes per member once it had stopped rehashing.
+        const HASHED_BYTES_PER_MEMBER: usize = 18;
+        assert!(
+            bytes * 100 < HASHED_BYTES_PER_MEMBER * slots as usize,
+            "a full walk of a {slots}-slot container holds {bytes} bytes; \
+             hashed it would be {}",
+            HASHED_BYTES_PER_MEMBER * slots as usize
+        );
+    }
+
+    /// The other side of the same trade. `Space::get` builds a guard to
+    /// read one chunk per level of the tree and throws it away, so a set
+    /// that was dense from the first slot would charge every point read
+    /// on a 64 GiB container 2 MiB to record thirteen slots.
+    #[test]
+    fn a_point_read_does_not_allocate_the_container() {
+        let slots = crate::MAX_OPEN_SCAN_CHUNKS;
+        let mut w = TreeWalk::new(slots as usize, slots);
+        for depth in 0..=max_depth_for_budget(slots as usize) {
+            w.admit(u64::from(depth) + 1, depth).unwrap();
+        }
+        let bytes = w.visited_heap_bytes();
+        assert!(
+            bytes < 1024,
+            "a descent of {} chunks held {bytes} bytes; this container's \
+             bitmap is {}",
+            max_depth_for_budget(slots as usize) + 1,
+            slots / 8
+        );
+    }
+
+    /// The switch between the two representations is invisible to every
+    /// caller: a slot dropped on the way across is a chunk the walk
+    /// would then happily read a second time.
+    #[test]
+    fn the_switch_to_a_bitmap_keeps_every_slot_it_had() {
+        // Small enough that the floor is the binding threshold, so the
+        // switch lands inside a walk this test can enumerate.
+        let slots: u64 = 4096;
+        let promote_at = dense_threshold(slots) as u64;
+        assert_eq!(promote_at, MIN_HASHED_SLOTS as u64);
+
+        let mut w = TreeWalk::new(slots as usize, slots);
+        for slot in 0..promote_at + 8 {
+            w.admit(slot, 0).unwrap();
+        }
+        assert!(
+            matches!(w.visited, Visited::Dense(_)),
+            "{} admitted slots should have crossed the {promote_at}-slot threshold",
+            promote_at + 8
+        );
+        for slot in 0..promote_at + 8 {
+            assert!(w.has_visited(slot), "slot {slot} was lost in the switch");
+            let err = w.admit(slot, 0).unwrap_err();
+            assert!(
+                matches!(err, Error::Malformed(d) if d.contains("more than once")),
+                "slot {slot} was admitted twice"
+            );
+        }
+    }
+
+    /// The threshold tracks the file: one hashed member per 512 slots,
+    /// with a floor small containers sit under.
+    #[test]
+    fn the_threshold_follows_the_file_size() {
+        assert_eq!(dense_threshold(0), MIN_HASHED_SLOTS);
+        assert_eq!(
+            dense_threshold(512 * MIN_HASHED_SLOTS as u64),
+            MIN_HASHED_SLOTS
+        );
+        assert_eq!(dense_threshold(1 << 20), (1 << 20) / 512);
+        // At the switch the hashed set is a fraction of the bitmap it
+        // makes way for, so the peak of the switch is not a multiple of
+        // the steady state.
+        let slots = crate::MAX_OPEN_SCAN_CHUNKS;
+        let hashed_at_switch = dense_threshold(slots) * 28;
+        assert!(
+            hashed_at_switch < (slots / 8) as usize,
+            "the hashed set costs {hashed_at_switch} bytes at the switch, \
+             over the {} the bitmap costs",
+            slots / 8
+        );
     }
 
     /// The minimum-chunks sequence the doc comment claims, checked
