@@ -372,13 +372,21 @@ jobs:
       # DEBIAN_FRONTEND answers for it, and the retry covers a mirror that is
       # briefly unreachable. Silence is the trap here: an unbounded apt looks
       # exactly like a slow build.
+      # 25 minutes, not 10. The ceiling is a backstop, not the defence: the
+      # dpkg-lock hang this step exists to bound is caught by
+      # DPkg::Lock::Timeout in three minutes regardless. What the ceiling has
+      # to tolerate is an ordinary slow day on the mirror -- 45 MB of cross
+      # toolchain, and azure.archive.ubuntu.com has served 10 MB of it in five
+      # minutes. Ten minutes killed a healthy install mid-download.
       - if: matrix.cross
-        timeout-minutes: 10
+        timeout-minutes: 25
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
           set -euo pipefail
-          apt_get() { sudo apt-get -o DPkg::Lock::Timeout=180 "$@"; }
+          apt_get() {
+            sudo apt-get -o DPkg::Lock::Timeout=180 -o Acquire::Retries=3 "$@"
+          }
           installed=0
           for attempt in 1 2 3; do
             # libc6-dev-arm64-cross is named on purpose. It reaches
