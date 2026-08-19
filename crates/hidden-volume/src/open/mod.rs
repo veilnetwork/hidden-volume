@@ -551,6 +551,13 @@ fn push_commit_anchor(history: &mut Vec<u64>, seq: u64) {
 /// Bounded by the same threshold rather than by a count of workers: what
 /// matters is how big the joined list is, and a reduce tree gives no useful
 /// bound on how many halves have already been joined into either side.
+///
+/// Compiled only where it is called. The sequential scan has one accumulator
+/// and pushes into it; joining halves is a thing only the parallel reduce
+/// does, so outside `parallel-scan` this function has no caller and
+/// `-D warnings` — which this project sets workspace-wide in CI — turns that
+/// into a build error on every job that does not enable the feature.
+#[cfg(any(all(feature = "parallel-scan", unix), test))]
 fn merge_commit_anchors(history: &mut Vec<u64>, other: Vec<u64>) {
     history.extend(other);
     if history.len() >= COMMIT_HISTORY_DEDUP_AT {
