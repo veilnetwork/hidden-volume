@@ -12,14 +12,30 @@ git clone <fork>
 cd hidden-volume
 
 # Build, test, lint — это то, что запускает CI.
-cargo build --all-targets
-cargo test --tests
-cargo test --doc
-cargo test --features async --tests
-cargo clippy --all-targets -- -D warnings
+cargo build --workspace --all-targets
+cargo test --workspace --tests
+cargo test --workspace --doc
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 cargo doc --no-deps --lib
 ```
+
+Три детали в этих флагах несут нагрузку, и список был неверен достаточно
+долго, чтобы это стоило объяснить: **пуш в ветку здесь CI не запускает**, так
+что эти команды И ЕСТЬ гейт для всего, кроме тега.
+
+- `--workspace`, а не член по умолчанию. `hidden-volume-async`,
+  `hidden-volume-ffi` и `hidden-volume-rt` — отдельные крейты; без флага их
+  не собирают и не тестируют. Раньше здесь стояло
+  `cargo test --features async --tests` — такой фичи нет с тех пор, как
+  асинхронный код стал собственным крейтом, и команда падает с «none of the
+  selected packages contains this feature».
+- `--all-features` для clippy. У части вспомогательных функций единственный
+  производственный вызов стоит под фичей (`merge_commit_anchors` — под
+  `parallel-scan`), и без флага clippy объявляет их мёртвым кодом, а
+  `-D warnings` красит исправное дерево в красное.
+- `--all-targets`, чтобы собирался тестовый код. Изменение сигнатуры, которое
+  ломает только тесты, иначе не видно.
 
 Если что-либо из этого падает до того, как вы внесли изменения,
 пожалуйста, откройте issue — возможно, ваше окружение настроено
@@ -30,7 +46,8 @@ cargo doc --no-deps --lib
 - **Форматируйте через rustfmt** перед commit: `cargo fmt --all`.
   Файл `rustfmt.toml` проекта фиксирует те немногие оси, которые
   варьируются между контрибьюторами; остальное закрывают дефолты.
-- **Чистый clippy**: `cargo clippy --all-targets -- -D warnings`.
+- **Чистый clippy**:
+  `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
   CI отклоняет предупреждения.
 - **Избегайте эмодзи** в коде, комментариях, commit-message и описаниях PR.
 - **Следуйте существующим паттернам**: просмотрите похожий соседний

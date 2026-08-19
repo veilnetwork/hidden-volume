@@ -12,14 +12,30 @@ git clone <fork>
 cd hidden-volume
 
 # Build, test, lint — these are what CI runs.
-cargo build --all-targets
-cargo test --tests
-cargo test --doc
-cargo test --features async --tests
-cargo clippy --all-targets -- -D warnings
+cargo build --workspace --all-targets
+cargo test --workspace --tests
+cargo test --workspace --doc
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 cargo doc --no-deps --lib
 ```
+
+Three details in those flags are load-bearing, and this list got them wrong
+for long enough to matter — **branch pushes do not run CI here**, so these
+commands ARE the gate for everything short of a tag.
+
+- `--workspace`, not the default member. `hidden-volume-async`,
+  `hidden-volume-ffi` and `hidden-volume-rt` are separate crates; without it
+  they are never built or tested. This list used to say
+  `cargo test --features async --tests`, which has not existed since the async
+  code became a crate of its own — it fails with "none of the selected
+  packages contains this feature".
+- `--all-features` on clippy. Some helpers have their only production caller
+  behind a feature gate (`merge_commit_anchors` under
+  `parallel-scan`), so without the flag clippy reports them as dead code and
+  `-D warnings` turns a healthy tree red.
+- `--all-targets`, so test code is compiled. A signature change that only
+  breaks tests is invisible otherwise.
 
 If any of these fail before you've made changes, please open an issue —
 your environment may be set up incorrectly, or there may be a real
@@ -30,7 +46,8 @@ regression we'd like to know about.
 - **Format with rustfmt** before committing: `cargo fmt --all`. The
   project's `rustfmt.toml` locks the few axes that vary between
   contributors; defaults handle the rest.
-- **Lint clean under clippy**: `cargo clippy --all-targets -- -D warnings`.
+- **Lint clean under clippy**:
+  `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
   CI rejects warnings.
 - **Avoid emojis** in code, comments, commit messages, or PR descriptions.
 - **Match existing patterns**: scan a similar nearby file before adding
