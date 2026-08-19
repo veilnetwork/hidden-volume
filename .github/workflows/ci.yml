@@ -363,10 +363,36 @@ jobs:
           }
 
       # Cross-linker for aarch64-linux on x86_64 hosts.
+      #
+      # Bounded on purpose. Unqualified, this exact step -- same package, same
+      # runner image -- wedged a sibling repository's release for two and a
+      # half hours: the image runs unattended-upgrades, apt waits on the dpkg
+      # lock forever by default, and a package that wants to ask something has
+      # no terminal to ask on. DPkg::Lock::Timeout bounds the wait,
+      # DEBIAN_FRONTEND answers for it, and the retry covers a mirror that is
+      # briefly unreachable. Silence is the trap here: an unbounded apt looks
+      # exactly like a slow build.
       - if: matrix.cross
+        timeout-minutes: 10
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          set -euo pipefail
+          apt_get() { sudo apt-get -o DPkg::Lock::Timeout=180 "$@"; }
+          installed=0
+          for attempt in 1 2 3; do
+            if apt_get update && apt_get install -y --no-install-recommends \
+              gcc-aarch64-linux-gnu; then
+              installed=1
+              break
+            fi
+            echo "apt attempt $attempt failed; retrying" >&2
+            sleep $((attempt * 15))
+          done
+          if [ "$installed" -ne 1 ]; then
+            echo "::error::apt failed three times installing gcc-aarch64-linux-gnu"
+            exit 1
+          fi
           mkdir -p .cargo
           cat >> .cargo/config.toml <<EOF
           [target.aarch64-unknown-linux-gnu]
