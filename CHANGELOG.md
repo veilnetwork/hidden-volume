@@ -70,6 +70,14 @@ public, a documentation snapshot, and six manifest constraints.
   `gcc-aarch64-linux-gnu` now bound the lock wait, answer for the frontend,
   retry three times, and die after ten minutes.
 
+  The first attempt at that also added `--no-install-recommends`, which broke
+  the build in a different way: the target libc headers reach
+  `gcc-aarch64-linux-gnu` through Recommends rather than Depends, so the
+  compiler installed without them and `zstd-sys` stopped at
+  `bits/libc-header-start.h`. `libc6-dev-arm64-cross` is named explicitly now
+  — a Recommends is not a dependency contract, and a cross build should say
+  what it needs.
+
 ## [2.0.1] — 2026-08-19
 
 A patch: the on-disk format generation is untouched, `PARAMS_VERSION` stays at
