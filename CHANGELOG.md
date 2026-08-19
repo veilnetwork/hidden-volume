@@ -13,11 +13,61 @@ public Rust + FFI + Dart APIs. The format generation did not move with it
 and no migration tool was required; the 2.0.0 entry says why, and names the
 one direction of container compatibility the release does not keep.
 
+## [2.0.2] — 2026-08-19
+
+A patch over [2.0.1](#201--2026-08-19), cut the same day. No shipped binary
+behaves differently: what changed is one item that should never have been
+public, a documentation snapshot, and six manifest constraints.
+`PARAMS_VERSION` stays at 3 and existing containers are untouched.
+
+### Fixed
+
+- **A new `pub` widened a surface this project freezes.**
+  `Plaintext::encode_into` arrived with 2.0.1's checkpoint change and was
+  public for no reason — its only callers are the write path and the crate's
+  own `encode`, both inside the crate. So the API-surface gate was reporting
+  two faults at once: a snapshot nobody had regenerated, and a widening of the
+  public API inside a patch release whose own entry said nothing had moved. It
+  is `pub(crate)` now, and the regenerated snapshot differs from the committed
+  one by line numbers alone — nothing added, nothing removed. The doc link
+  from the public `encode` is a plain code span now, because an intra-doc link
+  into a private item is an error under `RUSTDOCFLAGS=-D warnings`.
+
+- **Five manifests still pinned their siblings at 2.0.0.** The 2.0.1 release
+  commit moved each crate's own version and left the `version =` beside every
+  in-repo `path =` untouched — six constraints across `hidden-volume-rt`,
+  `-async`, `-ffi` and the fuzz crate. Cargo resolves by path locally, so
+  nothing breaks until the number stops matching, which is a bill this
+  repository has already paid: the fuzz crate carried `^1.1.0` through three
+  releases and the v2.0.0 bump is what finally broke it, in CI, on the tag.
+  `scripts/check-intra-repo-versions.sh` was written then. No workflow calls
+  it — the local gate is its only caller.
+
+### Documentation
+
+- **The contributing guide printed six commands under the heading "these are
+  what CI runs", and CI runs twelve.** Branch pushes deliberately do not run
+  CI, so that block was the gate for every ordinary commit — and it was a
+  hand-copied subset that had drifted from `scripts/pre-tag-gate.sh`, the
+  script written to stop a hand-copied subset from drifting. The four gates it
+  never mentioned are the four that no compiler raises for you: the
+  API-surface snapshot, the docs version drift, the in-repo version
+  constraints, the UniFFI checksum table. Both guides point at the script now
+  and keep the short list as an explicitly labelled inner loop.
+
+  Both defects above were found by running that script. Twenty-three of
+  twenty-four jobs were green on the v2.0.1 tag; the one that failed was one
+  of those four, and the second defect is one no CI job looks at at all.
+
 ## [2.0.1] — 2026-08-19
 
-A patch: no public Rust, FFI or Dart surface moved, and the on-disk format
-generation is untouched. `PARAMS_VERSION` stays at 3 and a container written
-by 2.0.0 opens here with no conversion.
+A patch: the on-disk format generation is untouched, `PARAMS_VERSION` stays at
+3, and a container written by 2.0.0 opens here with no conversion.
+
+It was meant to leave the public surface alone and did not. The checkpoint
+change below added a `pub fn Plaintext::encode_into` that nothing outside the
+crate calls; [2.0.2](#202--2026-08-19) narrows it back and says how it got
+past the gate.
 
 ### Fixed — the Flutter plugin
 
