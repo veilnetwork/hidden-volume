@@ -84,7 +84,7 @@ impl Plaintext {
     /// out of it — and only the caller's third copy was ever wiped (report13
     /// HV13-L5). `payload` is borrowed for the same reason: the caller had to
     /// own one to build a `Plaintext`, and that copy was wiped by nothing.
-    pub fn encode_into(
+    pub(crate) fn encode_into(
         kind: ChunkKind,
         seq: u64,
         payload: &[u8],
@@ -110,7 +110,7 @@ impl Plaintext {
         Ok(())
     }
 
-    /// [`Self::encode_into`] into a fresh buffer, returned by value.
+    /// `encode_into` into a fresh buffer, returned by value.
     ///
     /// For tests and fuzz targets, which want the bytes rather than a place to
     /// put them. The write path takes `encode_into` so the frame never exists

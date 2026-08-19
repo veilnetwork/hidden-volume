@@ -11,7 +11,14 @@ development workflow, code style, and review expectations.
 git clone <fork>
 cd hidden-volume
 
-# Build, test, lint — these are what CI runs.
+# The whole gate, in one command. Branch pushes deliberately do not run CI
+# here, so this script is what stands between a commit and a red release tag.
+scripts/pre-tag-gate.sh
+```
+
+While you work, this is the fast subset worth keeping in the loop:
+
+```sh
 cargo build --workspace --all-targets
 cargo test --workspace --tests
 cargo test --workspace --doc
@@ -20,9 +27,17 @@ cargo fmt --all -- --check
 cargo doc --no-deps --lib
 ```
 
-Three details in those flags are load-bearing, and this list got them wrong
-for long enough to matter — **branch pushes do not run CI here**, so these
-commands ARE the gate for everything short of a tag.
+**The subset is not the gate.** It omits four checks that CI runs and that no
+compiler will ever raise for you: the public-API drift snapshot, the docs
+version drift check, the in-repo version constraints, and the UniFFI checksum
+table. This section used to print the subset under the heading "these are what
+CI runs", which is the exact drift `scripts/pre-tag-gate.sh` was written to
+end — and it cost v2.0.1 a second red tag on `api-surface drift check`, with
+the other twenty-three jobs green. Run the script before you push anything you
+mean to tag.
+
+Four details in those flags are load-bearing, and this list got them wrong for
+long enough to matter.
 
 - `--workspace`, not the default member. `hidden-volume-async`,
   `hidden-volume-ffi` and `hidden-volume-rt` are separate crates; without it
