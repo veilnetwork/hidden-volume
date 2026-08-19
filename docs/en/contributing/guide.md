@@ -30,10 +30,16 @@ commands ARE the gate for everything short of a tag.
   `cargo test --features async --tests`, which has not existed since the async
   code became a crate of its own — it fails with "none of the selected
   packages contains this feature".
-- `--all-features` on clippy. Some helpers have their only production caller
-  behind a feature gate (`merge_commit_anchors` under
-  `parallel-scan`), so without the flag clippy reports them as dead code and
-  `-D warnings` turns a healthy tree red.
+- `--all-features` on clippy, because code behind a feature is only linted
+  when that feature is on — CI's clippy job runs it, and a lint nobody runs is
+  a lint nobody obeys.
+- **And the default-feature build has to be clean too.** CI sets
+  `RUSTFLAGS: -D warnings` for every job, so a warning in a build WITHOUT a
+  feature is an error in a dozen of them. That is how v2.0.1 first failed: a
+  helper whose only caller moved behind `parallel-scan` became dead code
+  everywhere else, and `--all-features` hid it from the one command that would
+  have said so. Run `cargo build --workspace --all-targets` plainly as well as
+  clippy with everything on; they are different questions.
 - `--all-targets`, so test code is compiled. A signature change that only
   breaks tests is invisible otherwise.
 
