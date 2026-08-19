@@ -59,6 +59,17 @@ public, a documentation snapshot, and six manifest constraints.
   twenty-four jobs were green on the v2.0.1 tag; the one that failed was one
   of those four, and the second defect is one no CI job looks at at all.
 
+### Continuous integration
+
+- **The aarch64 cross-linker step had no ceiling of any kind.** `apt-get`
+  waits on the dpkg lock forever by default, the runner image runs
+  unattended-upgrades, and a package that wants to ask something has no
+  terminal to ask on — so the step can sit silently for hours and look exactly
+  like a slow build. It cost a sibling repository two and a half hours of one
+  release before anyone looked. Both workflows that install
+  `gcc-aarch64-linux-gnu` now bound the lock wait, answer for the frontend,
+  retry three times, and die after ten minutes.
+
 ## [2.0.1] — 2026-08-19
 
 A patch: the on-disk format generation is untouched, `PARAMS_VERSION` stays at
