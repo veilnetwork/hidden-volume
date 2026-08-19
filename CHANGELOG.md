@@ -75,12 +75,26 @@ by 2.0.0 opens here with no conversion.
   existing container's padding boundary by one chunk and buy an adversary
   nothing.
 - **The contributing guide's command list is the only gate this project has
-  on an ordinary commit** — branch pushes deliberately do not run CI — and two
-  of its commands were wrong. `cargo test --features async --tests` cannot run
-  at all, since the async code became a crate of its own and no such feature
-  exists. `cargo clippy --all-targets -- -D warnings` fails on a healthy tree,
-  because a helper whose only production caller sits behind `parallel-scan`
-  reads as dead code without `--all-features`. Both now say what CI says.
+  on an ordinary commit** — branch pushes deliberately do not run CI — and one
+  of its commands could not run at all: `cargo test --features async --tests`,
+  from before the async code became a crate of its own. It now says what CI
+  says, and says why each flag is there.
+
+### Fixed — what only tag-time CI could see
+
+- **A helper outlived its caller and broke every build without
+  `parallel-scan`.** The checkpoint change above left `merge_commit_anchors`
+  called from the parallel reduce and from nowhere else; the sequential scan
+  has one accumulator and never joins halves. CI sets `RUSTFLAGS: -D warnings`
+  for every job, so dead code is a build error, and eighteen jobs failed on it
+  — MSRV, every platform's test leg, every release build, the fuzz smoke, the
+  API-surface check. It is compiled with its callers now.
+
+  Worth being exact about how it was nearly missed: `cargo clippy --workspace
+  --all-targets --all-features` is green on it, because the feature that gives
+  the function a caller is on. Reading that green as "the tree is fine and the
+  guide is stale" was wrong — the two commands were asking different
+  questions, and the one that failed was the one telling the truth.
 
 ### Fixed — two tests that only tag-time CI could see
 
