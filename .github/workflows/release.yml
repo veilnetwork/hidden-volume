@@ -113,8 +113,14 @@ jobs:
           apt_get() { sudo apt-get -o DPkg::Lock::Timeout=180 "$@"; }
           installed=0
           for attempt in 1 2 3; do
-            if apt_get update && apt_get install -y --no-install-recommends \
-              gcc-aarch64-linux-gnu; then
+            # libc6-dev-arm64-cross is named on purpose. It reaches
+            # gcc-aarch64-linux-gnu through Recommends, not Depends, so
+            # --no-install-recommends installed the compiler without the
+            # target libc headers and zstd-sys died on
+            # bits/libc-header-start.h. Recommends are not a dependency
+            # contract; say what the build needs.
+            if apt_get update && apt_get install -y \
+              gcc-aarch64-linux-gnu libc6-dev-arm64-cross; then
               installed=1
               break
             fi
