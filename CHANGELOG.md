@@ -78,6 +78,14 @@ public, a documentation snapshot, and six manifest constraints.
   — a Recommends is not a dependency contract, and a cross build should say
   what it needs.
 
+  The ceiling itself then had to move from ten minutes to twenty-five. It is a
+  backstop, not the defence: the lock hang is caught by `DPkg::Lock::Timeout`
+  in three minutes whatever the ceiling says, and what the ceiling has to
+  tolerate is an ordinary slow day on the mirror. Forty-five megabytes of
+  cross toolchain, ten of them served in five minutes, is enough to kill a
+  perfectly healthy install at ten. `Acquire::Retries=3` lets a dropped
+  connection retry inside apt rather than cost a whole outer attempt.
+
 ## [2.0.1] — 2026-08-19
 
 A patch: the on-disk format generation is untouched, `PARAMS_VERSION` stays at
