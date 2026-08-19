@@ -13,7 +13,74 @@ public Rust + FFI + Dart APIs. The format generation did not move with it
 and no migration tool was required; the 2.0.0 entry says why, and names the
 one direction of container compatibility the release does not keep.
 
-## [Unreleased]
+## [2.0.1] — 2026-08-19
+
+A patch: no public Rust, FFI or Dart surface moved, and the on-disk format
+generation is untouched. `PARAMS_VERSION` stays at 3 and a container written
+by 2.0.0 opens here with no conversion.
+
+### Fixed — the Flutter plugin
+
+- **A close the worker refused was reported as a clean teardown.** The worker
+  answers a failed native close with an error reply and the host treated any
+  non-null answer as success — and the worker then kills itself, so the Rust
+  handle is never dropped and no finalizer will ever drop it. That is exactly
+  the "correct password but the container will not unlock" trap the method's
+  own documentation warns about. The control test could not catch it: its stub
+  replied a bare `true`, which is not what the worker sends. The reply is
+  matched exhaustively now, an unrecognised shape fails closed, and the stub
+  sends what the worker actually sends.
+
+  Separately, the bounded operation map evicted entries that were still
+  running, so a live operation read as `Unknown` and a late result could evict
+  the next one. In-flight and finished are two maps now: the first is
+  admission-bounded and refuses a new operation rather than forgetting a
+  running one.
+
+- **Two numeric boundaries that only failed after the container was open.** A
+  negative Dart int reached `writeU64`, which unlike `writeU8` masks nothing:
+  it arrives on the Rust side as its two's complement, so `-1` becomes
+  18446744073709551615 and lands in the middle of the id and timestamp
+  domains, taking ordering, range bounds and delete with it. The checked
+  lowering existed and was applied to one parameter out of seven. Every id
+  boundary goes through it now, the optional form requires a parameter name so
+  a range bound cannot be lowered anonymously, and the async surface checks
+  before the message crosses — the worker used to turn an `ArgumentError` into
+  a generic internal exception, which is the wrong type at the wrong end.
+
+### Performance
+
+- **A checkpoint chain decodes straight into the bitmaps.** The reader built
+  the owned and pool sets as vectors of slot numbers and the caller poured
+  them into bitmaps one line later, so the eight-bytes-per-slot form existed
+  only to be read once — and the pool half was then held for the life of the
+  handle. Measured with the crate's own harness: **13.55 bytes per file slot,
+  216.8 MiB at the sixteen-million-slot cap → 0.47 bytes per slot, 7.5 MiB.**
+
+  Worth recording how nearly this passed unnoticed: the positive control was
+  an upper bound, and an upper bound goes on passing when what it bounds
+  shrinks under it. It was recalibrated to measure the vector shape it exists
+  to catch, with the budget set at four times the new measurement.
+
+- **The visited set is sized by the file, not by the walk.**
+
+### Documentation
+
+- The frozen format is described as frozen. Two lines still called it
+  pre-freeze and said breaking it was acceptable before v1.0, which the
+  changelog contradicts — it froze at v1.0.0 in May. The padding contract had
+  the same shape of mismatch: the prose promised a multiple counting the
+  header while the implementation and its tests have always used the grid.
+  The grid is the contract worth keeping; moving the code would shift every
+  existing container's padding boundary by one chunk and buy an adversary
+  nothing.
+- **The contributing guide's command list is the only gate this project has
+  on an ordinary commit** — branch pushes deliberately do not run CI — and two
+  of its commands were wrong. `cargo test --features async --tests` cannot run
+  at all, since the async code became a crate of its own and no such feature
+  exists. `cargo clippy --all-targets -- -D warnings` fails on a healthy tree,
+  because a helper whose only production caller sits behind `parallel-scan`
+  reads as dead code without `--all-features`. Both now say what CI says.
 
 ### Fixed — two tests that only tag-time CI could see
 
