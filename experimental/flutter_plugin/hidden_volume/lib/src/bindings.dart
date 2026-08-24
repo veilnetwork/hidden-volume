@@ -1557,16 +1557,21 @@ class SpaceHandleBindings {
     int initialGarbageChunks = 0,
     int superblockReplicas = 3,
   }) {
+    // EVERY scalar validated into a local FIRST. uniffi 0.31 methods consume
+    // the handle they are given, so each call clones one, and the buffers are
+    // Rust-owned from the moment they are built. A validator that throws from
+    // inside the call expression throws AFTER both — and nothing frees them:
+    // `rustCall` releases only its status. The leaked clone is an `Arc` on the
+    // container, so its `flock` is held until the process ends, `close` frees
+    // nothing, and the next `open` answers Busy. Proven in
+    // `handle_leak_on_refused_call_test`.
+    final garbage = requireU64(initialGarbageChunks, 'initialGarbageChunks');
+    final replicas = _u8(superblockReplicas, 'superblockReplicas');
     final pathBuf = _bufferFromBytes(utf8.encode(path));
     final pwdBuf = _bufferFromByteVec(password);
     final argonBuf = argon._toRustBuffer();
-    final h = rustCall<int>((s) => _spCreate(
-        pathBuf,
-        pwdBuf,
-        argonBuf,
-        requireU64(initialGarbageChunks, 'initialGarbageChunks'),
-        _u8(superblockReplicas, 'superblockReplicas'),
-        s));
+    final h = rustCall<int>(
+        (s) => _spCreate(pathBuf, pwdBuf, argonBuf, garbage, replicas, s));
     return SpaceHandleBindings._(h);
   }
 
@@ -1631,10 +1636,10 @@ class SpaceHandleBindings {
   /// Read a value, or null if absent. Throws on AuthFailed / Io / etc.
   Uint8List? get(int namespace, Uint8List key) {
     _ensureOpen();
+    final ns = _ns(namespace);
     final keyBuf = _bufferFromByteVec(key);
     final h = _cloneHandle();
-    final out =
-        rustCall<RustBuffer>((s) => _spGet(h, _ns(namespace), keyBuf, s));
+    final out = rustCall<RustBuffer>((s) => _spGet(h, ns, keyBuf, s));
     final bytes = _bufferToBytes(out);
     if (bytes.isEmpty) {
       // uniffi encodes Option<Vec<u8>> as: u8 tag + (Some) bytes.
@@ -1660,11 +1665,13 @@ class SpaceHandleBindings {
     required int limit,
   }) {
     _ensureOpen();
+    final ns = _ns(namespace);
+    final lim = _u32(limit, 'limit');
     final startBuf = _optU64(start, 'start');
     final endBuf = _optU64(end, 'end');
     final h = _cloneHandle();
-    final out = rustCall<RustBuffer>((s) => _spIterLogRange(
-        h, _ns(namespace), startBuf, endBuf, _u32(limit, 'limit'), s));
+    final out = rustCall<RustBuffer>(
+        (s) => _spIterLogRange(h, ns, startBuf, endBuf, lim, s));
     return _readLogEntries(_bufferToBytes(out));
   }
 
@@ -1687,8 +1694,9 @@ class SpaceHandleBindings {
   /// Number of KV entries in [namespace]. O(N) — walks the index.
   int count(int namespace) {
     _ensureOpen();
+    final ns = _ns(namespace);
     final h = _cloneHandle();
-    return rustCall<int>((s) => _spCount(h, _ns(namespace), s));
+    return rustCall<int>((s) => _spCount(h, ns, s));
   }
 
   /// Keys of every KV entry in [namespace], sorted ascending. Host apps use
@@ -1703,8 +1711,9 @@ class SpaceHandleBindings {
   /// [kvKeysPage].
   List<Uint8List> kvKeys(int namespace) {
     _ensureOpen();
+    final ns = _ns(namespace);
     final h = _cloneHandle();
-    final out = rustCall<RustBuffer>((s) => _spKvKeys(h, _ns(namespace), s));
+    final out = rustCall<RustBuffer>((s) => _spKvKeys(h, ns, s));
     return _decodeFramedKeys(_Reader(_bufferToBytes(out)).readByteVec());
   }
 
@@ -1714,9 +1723,12 @@ class SpaceHandleBindings {
   /// [limit] is the end.
   List<Uint8List> kvKeysPage(int namespace, Uint8List? after, int limit) {
     _ensureOpen();
+    final ns = _ns(namespace);
+    final lim = _u32(limit, 'limit');
+    final afterBuf = _optByteVec(after);
     final h = _cloneHandle();
-    final out = rustCall<RustBuffer>((s) => _spKvKeysPage(
-        h, _ns(namespace), _optByteVec(after), _u32(limit, 'limit'), s));
+    final out =
+        rustCall<RustBuffer>((s) => _spKvKeysPage(h, ns, afterBuf, lim, s));
     return _decodeFramedKeys(_Reader(_bufferToBytes(out)).readByteVec());
   }
 
@@ -1724,16 +1736,18 @@ class SpaceHandleBindings {
   /// the new commit_seq.
   int eraseNamespace(int namespace) {
     _ensureOpen();
+    final ns = _ns(namespace);
     final h = _cloneHandle();
-    return rustCall<int>((s) => _spEraseNs(h, _ns(namespace), s));
+    return rustCall<int>((s) => _spEraseNs(h, ns, s));
   }
 
   /// Read one log entry by `(namespace, logId)`. Returns null if absent.
   Uint8List? readLog(int namespace, int logId) {
     _ensureOpen();
+    final ns = _ns(namespace);
+    final id = requireU64(logId, 'logId');
     final h = _cloneHandle();
-    final out = rustCall<RustBuffer>(
-        (s) => _spReadLog(h, _ns(namespace), requireU64(logId, 'logId'), s));
+    final out = rustCall<RustBuffer>((s) => _spReadLog(h, ns, id, s));
     return _readOptByteVec(_bufferToBytes(out));
   }
 
@@ -2011,8 +2025,9 @@ class MultiSpaceHandleBindings {
   /// later obtains the password and an old snapshot of the file.
   void vacuumSpace(int spaceId) {
     _ensureOpen();
+    final sid = _sid(spaceId);
     final h = _clone();
-    rustCall<void>((s) => _msVacuumSpace(h, _sid(spaceId), s));
+    rustCall<void>((s) => _msVacuumSpace(h, sid, s));
   }
 
   /// Number of hosted spaces.
@@ -2035,35 +2050,40 @@ class MultiSpaceHandleBindings {
   /// Export hosted space [id]'s 64-byte SpaceKeys (sensitive — never log).
   Uint8List spaceKeys(int id) {
     _ensureOpen();
+    final sid = _sid(id);
     final h = _clone();
-    final out = rustCall<RustBuffer>((s) => _msSpaceKeys(h, _sid(id), s));
+    final out = rustCall<RustBuffer>((s) => _msSpaceKeys(h, sid, s));
     return _secretByteVecFrom(out);
   }
 
   /// Apply a write batch to space [id]; returns its new commit_seq.
   int commit(int id, List<HvWriteOp> ops) {
     _ensureOpen();
+    final sid = _sid(id);
     final buf = _writeOpsToBuffer(ops);
     final h = _clone();
-    return rustCall<int>((s) => _msCommit(h, _sid(id), buf, s));
+    return rustCall<int>((s) => _msCommit(h, sid, buf, s));
   }
 
   /// Read a KV value from space [id], or null if absent.
   Uint8List? get(int id, int namespace, Uint8List key) {
     _ensureOpen();
+    final sid = _sid(id);
+    final ns = _ns(namespace);
     final keyBuf = _bufferFromByteVec(key);
     final h = _clone();
-    final out = rustCall<RustBuffer>(
-        (s) => _msGet(h, _sid(id), _ns(namespace), keyBuf, s));
+    final out = rustCall<RustBuffer>((s) => _msGet(h, sid, ns, keyBuf, s));
     return _decodeOptionBytes(out);
   }
 
   /// Read one log entry from space [id], or null if not found.
   Uint8List? readLog(int id, int namespace, int logId) {
     _ensureOpen();
+    final sid = _sid(id);
+    final ns = _ns(namespace);
+    final lid = requireU64(logId, 'logId');
     final h = _clone();
-    final out = rustCall<RustBuffer>((s) => _msReadLog(
-        h, _sid(id), _ns(namespace), requireU64(logId, 'logId'), s));
+    final out = rustCall<RustBuffer>((s) => _msReadLog(h, sid, ns, lid, s));
     return _decodeOptionBytes(out);
   }
 
@@ -2076,28 +2096,34 @@ class MultiSpaceHandleBindings {
     required int limit,
   }) {
     _ensureOpen();
+    final sid = _sid(id);
+    final ns = _ns(namespace);
+    final lim = _u32(limit, 'limit');
     final startBuf = _optU64(start, 'start');
     final endBuf = _optU64(end, 'end');
     final h = _clone();
-    final out = rustCall<RustBuffer>((s) => _msIterLogRange(h, _sid(id),
-        _ns(namespace), startBuf, endBuf, _u32(limit, 'limit'), s));
+    final out = rustCall<RustBuffer>(
+        (s) => _msIterLogRange(h, sid, ns, startBuf, endBuf, lim, s));
     return _readLogEntries(_bufferToBytes(out));
   }
 
   /// Number of KV entries in [namespace] of space [id].
   int count(int id, int namespace) {
     _ensureOpen();
+    final sid = _sid(id);
+    final ns = _ns(namespace);
     final h = _clone();
-    return rustCall<int>((s) => _msCount(h, _sid(id), _ns(namespace), s));
+    return rustCall<int>((s) => _msCount(h, sid, ns, s));
   }
 
   /// Keys of every KV entry in [namespace] of space [id] — the multi-space
   /// twin of [SpaceHandleBindings.kvKeys].
   List<Uint8List> kvKeys(int id, int namespace) {
     _ensureOpen();
+    final sid = _sid(id);
+    final ns = _ns(namespace);
     final h = _clone();
-    final out =
-        rustCall<RustBuffer>((s) => _msKvKeys(h, _sid(id), _ns(namespace), s));
+    final out = rustCall<RustBuffer>((s) => _msKvKeys(h, sid, ns, s));
     return _decodeFramedKeys(_Reader(_bufferToBytes(out)).readByteVec());
   }
 
@@ -2106,25 +2132,30 @@ class MultiSpaceHandleBindings {
   List<Uint8List> kvKeysPage(
       int id, int namespace, Uint8List? after, int limit) {
     _ensureOpen();
+    final sid = _sid(id);
+    final ns = _ns(namespace);
+    final lim = _u32(limit, 'limit');
     final afterBuf = _optByteVec(after);
     final h = _clone();
-    final out = rustCall<RustBuffer>((s) => _msKvKeysPage(
-        h, _sid(id), _ns(namespace), afterBuf, _u32(limit, 'limit'), s));
+    final out = rustCall<RustBuffer>(
+        (s) => _msKvKeysPage(h, sid, ns, afterBuf, lim, s));
     return _decodeFramedKeys(_Reader(_bufferToBytes(out)).readByteVec());
   }
 
   /// Current commit sequence of space [id].
   int commitSeq(int id) {
     _ensureOpen();
+    final sid = _sid(id);
     final h = _clone();
-    return rustCall<int>((s) => _msCommitSeq(h, _sid(id), s));
+    return rustCall<int>((s) => _msCommitSeq(h, sid, s));
   }
 
   /// Reclaim DataBatch slots orphaned by edit/delete in space [id].
   int vacuumDataBatches(int id) {
     _ensureOpen();
+    final sid = _sid(id);
     final h = _clone();
-    return rustCall<int>((s) => _msVacuum(h, _sid(id), s));
+    return rustCall<int>((s) => _msVacuum(h, sid, s));
   }
 
   /// Release the container lock and free the handle.
