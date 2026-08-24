@@ -114,6 +114,48 @@ void main() {
     );
   });
 
+  test('a worker nobody holds any more is asked to close and then taken down',
+      () async {
+    // A Dart Future cannot be cancelled, so a caller that walks away from
+    // `open` — a `.timeout(...)`, a widget disposed mid-flight — does not stop
+    // the spawn. It completes, the handle is built, and nobody ever receives
+    // it. The worker's own `ReceivePort.listen` keeps its isolate rooted, and
+    // with it the container's handle and its flock: for the life of the
+    // PROCESS, with every later open answering `Busy`.
+    //
+    // The finalizer that now covers that case fires when the VM decides to,
+    // which a test cannot arrange — so what is pinned here is what it does.
+    final events = ReceivePort();
+    final seen = <String>[];
+    events.listen((dynamic m) => seen.add('$m'));
+    addTearDown(events.close);
+
+    final live = await _spawnStubWorker(events.sendPort, answerClose: true);
+
+    HvAsyncSpace.debugReapAbandonedWorker(
+      isolate: live.isolate,
+      toWorker: live.port,
+      watch: live.watch,
+    );
+
+    await _pumpUntil(
+      () => seen.contains('close-requested'),
+      'the abandoned worker being asked to close',
+    );
+
+    // And it is a close, not a kill: killing alone releases nothing, because
+    // the container handle and its lock belong to the native side and only a
+    // close hands them back.
+    seen.clear();
+    live.port.send(_Ping(events.sendPort));
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    expect(
+      seen,
+      isNot(contains('call')),
+      reason: 'the isolate must be gone once its close has landed',
+    );
+  });
+
   test('CONTROL: a worker that DOES answer its close is shut down cleanly, '
       'without throwing', () async {
     // If close threw on the happy path too, the report above would be noise
