@@ -1526,7 +1526,8 @@ impl<'f> Space<'f> {
         let cp = CommitPayload::decode(&pt.payload)?;
         // Cache the verified, AEAD-decrypted payload bytes (Zeroizing) keyed by
         // the current seq for subsequent lookups in the same commit era.
-        self.state.roots_payload_cache = Some((seq, Redacted::new(std::mem::take(&mut pt.payload))));
+        self.state.roots_payload_cache =
+            Some((seq, Redacted::new(std::mem::take(&mut pt.payload))));
         Ok(cp.roots)
     }
 

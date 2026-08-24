@@ -99,7 +99,6 @@ pub struct AsyncContainer {
     ops: Arc<OpLedger>,
 }
 
-
 /// Which operation permits this THREAD is currently holding, innermost last.
 ///
 /// A `run` closure executes on a blocking thread, and a nested `run` driven

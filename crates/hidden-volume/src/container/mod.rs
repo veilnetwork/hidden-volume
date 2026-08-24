@@ -2132,11 +2132,8 @@ mod hv06_tests {
         let before = std::fs::read(&path).unwrap();
 
         let token = crate::cancel::CancelToken::new();
-        let err = atomic_rewrite_under_source_lock(
-            &path,
-            "hv-compact",
-            Some(&token),
-            |_src, tmp, _c| {
+        let err =
+            atomic_rewrite_under_source_lock(&path, "hv-compact", Some(&token), |_src, tmp, _c| {
                 // The writer finishes: a complete, valid replacement is on
                 // disk and would pass every substitution check below.
                 let mut out = Container::create_with_options(tmp, options())?;
@@ -2146,9 +2143,8 @@ mod hv06_tests {
                 // writer's last poll and the rename.
                 token.cancel();
                 Ok(())
-            },
-        )
-        .expect_err("a cancelled rewrite must not publish");
+            })
+            .expect_err("a cancelled rewrite must not publish");
         assert!(matches!(err, Error::Cancelled), "got {err:?}");
         assert_eq!(
             std::fs::read(&path).unwrap(),
