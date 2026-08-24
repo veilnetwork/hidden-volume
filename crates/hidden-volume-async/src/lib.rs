@@ -77,6 +77,22 @@ pub use hidden_volume_rt::{AbandonedOp, OpId, OpOutcome};
 /// Dropping the future of any method here — `timeout`, `select!`, an
 /// aborted task — does not necessarily stop the work. See
 /// [`Self::abandoned_operations`] for what is knowable and how to ask.
+///
+/// That pointer does NOT reach the constructors. `create`, `create_with_options`
+/// and `open` have no instance to report to — the ledger lives on the handle
+/// the abandoned call never returned — so for them the answer is the file
+/// system, not this API (report12 HV-L11).
+///
+/// What holds for an abandoned constructor:
+///
+/// - Before the pool gives the closure a thread, it is short-circuited and
+///   nothing happens. After that it runs to completion, and a `create` leaves
+///   a container behind. Which side a given abandonment lands on is a race the
+///   caller does not control — check the path rather than reasoning about it.
+/// - The path is never left LOCKED either way: the `Container` the closure
+///   produced is dropped with the task's result, and its `flock` goes with it.
+///   A retry on the same path meets a usable file, not `Busy`. Pinned by
+///   `tests/abandoned_constructor.rs`.
 #[derive(Clone)]
 pub struct AsyncContainer {
     inner: Arc<Mutex<Container>>,
