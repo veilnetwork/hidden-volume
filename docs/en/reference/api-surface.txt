@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-19T09:23:59Z
+# Captured: 2026-08-24T20:02:01Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -32,419 +32,690 @@
 crate: hidden-volume
 ==========================================
 
-cancel.rs:  58:pub struct CancelToken(Arc<AtomicBool>);
-cancel.rs:  63:    pub fn new() -> Self {
-cancel.rs:  70:    pub fn cancel(&self) {
-cancel.rs:  79:    pub fn is_cancelled(&self) -> bool {
-cancel.rs:  85:    pub fn check(&self) -> Result<()> {
-chunk/format.rs:  24:pub const MAGIC: [u8; 4] = *b"HVC1";
-chunk/format.rs:  27:pub const PLAINTEXT_HEADER_LEN: usize = 4 + 1 + 1 + 8 + 2;
-chunk/format.rs:  30:pub const PAYLOAD_CAP: usize = PLAINTEXT_LEN - PLAINTEXT_HEADER_LEN;
-chunk/format.rs:  47:pub struct Plaintext {
-chunk/format.rs:  118:    pub fn encode(&self) -> Result<[u8; PLAINTEXT_LEN]> {
-chunk/format.rs:  133:    pub fn decode(buf: &[u8]) -> Result<Self> {
-chunk/kind.rs:  19:pub enum ChunkKind {
-chunk/kind.rs:  51:    pub fn from_u8(b: u8) -> Result<Self> {
-chunk/mod.rs:  3:pub mod format;
-chunk/mod.rs:  4:pub mod kind;
-chunk/mod.rs:  11:pub use format::Plaintext;
-chunk/mod.rs:  12:pub use kind::ChunkKind;
-container/file.rs:  159:pub const DEFAULT_SUPERBLOCK_REPLICAS: u8 = 3;
-container/file.rs:  164:pub enum LockMode {
-container/file.rs:  197:    pub fn allows_writes(self) -> bool {
-container/file.rs:  207:pub struct ContainerFile {
-container/file.rs:  347:    pub fn create<P: AsRef<Path>>(path: P, params: Argon2Params) -> Result<Self> {
-container/file.rs:  422:    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-container/file.rs:  453:    pub fn open_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
-container/file.rs:  483:    pub fn open_exclusive_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
-container/file.rs:  535:    pub fn append_garbage_chunks(&mut self, n: u64) -> Result<()> {
-container/file.rs:  579:    pub fn slot_count(&self) -> u64 {
-container/file.rs:  590:    pub fn read_slot(&mut self, i: u64) -> Result<[u8; CHUNK_SIZE]> {
-container/file.rs:  612:    pub fn read_slot_concurrent(&self, i: u64) -> Result<[u8; CHUNK_SIZE]> {
-container/file.rs:  660:    pub fn raw_file(&self) -> &File {
-container/file.rs:  670:    pub fn append_slot(&mut self, chunk: &[u8; CHUNK_SIZE]) -> Result<u64> {
-container/file.rs:  700:    pub fn rewrite_slot(&mut self, slot: u64, chunk: &[u8; CHUNK_SIZE]) -> Result<()> {
-container/file.rs:  722:    pub fn scrub_slot(&mut self, slot: u64) -> Result<()> {
-container/file.rs:  729:    pub fn fsync(&mut self) -> Result<()> {
-container/header.rs:  31:pub struct Header {
-container/header.rs:  45:    pub fn new_random(params: Argon2Params) -> Result<Self> {
-container/header.rs:  55:    pub fn decode(bytes: &[u8]) -> Result<Self> {
-container/header.rs:  77:    pub fn encode_first_chunk(&self) -> Result<[u8; CHUNK_SIZE]> {
-container/mod.rs:  4:pub mod file;
-container/mod.rs:  5:pub mod header;
-container/mod.rs:  9:pub use file::{ContainerFile, DEFAULT_SUPERBLOCK_REPLICAS};
-container/mod.rs:  10:pub use header::Header;
-container/mod.rs:  40:pub struct ContainerOptions {
-container/mod.rs:  104:pub struct RepackOptions {
-container/mod.rs:  154:pub struct Container {
-container/mod.rs:  163:    pub fn create<P: AsRef<Path>>(path: P, params: Argon2Params) -> Result<Self> {
-container/mod.rs:  183:    pub fn create_with_options<P: AsRef<Path>>(path: P, options: ContainerOptions) -> Result<Self> {
-container/mod.rs:  274:    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-container/mod.rs:  302:    pub fn open_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
-container/mod.rs:  342:    pub fn open_exclusive_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
-container/mod.rs:  357:    pub fn is_readonly(&self) -> bool {
-container/mod.rs:  364:    pub fn set_padding_policy(&mut self, policy: PaddingPolicy) -> Result<()> {
-container/mod.rs:  374:    pub fn padding_policy(&self) -> PaddingPolicy {
-container/mod.rs:  381:    pub fn set_superblock_replicas(&mut self, replicas: u8) -> Result<()> {
-container/mod.rs:  391:    pub fn superblock_replicas(&self) -> u8 {
-container/mod.rs:  399:    pub fn header(&self) -> &Header {
-container/mod.rs:  405:    pub fn params(&self) -> Argon2Params {
-container/mod.rs:  440:    pub fn create_space(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  469:    pub fn open_space(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  524:    pub fn open_space_verified(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  533:    pub fn open_space_with_keys_verified(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
-container/mod.rs:  577:    pub fn derive_space_keys(&self, password: &[u8]) -> Result<SpaceKeys> {
-container/mod.rs:  593:    pub fn open_space_with_keys(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
-container/mod.rs:  606:    pub fn open_space_cancellable(
-container/mod.rs:  620:    pub fn open_space_with_keys_cancellable(
-container/mod.rs:  694:    pub fn open_space_parallel(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  702:    pub fn open_space_with_keys_parallel(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
-container/mod.rs:  732:    pub fn open_space_mmap(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  740:    pub fn open_space_with_keys_mmap(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
-container/mod.rs:  821:    pub fn open_space_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  834:    pub fn open_space_with_keys_constant_time(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
-container/mod.rs:  854:    pub fn open_space_parallel_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  864:    pub fn open_space_with_keys_parallel_constant_time(
-container/mod.rs:  884:    pub fn open_space_mmap_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:  894:    pub fn open_space_with_keys_mmap_constant_time(
-container/mod.rs:  978:    pub fn repack(
-container/mod.rs:  1000:    pub fn repack_cancellable(
-container/mod.rs:  1287:    pub fn compact_known(
-container/mod.rs:  1298:    pub fn compact_known_cancellable(
-container/mod.rs:  1359:    pub fn change_passwords(
-container/mod.rs:  1370:    pub fn change_passwords_cancellable(
-crypto/aead.rs:  21:pub struct ChunkAead {
-crypto/aead.rs:  36:    pub fn new(key: &[u8; 32]) -> Self {
-crypto/aead.rs:  46:    pub fn seal(&self, plaintext: &[u8], aad: [u8; AAD_LEN]) -> Result<([u8; NONCE_LEN], Vec<u8>)> {
-crypto/aead.rs:  78:    pub fn open(
-crypto/aead.rs:  210:pub fn make_aad(container_id: &[u8; 32], slot: u64) -> [u8; AAD_LEN] {
-crypto/derive.rs:  48:pub struct SpaceKeys {
-crypto/derive.rs:  72:    pub fn from_master(versioned_master: &Zeroizing<[u8; 32]>) -> Self {
-crypto/derive.rs:  146:pub fn derive_chunk_key(
-crypto/kdf.rs:  41:pub struct Argon2Params {
-crypto/kdf.rs:  82:pub const PARAMS_VERSION: u16 = 3;
-crypto/kdf.rs:  87:    pub const DEFAULT: Self = Self {
-crypto/kdf.rs:  117:    pub const MIN: Self = Self {
-crypto/kdf.rs:  127:    pub const LIGHT: Self = Self {
-crypto/kdf.rs:  137:    pub const HEAVY: Self = Self {
-crypto/kdf.rs:  149:    pub fn format_version(&self) -> u16 {
-crypto/kdf.rs:  157:    pub fn padding_policy_index(&self) -> u8 {
-crypto/kdf.rs:  170:    pub fn with_padding_policy_index(self, idx: u8) -> Self {
-crypto/kdf.rs:  202:    pub const MAX_M_COST_KIB: u32 = 512 * 1024;
-crypto/kdf.rs:  206:    pub const MAX_T_COST: u32 = 8;
-crypto/kdf.rs:  211:    pub const MAX_P_COST: u32 = 16;
-crypto/kdf.rs:  216:    pub fn validate(&self) -> Result<()> {
-crypto/kdf.rs:  258:    pub fn encode(&self) -> [u8; HEADER_PARAMS_LEN] {
-crypto/kdf.rs:  270:    pub fn decode(bytes: &[u8]) -> Result<Self> {
-crypto/kdf.rs:  323:pub fn derive_master_key(
-crypto/mod.rs:  3:pub mod aead;
-crypto/mod.rs:  4:pub mod derive;
-crypto/mod.rs:  5:pub mod kdf;
-crypto/mod.rs:  6:pub mod rng;
-crypto/mod.rs:  8:pub use aead::ChunkAead;
-crypto/mod.rs:  9:pub use derive::{SpaceKeys, derive_chunk_key};
-crypto/mod.rs:  10:pub use kdf::{Argon2Params, derive_master_key};
-crypto/rng.rs:  8:pub fn fill(buf: &mut [u8]) -> Result<()> {
-crypto/rng.rs:  70:pub fn random_array<const N: usize>() -> Result<[u8; N]> {
-error.rs:  10:pub type Result<T, E = Error> = core::result::Result<T, E>;
-error.rs:  17:pub enum Error {
-lib.rs:  154:pub mod cancel;
-lib.rs:  155:pub mod chunk;
-lib.rs:  156:pub mod container;
-lib.rs:  157:pub mod crypto;
-lib.rs:  158:pub mod error;
-lib.rs:  163:pub mod multi;
-lib.rs:  165:pub mod padding;
-lib.rs:  166:pub mod redact;
-lib.rs:  167:pub mod space;
-lib.rs:  168:pub mod tx;
-lib.rs:  170:pub use container::Container;
-lib.rs:  171:pub use error::{Error, Result};
-lib.rs:  172:pub use multi::MultiSpace;
-lib.rs:  173:pub use open::MAX_OPEN_SCAN_CHUNKS;
-lib.rs:  177:pub use open::test_hooks;
-lib.rs:  178:pub use space::Space;
-lib.rs:  210:pub const ANCHOR_HORIZON: u64 = 1024;
-lib.rs:  214:pub const CHUNK_SIZE: usize = 4096;
-lib.rs:  240:pub const HEADER_PARAMS_OFFSET: usize = 32;
-lib.rs:  243:pub const HEADER_PARAMS_LEN: usize = 16;
-lib.rs:  249:pub const NONCE_LEN: usize = 24;
-lib.rs:  252:pub const TAG_LEN: usize = 16;
-lib.rs:  255:pub const PLAINTEXT_LEN: usize = CHUNK_SIZE - NONCE_LEN - TAG_LEN;
-multi.rs:  30:pub struct MultiSpace {
-multi.rs:  50:    pub fn new(container: Container) -> Self {
-multi.rs:  60:    pub fn derive_space_keys(&self, password: &[u8]) -> Result<SpaceKeys> {
-multi.rs:  84:    pub fn open_space(&mut self, keys: SpaceKeys) -> Result<usize> {
-multi.rs:  138:    pub fn open_space_constant_time(&mut self, keys: SpaceKeys) -> Result<usize> {
-multi.rs:  168:    pub fn vacuum_hosted(&mut self, id: usize) -> Result<()> {
-multi.rs:  181:    pub fn create_space(&mut self, keys: SpaceKeys) -> Result<usize> {
-multi.rs:  192:    pub fn len(&self) -> usize {
-multi.rs:  198:    pub fn is_empty(&self) -> bool {
-multi.rs:  204:    pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
-multi.rs:  225:    pub fn with_space<R>(&mut self, id: usize, f: impl FnOnce(&mut Space<'_>) -> R) -> Result<R> {
-open/mod.rs:  75:pub mod test_hooks {
-open/mod.rs:  85:    pub fn set_disable(v: bool) {
-open/mod.rs:  88:    pub fn disabled() -> bool {
-open/mod.rs:  93:    pub fn hits() -> u64 {
-open/mod.rs:  96:    pub fn reset_hits() {
-open/mod.rs:  157:pub const MAX_OPEN_SCAN_CHUNKS: u64 = 16 * 1024 * 1024;
-padding/mod.rs:  54:pub enum PaddingPolicy {
-padding/mod.rs:  103:    pub const DEFAULT: Self = Self::BucketGrowth { bucket_chunks: 256 };
-padding/mod.rs:  125:    pub fn from_persisted_index(idx: u8) -> Self {
-padding/mod.rs:  142:    pub fn to_persisted_index(&self) -> Option<u8> {
-padding/mod.rs:  167:    pub fn garbage_after_commit(
-redact.rs:  61:pub struct SecretShape {
-redact.rs:  75:pub trait Secret {
-redact.rs:  90:pub struct Redacted<T: Secret> {
-redact.rs:  96:    pub const fn new(inner: T) -> Self {
-redact.rs:  102:    pub const fn as_inner(&self) -> &T {
-redact.rs:  114:    pub fn into_inner(mut self) -> T {
-space/index.rs:  90:pub struct Namespace(pub u8);
-space/index.rs:  94:    pub const SETTINGS: Self = Self(1);
-space/index.rs:  96:    pub const CONTACTS: Self = Self(2);
-space/index.rs:  98:    pub const MESSAGE_LOG: Self = Self(3);
-space/index.rs:  100:    pub const MEDIA: Self = Self(4);
-space/index.rs:  102:    pub const RESERVED: Self = Self(0);
-space/index.rs:  106:    pub fn as_u8(self) -> u8 {
-space/index.rs:  119:pub const MAX_KEY_LEN: usize = 256;
-space/index.rs:  121:pub const MAX_VALUE_LEN: usize = 2048;
-space/index.rs:  277:pub struct ChildPointer {
-space/index.rs:  304:pub struct LeafNode {
-space/index.rs:  318:pub struct InternalNode {
-space/index.rs:  332:pub enum IndexNode {
-space/index.rs:  342:    pub fn encode(&self) -> Result<Vec<u8>> {
-space/index.rs:  351:    pub fn decode(bytes: &[u8]) -> Result<Self> {
-space/index.rs:  366:    pub fn new(namespace: Namespace) -> Self {
-space/index.rs:  376:    pub fn encoded_len(&self) -> usize {
-space/index.rs:  389:    pub fn encode(&self) -> Result<Vec<u8>> {
-space/index.rs:  429:    pub fn decode(bytes: &[u8]) -> Result<Self> {
-space/index.rs:  509:    pub fn get(&self, key: &[u8]) -> Option<&[u8]> {
-space/index.rs:  523:    pub fn new(namespace: Namespace) -> Self {
-space/index.rs:  533:    pub fn encoded_len(&self) -> usize {
-space/index.rs:  546:    pub fn encode(&self) -> Result<Vec<u8>> {
-space/index.rs:  590:    pub fn decode(bytes: &[u8]) -> Result<Self> {
-space/index.rs:  670:    pub fn child_index_for(&self, key: &[u8]) -> usize {
-space/integrity.rs:  123:    pub fn verify_integrity(&mut self) -> Result<IntegrityReport> {
-space/log.rs:  58:pub const MAX_RECORDS_PER_BATCH: usize = 1024;
-space/log.rs:  62:pub const MAX_LOG_PAYLOAD_LEN: usize = 8 * 1024;
-space/log.rs:  71:pub const MAX_DECODED_BATCH_LEN: usize = 4 + MAX_RECORDS_PER_BATCH * (12 + MAX_LOG_PAYLOAD_LEN);
-space/log.rs:  92:pub const MAX_CACHED_BATCH_BYTES: usize = 8 * 1024 * 1024;
-space/log.rs:  104:pub const MAX_CACHED_BATCHES: usize = 64;
-space/log.rs:  111:pub fn batch_footprint(records: &[(u64, Vec<u8>)]) -> usize {
-space/log.rs:  138:pub const GUARANTEED_ADMISSIBLE_PAYLOAD_LEN: usize = PAYLOAD_CAP / 2;
-space/log.rs:  149:pub fn single_record_fits(log_id: u64, payload: &[u8]) -> Result<()> {
-space/log.rs:  163:pub fn encode_batch(records: &[(u64, Vec<u8>)]) -> Result<Vec<u8>> {
-space/log.rs:  225:pub fn encode_batches_split(records: &[(u64, Vec<u8>)]) -> Result<Vec<(Vec<u64>, Vec<u8>)>> {
-space/log.rs:  271:pub fn decode_batch(compressed: &[u8]) -> Result<Vec<(u64, Vec<u8>)>> {
-space/log.rs:  343:pub fn find_in_batch(records: &[(u64, Vec<u8>)], log_id: u64) -> Option<&Vec<u8>> {
-space/log.rs:  353:pub fn log_id_key(log_id: u64) -> [u8; 8] {
-space/log.rs:  364:pub fn parse_log_id_key(key: &[u8]) -> Result<u64> {
-space/log.rs:  381:pub fn parse_batch_slot_value(value: &[u8]) -> Result<u64> {
-space/log.rs:  394:pub fn encode_batch_slot_value(batch_slot: u64) -> [u8; 8] {
-space/log_iter.rs:  123:    pub fn iter_log(&mut self, namespace: Namespace) -> Result<Vec<(u64, Vec<u8>)>> {
-space/log_iter.rs:  152:    pub fn iter_log_after(
-space/log_iter.rs:  187:    pub fn iter_log_before(
-space/log_iter.rs:  236:    pub fn iter_log_range(
-space/log_iter.rs:  344:    pub fn read_log(&mut self, namespace: Namespace, log_id: u64) -> Result<Option<Vec<u8>>> {
-space/mod.rs:  3:pub mod index;
-space/mod.rs:  4:pub mod log;
-space/mod.rs:  5:pub mod superblock;
-space/mod.rs:  102:pub struct HardeningFailure {
-space/mod.rs:  113:pub enum HardeningStep {
-space/mod.rs:  218:pub struct SpaceStats {
-space/mod.rs:  272:    pub fn total_entries(&self) -> usize {
-space/mod.rs:  302:    pub fn utilization_ratio(&self) -> f64 {
-space/mod.rs:  324:pub struct IntegrityReport {
-space/mod.rs:  607:pub struct Space<'f> {
-space/mod.rs:  746:    pub fn commit_seq(&self) -> u64 {
-space/mod.rs:  762:    pub fn space_keys(&self) -> SpaceKeys {
-space/mod.rs:  811:    pub fn commit_history(&self) -> &[u64] {
-space/mod.rs:  831:    pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
-space/mod.rs:  842:    pub fn padding_policy(&self) -> crate::padding::PaddingPolicy {
-space/mod.rs:  869:    pub fn last_hardening_error(&self) -> Option<&HardeningFailure> {
-space/mod.rs:  884:    pub fn acknowledge_hardening_error(&mut self) {
-space/mod.rs:  899:    pub fn last_publish_error(&self) -> Option<&crate::Error> {
-space/mod.rs:  908:    pub fn audit_owned_chunk_count(&self) -> usize {
-space/mod.rs:  924:    pub fn stats(&mut self) -> Result<SpaceStats> {
-space/mod.rs:  943:    pub fn begin_tx<'s>(&'s mut self) -> Tx<'s, 'f> {
-space/mod.rs:  956:    pub fn get(&mut self, namespace: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>> {
-space/mod.rs:  998:    pub fn list(&mut self, namespace: Namespace) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-space/mod.rs:  1024:    pub fn list_keys(&mut self, namespace: Namespace) -> Result<Vec<Vec<u8>>> {
-space/mod.rs:  1050:    pub fn list_keys_after(
-space/mod.rs:  1095:    pub fn list_after(
-space/mod.rs:  1122:    pub fn count(&mut self, namespace: Namespace) -> Result<usize> {
-space/mod.rs:  1175:    pub fn erase_namespace(&mut self, namespace: Namespace) -> Result<usize> {
-space/mod.rs:  1212:    pub fn list_namespaces(&mut self) -> Result<Vec<Namespace>> {
-space/mod.rs:  1224:    pub fn list_namespaces_with_kind(
-space/slots.rs:  38:pub struct OwnedSet {
-space/superblock.rs:  30:pub const NO_RECORD: u64 = u64::MAX;
-space/superblock.rs:  37:pub struct Superblock {
-space/superblock.rs:  72:    pub const ENCODED_LEN: usize = 8 + 8 + 32;
-space/superblock.rs:  76:    pub const ENCODED_LEN_WITH_CHECKPOINT: usize = Self::ENCODED_LEN + 8;
-space/superblock.rs:  84:    pub fn is_valid_encoded_len(len: usize) -> bool {
-space/superblock.rs:  100:    pub fn encode(&self) -> Vec<u8> {
-space/superblock.rs:  130:    pub fn decode(bytes: &[u8]) -> Result<Self> {
-space/vacuum.rs:  56:    pub fn vacuum_orphans(&mut self) -> Result<usize> {
-space/vacuum.rs:  283:    pub fn vacuum_after_open(&mut self) -> Result<usize> {
-space/vacuum.rs:  346:    pub fn vacuum_data_batches(&mut self) -> Result<usize> {
-tx/commit.rs:  39:pub const MAX_NAMESPACES_PER_TX: usize = (PAYLOAD_CAP - 2 - 32) / (1 + 1 + 8 + 32);
-tx/commit.rs:  54:pub enum NamespaceKind {
-tx/commit.rs:  68:    pub fn as_u8(self) -> u8 {
-tx/commit.rs:  74:    pub fn from_u8(b: u8) -> Result<Self> {
-tx/commit.rs:  85:pub struct IndexRoot {
-tx/commit.rs:  100:pub struct CommitPayload {
-tx/commit.rs:  110:    pub fn encoded_len(&self) -> usize {
-tx/commit.rs:  116:    pub fn encode(&self) -> Result<Vec<u8>> {
-tx/commit.rs:  142:    pub fn decode(bytes: &[u8]) -> Result<Self> {
-tx/commit.rs:  202:    pub fn compute_tx_root_hash(roots: &[IndexRoot]) -> [u8; 32] {
-tx/commit.rs:  215:pub fn blake3_of(payload: &[u8]) -> [u8; 32] {
-tx/mod.rs:  28:pub mod commit;
-tx/mod.rs:  40:pub use commit::{CommitPayload, IndexRoot, MAX_NAMESPACES_PER_TX, NamespaceKind};
-tx/mod.rs:  174:pub struct Tx<'s, 'f> {
-tx/mod.rs:  295:    pub fn put(&mut self, namespace: Namespace, key: &[u8], value: &[u8]) -> Result<()> {
-tx/mod.rs:  332:    pub fn delete(&mut self, namespace: Namespace, key: &[u8]) -> Result<()> {
-tx/mod.rs:  443:    pub fn append_log(&mut self, namespace: Namespace, log_id: u64, payload: &[u8]) -> Result<()> {
-tx/mod.rs:  495:    pub fn delete_log(&mut self, namespace: Namespace, log_id: u64) -> Result<()> {
-tx/mod.rs:  510:    pub fn touched_namespaces(&self) -> usize {
-tx/mod.rs:  520:    pub fn is_empty(&self) -> bool {
-tx/mod.rs:  525:    pub fn commit(self) -> Result<u64> {
+cancel.rs: pub struct CancelToken(Arc<AtomicBool>);
+cancel.rs:   pub fn new() -> Self {
+cancel.rs:   pub fn cancel(&self) {
+cancel.rs:   pub fn is_cancelled(&self) -> bool {
+cancel.rs:   pub fn check(&self) -> Result<()> {
+chunk/format.rs: pub const MAGIC: [u8; 4] = *b"HVC1";
+chunk/format.rs: pub const PLAINTEXT_HEADER_LEN: usize = 4 + 1 + 1 + 8 + 2;
+chunk/format.rs: pub const PAYLOAD_CAP: usize = PLAINTEXT_LEN - PLAINTEXT_HEADER_LEN;
+chunk/format.rs: pub struct Plaintext {
+chunk/format.rs:   pub fn encode(&self) -> Result<[u8; PLAINTEXT_LEN]> {
+chunk/format.rs:   pub fn decode(buf: &[u8]) -> Result<Self> {
+chunk/kind.rs: pub enum ChunkKind {
+chunk/kind.rs:   pub fn from_u8(b: u8) -> Result<Self> {
+chunk/mod.rs: pub mod format;
+chunk/mod.rs: pub mod kind;
+chunk/mod.rs: pub use format::Plaintext;
+chunk/mod.rs: pub use kind::ChunkKind;
+container/file.rs: pub const DEFAULT_SUPERBLOCK_REPLICAS: u8 = 3;
+container/file.rs: pub enum LockMode {
+container/file.rs:   pub fn allows_writes(self) -> bool {
+container/file.rs: pub struct ContainerFile {
+container/file.rs:   pub fn create<P: AsRef<Path>>(path: P, params: Argon2Params) -> Result<Self> {
+container/file.rs:   pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+container/file.rs:   pub fn open_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
+container/file.rs:   pub fn open_exclusive_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
+container/file.rs:   pub fn append_garbage_chunks(&mut self, n: u64) -> Result<()> {
+container/file.rs:   pub fn slot_count(&self) -> u64 {
+container/file.rs:   pub fn read_slot(&mut self, i: u64) -> Result<[u8; CHUNK_SIZE]> {
+container/file.rs:   pub fn read_slot_concurrent(&self, i: u64) -> Result<[u8; CHUNK_SIZE]> {
+container/file.rs:   pub fn raw_file(&self) -> &File {
+container/file.rs:   pub fn append_slot(&mut self, chunk: &[u8; CHUNK_SIZE]) -> Result<u64> {
+container/file.rs:   pub fn rewrite_slot(&mut self, slot: u64, chunk: &[u8; CHUNK_SIZE]) -> Result<()> {
+container/file.rs:   pub fn scrub_slot(&mut self, slot: u64) -> Result<()> {
+container/file.rs:   pub fn fsync(&mut self) -> Result<()> {
+container/header.rs: pub struct Header {
+container/header.rs:   pub fn new_random(params: Argon2Params) -> Result<Self> {
+container/header.rs:   pub fn decode(bytes: &[u8]) -> Result<Self> {
+container/header.rs:   pub fn encode_first_chunk(&self) -> Result<[u8; CHUNK_SIZE]> {
+container/mod.rs: pub mod file;
+container/mod.rs: pub mod header;
+container/mod.rs: pub use file::{ContainerFile, DEFAULT_SUPERBLOCK_REPLICAS};
+container/mod.rs: pub use header::Header;
+container/mod.rs: pub struct ContainerOptions {
+container/mod.rs: pub struct RepackOptions {
+container/mod.rs: pub struct Container {
+container/mod.rs:   pub fn create<P: AsRef<Path>>(path: P, params: Argon2Params) -> Result<Self> {
+container/mod.rs:   pub fn create_with_options<P: AsRef<Path>>(path: P, options: ContainerOptions) -> Result<Self> {
+container/mod.rs:   pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+container/mod.rs:   pub fn open_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
+container/mod.rs:   pub fn open_exclusive_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
+container/mod.rs:   pub fn is_readonly(&self) -> bool {
+container/mod.rs:   pub fn set_padding_policy(&mut self, policy: PaddingPolicy) -> Result<()> {
+container/mod.rs:   pub fn padding_policy(&self) -> PaddingPolicy {
+container/mod.rs:   pub fn set_superblock_replicas(&mut self, replicas: u8) -> Result<()> {
+container/mod.rs:   pub fn superblock_replicas(&self) -> u8 {
+container/mod.rs:   pub fn header(&self) -> &Header {
+container/mod.rs:   pub fn params(&self) -> Argon2Params {
+container/mod.rs:   pub fn create_space(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:   pub fn open_space(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:   pub fn open_space_verified(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:   pub fn open_space_with_keys_verified(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
+container/mod.rs:   pub fn derive_space_keys(&self, password: &[u8]) -> Result<SpaceKeys> {
+container/mod.rs:   pub fn open_space_with_keys(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
+container/mod.rs:   pub fn open_space_cancellable(
+container/mod.rs:   pub fn open_space_with_keys_cancellable(
+container/mod.rs:   pub fn open_space_parallel(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:   pub fn open_space_with_keys_parallel(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
+container/mod.rs:   pub fn open_space_mmap(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:   pub fn open_space_with_keys_mmap(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
+container/mod.rs:   pub fn open_space_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:   pub fn open_space_with_keys_constant_time(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
+container/mod.rs:   pub fn open_space_parallel_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:   pub fn open_space_with_keys_parallel_constant_time(
+container/mod.rs:   pub fn open_space_mmap_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:   pub fn open_space_with_keys_mmap_constant_time(
+container/mod.rs:   pub fn repack(
+container/mod.rs:   pub fn repack_cancellable(
+container/mod.rs:   pub fn compact_known(
+container/mod.rs:   pub fn compact_known_cancellable(
+container/mod.rs:   pub fn change_passwords(
+container/mod.rs:   pub fn change_passwords_cancellable(
+crypto/aead.rs: pub struct ChunkAead {
+crypto/aead.rs:   pub fn new(key: &[u8; 32]) -> Self {
+crypto/aead.rs:   pub fn seal(&self, plaintext: &[u8], aad: [u8; AAD_LEN]) -> Result<([u8; NONCE_LEN], Vec<u8>)> {
+crypto/aead.rs:   pub fn open(
+crypto/aead.rs: pub fn make_aad(container_id: &[u8; 32], slot: u64) -> [u8; AAD_LEN] {
+crypto/derive.rs: pub struct SpaceKeys {
+crypto/derive.rs:   pub fn from_master(versioned_master: &Zeroizing<[u8; 32]>) -> Self {
+crypto/derive.rs: pub fn derive_chunk_key(
+crypto/kdf.rs: pub struct Argon2Params {
+crypto/kdf.rs: pub const PARAMS_VERSION: u16 = 3;
+crypto/kdf.rs:   pub const DEFAULT: Self = Self {
+crypto/kdf.rs:   pub const MIN: Self = Self {
+crypto/kdf.rs:   pub const LIGHT: Self = Self {
+crypto/kdf.rs:   pub const HEAVY: Self = Self {
+crypto/kdf.rs:   pub fn format_version(&self) -> u16 {
+crypto/kdf.rs:   pub fn padding_policy_index(&self) -> u8 {
+crypto/kdf.rs:   pub fn with_padding_policy_index(self, idx: u8) -> Self {
+crypto/kdf.rs:   pub const MAX_M_COST_KIB: u32 = 512 * 1024;
+crypto/kdf.rs:   pub const MAX_T_COST: u32 = 8;
+crypto/kdf.rs:   pub const MAX_P_COST: u32 = 16;
+crypto/kdf.rs:   pub fn validate(&self) -> Result<()> {
+crypto/kdf.rs:   pub fn encode(&self) -> [u8; HEADER_PARAMS_LEN] {
+crypto/kdf.rs:   pub fn decode(bytes: &[u8]) -> Result<Self> {
+crypto/kdf.rs: pub fn derive_master_key(
+crypto/mod.rs: pub mod aead;
+crypto/mod.rs: pub mod derive;
+crypto/mod.rs: pub mod kdf;
+crypto/mod.rs: pub mod rng;
+crypto/mod.rs: pub use aead::ChunkAead;
+crypto/mod.rs: pub use derive::{SpaceKeys, derive_chunk_key};
+crypto/mod.rs: pub use kdf::{Argon2Params, derive_master_key};
+crypto/rng.rs: pub fn fill(buf: &mut [u8]) -> Result<()> {
+crypto/rng.rs: pub fn random_array<const N: usize>() -> Result<[u8; N]> {
+error.rs: pub type Result<T, E = Error> = core::result::Result<T, E>;
+error.rs: pub enum Error {
+lib.rs: pub mod cancel;
+lib.rs: pub mod chunk;
+lib.rs: pub mod container;
+lib.rs: pub mod crypto;
+lib.rs: pub mod error;
+lib.rs: pub mod multi;
+lib.rs: pub mod padding;
+lib.rs: pub mod redact;
+lib.rs: pub mod space;
+lib.rs: pub mod tx;
+lib.rs: pub use container::Container;
+lib.rs: pub use error::{Error, Result};
+lib.rs: pub use multi::MultiSpace;
+lib.rs: pub use open::MAX_OPEN_SCAN_CHUNKS;
+lib.rs: pub use open::test_hooks;
+lib.rs: pub use space::Space;
+lib.rs: pub const ANCHOR_HORIZON: u64 = 1024;
+lib.rs: pub const CHUNK_SIZE: usize = 4096;
+lib.rs: pub const HEADER_PARAMS_OFFSET: usize = 32;
+lib.rs: pub const HEADER_PARAMS_LEN: usize = 16;
+lib.rs: pub const NONCE_LEN: usize = 24;
+lib.rs: pub const TAG_LEN: usize = 16;
+lib.rs: pub const PLAINTEXT_LEN: usize = CHUNK_SIZE - NONCE_LEN - TAG_LEN;
+multi.rs: pub struct MultiSpace {
+multi.rs:   pub fn new(container: Container) -> Self {
+multi.rs:   pub fn derive_space_keys(&self, password: &[u8]) -> Result<SpaceKeys> {
+multi.rs:   pub fn open_space(&mut self, keys: SpaceKeys) -> Result<usize> {
+multi.rs:   pub fn open_space_constant_time(&mut self, keys: SpaceKeys) -> Result<usize> {
+multi.rs:   pub fn vacuum_hosted(&mut self, id: usize) -> Result<()> {
+multi.rs:   pub fn create_space(&mut self, keys: SpaceKeys) -> Result<usize> {
+multi.rs:   pub fn len(&self) -> usize {
+multi.rs:   pub fn is_empty(&self) -> bool {
+multi.rs:   pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
+multi.rs:   pub fn with_space<R>(&mut self, id: usize, f: impl FnOnce(&mut Space<'_>) -> R) -> Result<R> {
+open/mod.rs: pub mod test_hooks {
+open/mod.rs:   pub fn set_disable(v: bool) {
+open/mod.rs:   pub fn disabled() -> bool {
+open/mod.rs:   pub fn hits() -> u64 {
+open/mod.rs:   pub fn reset_hits() {
+open/mod.rs: pub const MAX_OPEN_SCAN_CHUNKS: u64 = 16 * 1024 * 1024;
+padding/mod.rs: pub enum PaddingPolicy {
+padding/mod.rs:   pub const DEFAULT: Self = Self::BucketGrowth { bucket_chunks: 256 };
+padding/mod.rs:   pub fn from_persisted_index(idx: u8) -> Self {
+padding/mod.rs:   pub fn to_persisted_index(&self) -> Option<u8> {
+padding/mod.rs:   pub fn garbage_after_commit(
+redact.rs: pub struct SecretShape {
+redact.rs: pub trait Secret {
+redact.rs: pub struct Redacted<T: Secret> {
+redact.rs:   pub const fn new(inner: T) -> Self {
+redact.rs:   pub const fn as_inner(&self) -> &T {
+redact.rs:   pub fn into_inner(mut self) -> T {
+space/index.rs: pub struct Namespace(pub u8);
+space/index.rs:   pub const SETTINGS: Self = Self(1);
+space/index.rs:   pub const CONTACTS: Self = Self(2);
+space/index.rs:   pub const MESSAGE_LOG: Self = Self(3);
+space/index.rs:   pub const MEDIA: Self = Self(4);
+space/index.rs:   pub const RESERVED: Self = Self(0);
+space/index.rs:   pub fn as_u8(self) -> u8 {
+space/index.rs: pub const MAX_KEY_LEN: usize = 256;
+space/index.rs: pub const MAX_VALUE_LEN: usize = 2048;
+space/index.rs: pub struct ChildPointer {
+space/index.rs: pub struct LeafNode {
+space/index.rs: pub struct InternalNode {
+space/index.rs: pub enum IndexNode {
+space/index.rs:   pub fn encode(&self) -> Result<Vec<u8>> {
+space/index.rs:   pub fn decode(bytes: &[u8]) -> Result<Self> {
+space/index.rs:   pub fn new(namespace: Namespace) -> Self {
+space/index.rs:   pub fn encoded_len(&self) -> usize {
+space/index.rs:   pub fn encode(&self) -> Result<Vec<u8>> {
+space/index.rs:   pub fn decode(bytes: &[u8]) -> Result<Self> {
+space/index.rs:   pub fn get(&self, key: &[u8]) -> Option<&[u8]> {
+space/index.rs:   pub fn new(namespace: Namespace) -> Self {
+space/index.rs:   pub fn encoded_len(&self) -> usize {
+space/index.rs:   pub fn encode(&self) -> Result<Vec<u8>> {
+space/index.rs:   pub fn decode(bytes: &[u8]) -> Result<Self> {
+space/index.rs:   pub fn child_index_for(&self, key: &[u8]) -> usize {
+space/integrity.rs:   pub fn verify_integrity(&mut self) -> Result<IntegrityReport> {
+space/log.rs: pub const MAX_RECORDS_PER_BATCH: usize = 1024;
+space/log.rs: pub const MAX_LOG_PAYLOAD_LEN: usize = 8 * 1024;
+space/log.rs: pub const MAX_DECODED_BATCH_LEN: usize = 4 + MAX_RECORDS_PER_BATCH * (12 + MAX_LOG_PAYLOAD_LEN);
+space/log.rs: pub const MAX_CACHED_BATCH_BYTES: usize = 8 * 1024 * 1024;
+space/log.rs: pub const MAX_CACHED_BATCHES: usize = 64;
+space/log.rs: pub fn batch_footprint(records: &[(u64, Vec<u8>)]) -> usize {
+space/log.rs: pub const GUARANTEED_ADMISSIBLE_PAYLOAD_LEN: usize = PAYLOAD_CAP / 2;
+space/log.rs: pub fn single_record_fits(log_id: u64, payload: &[u8]) -> Result<()> {
+space/log.rs: pub fn encode_batch(records: &[(u64, Vec<u8>)]) -> Result<Vec<u8>> {
+space/log.rs: pub fn encode_batches_split(records: &[(u64, Vec<u8>)]) -> Result<Vec<(Vec<u64>, Vec<u8>)>> {
+space/log.rs: pub fn decode_batch(compressed: &[u8]) -> Result<Vec<(u64, Vec<u8>)>> {
+space/log.rs: pub fn find_in_batch(records: &[(u64, Vec<u8>)], log_id: u64) -> Option<&Vec<u8>> {
+space/log.rs: pub fn log_id_key(log_id: u64) -> [u8; 8] {
+space/log.rs: pub fn parse_log_id_key(key: &[u8]) -> Result<u64> {
+space/log.rs: pub fn parse_batch_slot_value(value: &[u8]) -> Result<u64> {
+space/log.rs: pub fn encode_batch_slot_value(batch_slot: u64) -> [u8; 8] {
+space/log_iter.rs:   pub fn iter_log(&mut self, namespace: Namespace) -> Result<Vec<(u64, Vec<u8>)>> {
+space/log_iter.rs:   pub fn iter_log_after(
+space/log_iter.rs:   pub fn iter_log_before(
+space/log_iter.rs:   pub fn iter_log_range(
+space/log_iter.rs:   pub fn read_log(&mut self, namespace: Namespace, log_id: u64) -> Result<Option<Vec<u8>>> {
+space/mod.rs: pub mod index;
+space/mod.rs: pub mod log;
+space/mod.rs: pub mod superblock;
+space/mod.rs: pub struct HardeningFailure {
+space/mod.rs: pub enum HardeningStep {
+space/mod.rs: pub struct SpaceStats {
+space/mod.rs:   pub fn total_entries(&self) -> usize {
+space/mod.rs:   pub fn utilization_ratio(&self) -> f64 {
+space/mod.rs: pub struct IntegrityReport {
+space/mod.rs: pub struct Space<'f> {
+space/mod.rs:   pub fn commit_seq(&self) -> u64 {
+space/mod.rs:   pub fn space_keys(&self) -> SpaceKeys {
+space/mod.rs:   pub fn commit_history(&self) -> &[u64] {
+space/mod.rs:   pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
+space/mod.rs:   pub fn padding_policy(&self) -> crate::padding::PaddingPolicy {
+space/mod.rs:   pub fn last_hardening_error(&self) -> Option<&HardeningFailure> {
+space/mod.rs:   pub fn acknowledge_hardening_error(&mut self) {
+space/mod.rs:   pub fn last_publish_error(&self) -> Option<&crate::Error> {
+space/mod.rs:   pub fn audit_owned_chunk_count(&self) -> usize {
+space/mod.rs:   pub fn stats(&mut self) -> Result<SpaceStats> {
+space/mod.rs:   pub fn begin_tx<'s>(&'s mut self) -> Tx<'s, 'f> {
+space/mod.rs:   pub fn get(&mut self, namespace: Namespace, key: &[u8]) -> Result<Option<Vec<u8>>> {
+space/mod.rs:   pub fn list(&mut self, namespace: Namespace) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+space/mod.rs:   pub fn list_keys(&mut self, namespace: Namespace) -> Result<Vec<Vec<u8>>> {
+space/mod.rs:   pub fn list_keys_after(
+space/mod.rs:   pub fn list_after(
+space/mod.rs:   pub fn count(&mut self, namespace: Namespace) -> Result<usize> {
+space/mod.rs:   pub fn erase_namespace(&mut self, namespace: Namespace) -> Result<usize> {
+space/mod.rs:   pub fn list_namespaces(&mut self) -> Result<Vec<Namespace>> {
+space/mod.rs:   pub fn list_namespaces_with_kind(
+space/slots.rs: pub struct OwnedSet {
+space/superblock.rs: pub const NO_RECORD: u64 = u64::MAX;
+space/superblock.rs: pub struct Superblock {
+space/superblock.rs:   pub const ENCODED_LEN: usize = 8 + 8 + 32;
+space/superblock.rs:   pub const ENCODED_LEN_WITH_CHECKPOINT: usize = Self::ENCODED_LEN + 8;
+space/superblock.rs:   pub fn is_valid_encoded_len(len: usize) -> bool {
+space/superblock.rs:   pub fn encode(&self) -> Vec<u8> {
+space/superblock.rs:   pub fn decode(bytes: &[u8]) -> Result<Self> {
+space/vacuum.rs:   pub fn vacuum_orphans(&mut self) -> Result<usize> {
+space/vacuum.rs:   pub fn vacuum_after_open(&mut self) -> Result<usize> {
+space/vacuum.rs:   pub fn vacuum_data_batches(&mut self) -> Result<usize> {
+tx/commit.rs: pub const MAX_NAMESPACES_PER_TX: usize = (PAYLOAD_CAP - 2 - 32) / (1 + 1 + 8 + 32);
+tx/commit.rs: pub enum NamespaceKind {
+tx/commit.rs:   pub fn as_u8(self) -> u8 {
+tx/commit.rs:   pub fn from_u8(b: u8) -> Result<Self> {
+tx/commit.rs: pub struct IndexRoot {
+tx/commit.rs: pub struct CommitPayload {
+tx/commit.rs:   pub fn encoded_len(&self) -> usize {
+tx/commit.rs:   pub fn encode(&self) -> Result<Vec<u8>> {
+tx/commit.rs:   pub fn decode(bytes: &[u8]) -> Result<Self> {
+tx/commit.rs:   pub fn compute_tx_root_hash(roots: &[IndexRoot]) -> [u8; 32] {
+tx/commit.rs: pub fn blake3_of(payload: &[u8]) -> [u8; 32] {
+tx/mod.rs: pub mod commit;
+tx/mod.rs: pub use commit::{CommitPayload, IndexRoot, MAX_NAMESPACES_PER_TX, NamespaceKind};
+tx/mod.rs: pub struct Tx<'s, 'f> {
+tx/mod.rs:   pub fn put(&mut self, namespace: Namespace, key: &[u8], value: &[u8]) -> Result<()> {
+tx/mod.rs:   pub fn delete(&mut self, namespace: Namespace, key: &[u8]) -> Result<()> {
+tx/mod.rs:   pub fn append_log(&mut self, namespace: Namespace, log_id: u64, payload: &[u8]) -> Result<()> {
+tx/mod.rs:   pub fn delete_log(&mut self, namespace: Namespace, log_id: u64) -> Result<()> {
+tx/mod.rs:   pub fn touched_namespaces(&self) -> usize {
+tx/mod.rs:   pub fn is_empty(&self) -> bool {
+tx/mod.rs:   pub fn commit(self) -> Result<u64> {
 
 ==========================================
 crate: hidden-volume-rt
 ==========================================
 
-lib.rs:  128:pub struct OwnedSpace {
-lib.rs:  140:    pub fn wrap_open(
-lib.rs:  160:    pub fn wrap_create(
-lib.rs:  177:    pub fn wrap_open_with_keys(
-lib.rs:  196:    pub fn wrap_open_constant_time(
-lib.rs:  211:    pub fn wrap_open_with_keys_constant_time(
-lib.rs:  245:    pub fn with_space_mut<R>(&mut self, f: impl for<'a> FnOnce(&mut Space<'a>) -> R) -> R {
-lib.rs:  321:pub enum BlockingFailure {
-lib.rs:  369:pub async fn run_blocking<F, T, E>(
-lib.rs:  391:pub struct OpId(pub u64);
-lib.rs:  401:pub enum OpOutcome {
-lib.rs:  431:    pub fn is_settled(self) -> bool {
-lib.rs:  439:    pub fn may_have_mutated(self) -> bool {
-lib.rs:  448:pub struct AbandonedOp {
-lib.rs:  528:pub struct OpLedger {
-lib.rs:  546:    pub fn new(max_concurrent: usize) -> Self {
-lib.rs:  570:    pub fn abandoned_operations(&self) -> Vec<AbandonedOp> {
-lib.rs:  587:    pub fn clear_settled_operations(&self) {
-lib.rs:  600:    pub fn forgotten_abandonments(&self) -> u64 {
-lib.rs:  609:    pub async fn run<F, T, E>(
-lib.rs:  641:    pub async fn run_cancellable<F, T, E>(
+lib.rs: pub struct OwnedSpace {
+lib.rs:   pub fn wrap_open(
+lib.rs:   pub fn wrap_create(
+lib.rs:   pub fn wrap_open_with_keys(
+lib.rs:   pub fn wrap_open_constant_time(
+lib.rs:   pub fn wrap_open_with_keys_constant_time(
+lib.rs:   pub fn with_space_mut<R>(&mut self, f: impl for<'a> FnOnce(&mut Space<'a>) -> R) -> R {
+lib.rs: pub enum BlockingFailure {
+lib.rs: pub async fn run_blocking<F, T, E>(
+lib.rs: pub struct OpId(pub u64);
+lib.rs: pub enum OpOutcome {
+lib.rs:   pub fn is_settled(self) -> bool {
+lib.rs:   pub fn may_have_mutated(self) -> bool {
+lib.rs: pub struct AbandonedOp {
+lib.rs: pub struct OpLedger {
+lib.rs:   pub fn new(max_concurrent: usize) -> Self {
+lib.rs:   pub fn abandoned_operations(&self) -> Vec<AbandonedOp> {
+lib.rs:   pub fn clear_settled_operations(&self) {
+lib.rs:   pub fn forgotten_abandonments(&self) -> u64 {
+lib.rs:   pub async fn run<F, T, E>(
+lib.rs:   pub async fn run_cancellable<F, T, E>(
 
 ==========================================
 crate: hidden-volume-async
 ==========================================
 
-lib.rs:  66:pub use hidden_volume_rt::{AbandonedOp, OpId, OpOutcome};
-lib.rs:  81:pub struct AsyncContainer {
-lib.rs:  95:    pub async fn create(path: impl AsRef<Path>, params: Argon2Params) -> Result<Self> {
-lib.rs:  106:    pub async fn create_with_options(
-lib.rs:  120:    pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
-lib.rs:  154:    pub fn abandoned_operations(&self) -> Vec<AbandonedOp> {
-lib.rs:  160:    pub fn clear_settled_operations(&self) {
-lib.rs:  168:    pub fn forgotten_abandonments(&self) -> u64 {
-lib.rs:  206:    pub async fn run<F, R>(&self, f: F) -> Result<R>
-lib.rs:  228:    pub async fn set_padding_policy(&self, policy: PaddingPolicy) -> Result<()> {
-lib.rs:  235:    pub async fn set_superblock_replicas(&self, replicas: u8) -> Result<()> {
-lib.rs:  286:    pub async fn run_cancellable<F, R>(
-lib.rs:  413:pub struct AsyncSpace {
-lib.rs:  429:    pub async fn create(
-lib.rs:  458:    pub async fn open(path: impl AsRef<Path>, password: Vec<u8>) -> Result<Self> {
-lib.rs:  559:    pub async fn run<F, R>(&self, f: F) -> Result<R>
-lib.rs:  588:    pub fn abandoned_operations(&self) -> Vec<AbandonedOp> {
-lib.rs:  593:    pub fn clear_settled_operations(&self) {
-lib.rs:  599:    pub fn forgotten_abandonments(&self) -> u64 {
-lib.rs:  616:    pub fn stream_log_pages_after(
-lib.rs:  647:    pub fn stream_log_pages_before(
-lib.rs:  679:    pub fn stream_log_pages_range(
+lib.rs: pub use hidden_volume_rt::{AbandonedOp, OpId, OpOutcome};
+lib.rs: pub struct AsyncContainer {
+lib.rs:   pub async fn create(path: impl AsRef<Path>, params: Argon2Params) -> Result<Self> {
+lib.rs:   pub async fn create_with_options(
+lib.rs:   pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
+lib.rs:   pub fn abandoned_operations(&self) -> Vec<AbandonedOp> {
+lib.rs:   pub fn clear_settled_operations(&self) {
+lib.rs:   pub fn forgotten_abandonments(&self) -> u64 {
+lib.rs:   pub async fn run<F, R>(&self, f: F) -> Result<R>
+lib.rs:   pub async fn set_padding_policy(&self, policy: PaddingPolicy) -> Result<()> {
+lib.rs:   pub async fn set_superblock_replicas(&self, replicas: u8) -> Result<()> {
+lib.rs:   pub async fn run_cancellable<F, R>(
+lib.rs: pub struct AsyncSpace {
+lib.rs:   pub async fn create(
+lib.rs:   pub async fn open(path: impl AsRef<Path>, password: Vec<u8>) -> Result<Self> {
+lib.rs:   pub async fn run<F, R>(&self, f: F) -> Result<R>
+lib.rs:   pub fn abandoned_operations(&self) -> Vec<AbandonedOp> {
+lib.rs:   pub fn clear_settled_operations(&self) {
+lib.rs:   pub fn forgotten_abandonments(&self) -> u64 {
+lib.rs:   pub fn stream_log_pages_after(
+lib.rs:   pub fn stream_log_pages_before(
+lib.rs:   pub fn stream_log_pages_range(
 
 ==========================================
 crate: hidden-volume-ffi
 ==========================================
 
-lib.rs:  123:pub enum HvError {
-lib.rs:  327:pub enum ArgonPreset {
-lib.rs:  363:pub enum PaddingPreset {
-lib.rs:  400:pub struct HeaderInfo {
-lib.rs:  418:pub fn header_info(path: String) -> HvResult<HeaderInfo> {
-lib.rs:  465:pub struct PasswordRotation {
-lib.rs:  511:pub fn compact_known(path: String, passwords: Vec<Vec<u8>>) -> HvResult<()> {
-lib.rs:  538:pub fn change_passwords(path: String, rotations: Vec<PasswordRotation>) -> HvResult<()> {
-lib.rs:  578:pub enum WriteOp {
-lib.rs:  672:pub struct LogEntry {
-lib.rs:  699:pub enum HardeningStepKind {
-lib.rs:  725:pub struct HardeningFailureInfo {
-lib.rs:  736:pub struct StatsInfo {
-lib.rs:  805:    pub fn utilization_ratio(&self) -> f64 {
-lib.rs:  825:pub struct NamespaceCount {
-lib.rs:  840:pub enum OperationOutcome {
-lib.rs:  883:pub struct AbandonedOperation {
-lib.rs:  909:pub struct IntegrityResult {
-lib.rs:  935:pub struct SpaceHandle {
-lib.rs:  1021:    pub fn create(
-lib.rs:  1072:    pub fn add_space(path: String, password: Vec<u8>) -> HvResult<std::sync::Arc<Self>> {
-lib.rs:  1101:    pub fn open_with_keys(path: String, keys: Vec<u8>) -> HvResult<std::sync::Arc<Self>> {
-lib.rs:  1135:    pub fn space_keys(&self) -> HvResult<Vec<u8>> {
-lib.rs:  1151:    pub fn open(path: String, password: Vec<u8>) -> HvResult<std::sync::Arc<Self>> {
-lib.rs:  1166:    pub fn commit_seq(&self) -> HvResult<u64> {
-lib.rs:  1181:    pub fn commit_history(&self) -> HvResult<Vec<u64>> {
-lib.rs:  1196:    pub fn set_padding_policy(&self, preset: PaddingPreset) -> HvResult<()> {
-lib.rs:  1204:    pub fn list_namespaces(&self) -> HvResult<Vec<u8>> {
-lib.rs:  1211:    pub fn count(&self, namespace: u8) -> HvResult<u64> {
-lib.rs:  1238:    pub fn kv_keys(&self, namespace: u8) -> HvResult<Vec<u8>> {
-lib.rs:  1259:    pub fn kv_keys_page(
-lib.rs:  1274:    pub fn get(&self, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
-lib.rs:  1281:    pub fn read_log(&self, namespace: u8, log_id: u64) -> HvResult<Option<Vec<u8>>> {
-lib.rs:  1290:    pub fn iter_log_range(
-lib.rs:  1310:    pub fn commit(&self, ops: Vec<WriteOp>) -> HvResult<u64> {
-lib.rs:  1348:    pub fn stats(&self) -> HvResult<StatsInfo> {
-lib.rs:  1385:    pub fn acknowledge_hardening_error(&self) -> HvResult<()> {
-lib.rs:  1396:    pub fn verify_integrity(&self) -> HvResult<IntegrityResult> {
-lib.rs:  1423:    pub fn vacuum_data_batches(&self) -> HvResult<u64> {
-lib.rs:  1449:    pub fn vacuum_after_open(&self) -> HvResult<u64> {
-lib.rs:  1471:    pub fn erase_namespace(&self, namespace: u8) -> HvResult<u64> {
-lib.rs:  1551:pub struct AsyncSpaceHandle {
-lib.rs:  1623:    pub async fn create(
-lib.rs:  1656:    pub async fn open(path: String, password: Vec<u8>) -> HvResult<Arc<Self>> {
-lib.rs:  1673:    pub async fn add_space(path: String, password: Vec<u8>) -> HvResult<Arc<Self>> {
-lib.rs:  1690:    pub async fn open_with_keys(path: String, keys: Vec<u8>) -> HvResult<Arc<Self>> {
-lib.rs:  1708:    pub async fn space_keys(&self) -> HvResult<Vec<u8>> {
-lib.rs:  1720:    pub async fn commit_seq(&self) -> HvResult<u64> {
-lib.rs:  1726:    pub async fn commit_history(&self) -> HvResult<Vec<u64>> {
-lib.rs:  1734:    pub async fn set_padding_policy(&self, preset: PaddingPreset) -> HvResult<()> {
-lib.rs:  1743:    pub async fn list_namespaces(&self) -> HvResult<Vec<u8>> {
-lib.rs:  1752:    pub async fn count(&self, namespace: u8) -> HvResult<u64> {
-lib.rs:  1762:    pub async fn get(&self, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
-lib.rs:  1771:    pub async fn read_log(&self, namespace: u8, log_id: u64) -> HvResult<Option<Vec<u8>>> {
-lib.rs:  1780:    pub async fn iter_log_range(
-lib.rs:  1799:    pub async fn commit(&self, ops: Vec<WriteOp>) -> HvResult<u64> {
-lib.rs:  1848:    pub async fn stats(&self) -> HvResult<StatsInfo> {
-lib.rs:  1875:    pub async fn acknowledge_hardening_error(&self) -> HvResult<()> {
-lib.rs:  1884:    pub async fn verify_integrity(&self) -> HvResult<IntegrityResult> {
-lib.rs:  1899:    pub async fn vacuum_data_batches(&self) -> HvResult<u64> {
-lib.rs:  1912:    pub async fn vacuum_after_open(&self) -> HvResult<u64> {
-lib.rs:  1922:    pub async fn erase_namespace(&self, namespace: u8) -> HvResult<u64> {
-lib.rs:  1952:    pub fn abandoned_operations(&self) -> Vec<AbandonedOperation> {
-lib.rs:  1962:    pub fn clear_settled_operations(&self) {
-lib.rs:  1969:    pub fn forgotten_abandonments(&self) -> u64 {
-lib.rs:  2029:pub struct MultiSpaceHandle {
-lib.rs:  2038:    pub fn open(path: String) -> HvResult<std::sync::Arc<Self>> {
-lib.rs:  2049:    pub fn open_space(&self, keys: Vec<u8>) -> HvResult<u32> {
-lib.rs:  2068:    pub fn vacuum_space(&self, id: u32) -> HvResult<()> {
-lib.rs:  2074:    pub fn space_count(&self) -> HvResult<u32> {
-lib.rs:  2081:    pub fn set_padding_policy(&self, preset: PaddingPreset) -> HvResult<()> {
-lib.rs:  2088:    pub fn space_keys(&self, id: u32) -> HvResult<Vec<u8>> {
-lib.rs:  2099:    pub fn commit(&self, id: u32, ops: Vec<WriteOp>) -> HvResult<u64> {
-lib.rs:  2129:    pub fn get(&self, id: u32, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
-lib.rs:  2136:    pub fn read_log(&self, id: u32, namespace: u8, log_id: u64) -> HvResult<Option<Vec<u8>>> {
-lib.rs:  2144:    pub fn iter_log_range(
-lib.rs:  2163:    pub fn count(&self, id: u32, namespace: u8) -> HvResult<u64> {
-lib.rs:  2175:    pub fn kv_keys(&self, id: u32, namespace: u8) -> HvResult<Vec<u8>> {
-lib.rs:  2185:    pub fn kv_keys_page(
-lib.rs:  2201:    pub fn commit_seq(&self, id: u32) -> HvResult<u64> {
-lib.rs:  2208:    pub fn vacuum_data_batches(&self, id: u32) -> HvResult<u64> {
+lib.rs: pub enum HvError {
+lib.rs: pub enum ArgonPreset {
+lib.rs: pub enum PaddingPreset {
+lib.rs: pub struct HeaderInfo {
+lib.rs: pub fn header_info(path: String) -> HvResult<HeaderInfo> {
+lib.rs: pub struct PasswordRotation {
+lib.rs: pub fn compact_known(path: String, passwords: Vec<Vec<u8>>) -> HvResult<()> {
+lib.rs: pub fn change_passwords(path: String, rotations: Vec<PasswordRotation>) -> HvResult<()> {
+lib.rs: pub enum WriteOp {
+lib.rs: pub struct LogEntry {
+lib.rs: pub enum HardeningStepKind {
+lib.rs: pub struct HardeningFailureInfo {
+lib.rs: pub struct StatsInfo {
+lib.rs:   pub fn utilization_ratio(&self) -> f64 {
+lib.rs: pub struct NamespaceCount {
+lib.rs: pub enum OperationOutcome {
+lib.rs: pub struct AbandonedOperation {
+lib.rs: pub struct IntegrityResult {
+lib.rs: pub struct SpaceHandle {
+lib.rs:   pub fn create(
+lib.rs:   pub fn add_space(path: String, password: Vec<u8>) -> HvResult<std::sync::Arc<Self>> {
+lib.rs:   pub fn open_with_keys(path: String, keys: Vec<u8>) -> HvResult<std::sync::Arc<Self>> {
+lib.rs:   pub fn space_keys(&self) -> HvResult<Vec<u8>> {
+lib.rs:   pub fn open(path: String, password: Vec<u8>) -> HvResult<std::sync::Arc<Self>> {
+lib.rs:   pub fn commit_seq(&self) -> HvResult<u64> {
+lib.rs:   pub fn commit_history(&self) -> HvResult<Vec<u64>> {
+lib.rs:   pub fn set_padding_policy(&self, preset: PaddingPreset) -> HvResult<()> {
+lib.rs:   pub fn list_namespaces(&self) -> HvResult<Vec<u8>> {
+lib.rs:   pub fn count(&self, namespace: u8) -> HvResult<u64> {
+lib.rs:   pub fn kv_keys(&self, namespace: u8) -> HvResult<Vec<u8>> {
+lib.rs:   pub fn kv_keys_page(
+lib.rs:   pub fn get(&self, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
+lib.rs:   pub fn read_log(&self, namespace: u8, log_id: u64) -> HvResult<Option<Vec<u8>>> {
+lib.rs:   pub fn iter_log_range(
+lib.rs:   pub fn commit(&self, ops: Vec<WriteOp>) -> HvResult<u64> {
+lib.rs:   pub fn stats(&self) -> HvResult<StatsInfo> {
+lib.rs:   pub fn acknowledge_hardening_error(&self) -> HvResult<()> {
+lib.rs:   pub fn verify_integrity(&self) -> HvResult<IntegrityResult> {
+lib.rs:   pub fn vacuum_data_batches(&self) -> HvResult<u64> {
+lib.rs:   pub fn vacuum_after_open(&self) -> HvResult<u64> {
+lib.rs:   pub fn erase_namespace(&self, namespace: u8) -> HvResult<u64> {
+lib.rs: pub struct AsyncSpaceHandle {
+lib.rs:   pub async fn create(
+lib.rs:   pub async fn open(path: String, password: Vec<u8>) -> HvResult<Arc<Self>> {
+lib.rs:   pub async fn add_space(path: String, password: Vec<u8>) -> HvResult<Arc<Self>> {
+lib.rs:   pub async fn open_with_keys(path: String, keys: Vec<u8>) -> HvResult<Arc<Self>> {
+lib.rs:   pub async fn space_keys(&self) -> HvResult<Vec<u8>> {
+lib.rs:   pub async fn commit_seq(&self) -> HvResult<u64> {
+lib.rs:   pub async fn commit_history(&self) -> HvResult<Vec<u64>> {
+lib.rs:   pub async fn set_padding_policy(&self, preset: PaddingPreset) -> HvResult<()> {
+lib.rs:   pub async fn list_namespaces(&self) -> HvResult<Vec<u8>> {
+lib.rs:   pub async fn count(&self, namespace: u8) -> HvResult<u64> {
+lib.rs:   pub async fn get(&self, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
+lib.rs:   pub async fn read_log(&self, namespace: u8, log_id: u64) -> HvResult<Option<Vec<u8>>> {
+lib.rs:   pub async fn iter_log_range(
+lib.rs:   pub async fn commit(&self, ops: Vec<WriteOp>) -> HvResult<u64> {
+lib.rs:   pub async fn stats(&self) -> HvResult<StatsInfo> {
+lib.rs:   pub async fn acknowledge_hardening_error(&self) -> HvResult<()> {
+lib.rs:   pub async fn verify_integrity(&self) -> HvResult<IntegrityResult> {
+lib.rs:   pub async fn vacuum_data_batches(&self) -> HvResult<u64> {
+lib.rs:   pub async fn vacuum_after_open(&self) -> HvResult<u64> {
+lib.rs:   pub async fn erase_namespace(&self, namespace: u8) -> HvResult<u64> {
+lib.rs:   pub fn abandoned_operations(&self) -> Vec<AbandonedOperation> {
+lib.rs:   pub fn clear_settled_operations(&self) {
+lib.rs:   pub fn forgotten_abandonments(&self) -> u64 {
+lib.rs: pub struct MultiSpaceHandle {
+lib.rs:   pub fn open(path: String) -> HvResult<std::sync::Arc<Self>> {
+lib.rs:   pub fn open_space(&self, keys: Vec<u8>) -> HvResult<u32> {
+lib.rs:   pub fn vacuum_space(&self, id: u32) -> HvResult<()> {
+lib.rs:   pub fn space_count(&self) -> HvResult<u32> {
+lib.rs:   pub fn set_padding_policy(&self, preset: PaddingPreset) -> HvResult<()> {
+lib.rs:   pub fn space_keys(&self, id: u32) -> HvResult<Vec<u8>> {
+lib.rs:   pub fn commit(&self, id: u32, ops: Vec<WriteOp>) -> HvResult<u64> {
+lib.rs:   pub fn get(&self, id: u32, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
+lib.rs:   pub fn read_log(&self, id: u32, namespace: u8, log_id: u64) -> HvResult<Option<Vec<u8>>> {
+lib.rs:   pub fn iter_log_range(
+lib.rs:   pub fn count(&self, id: u32, namespace: u8) -> HvResult<u64> {
+lib.rs:   pub fn kv_keys(&self, id: u32, namespace: u8) -> HvResult<Vec<u8>> {
+lib.rs:   pub fn kv_keys_page(
+lib.rs:   pub fn commit_seq(&self, id: u32) -> HvResult<u64> {
+lib.rs:   pub fn vacuum_data_batches(&self, id: u32) -> HvResult<u64> {
+
+==========================================
+dart: hidden_volume (flutter plugin)
+==========================================
+
+hidden_volume.dart: class HvSpace {
+hidden_volume.dart:   void setPaddingPolicy(ffi.PaddingPreset preset) =>
+hidden_volume.dart:   Duration scheduleDeferredVacuum({
+hidden_volume.dart:   Duration? get pendingVacuumDelay => _deferredVacuum.pendingDelay;
+hidden_volume.dart:   void close() {
+hidden_volume.dart: void changePasswords(String path, List<ffi.HvPasswordRotation> rotations) =>
+hidden_volume.dart: void compactKnown(String path, List<Uint8List> passwords) =>
+hidden_volume.dart: class HvMultiSpace {
+hidden_volume.dart:   void setPaddingPolicy(ffi.PaddingPreset preset) =>
+src/async_bindings.dart:   final String? dylibPath;
+src/async_bindings.dart:   final SendPort reply;
+src/async_bindings.dart:   final String path;
+src/async_bindings.dart:   final ArgonPreset argon;
+src/async_bindings.dart:   final int initialGarbageChunks;
+src/async_bindings.dart:   final int superblockReplicas;
+src/async_bindings.dart:   final String path;
+src/async_bindings.dart:   final SendPort reply;
+src/async_bindings.dart:   final List<HvWriteOp> ops;
+src/async_bindings.dart:   final int namespace;
+src/async_bindings.dart:   final int namespace;
+src/async_bindings.dart:   final int? start;
+src/async_bindings.dart:   final int? end;
+src/async_bindings.dart:   final int limit;
+src/async_bindings.dart:   final int namespace;
+src/async_bindings.dart:   final int namespace;
+src/async_bindings.dart:   final int namespace;
+src/async_bindings.dart:   final int logId;
+src/async_bindings.dart:   final PaddingPreset preset;
+src/async_bindings.dart:   final Object? value;
+src/async_bindings.dart:   final String kind;
+src/async_bindings.dart:   final String message;
+src/async_bindings.dart: sealed class HvOpOutcome {
+src/async_bindings.dart: class HvOpPending extends HvOpOutcome {
+src/async_bindings.dart:   String toString() => 'HvOpPending()';
+src/async_bindings.dart: class HvOpSucceeded extends HvOpOutcome {
+src/async_bindings.dart:   final Object? value;
+src/async_bindings.dart:   String toString() => 'HvOpSucceeded($value)';
+src/async_bindings.dart: class HvOpFailed extends HvOpOutcome {
+src/async_bindings.dart:   final HvException error;
+src/async_bindings.dart:   bool get mayHaveApplied => error.mayHaveApplied;
+src/async_bindings.dart:   String toString() => 'HvOpFailed(${error.kind}: ${error.message})';
+src/async_bindings.dart: class HvOpIndeterminate extends HvOpOutcome {
+src/async_bindings.dart:   final HvException error;
+src/async_bindings.dart:   String toString() => 'HvOpIndeterminate(${error.kind}: ${error.message})';
+src/async_bindings.dart: class HvOpUnknown extends HvOpOutcome {
+src/async_bindings.dart:   String toString() => 'HvOpUnknown()';
+src/async_bindings.dart: class HvOperation<T> {
+src/async_bindings.dart:   final int id;
+src/async_bindings.dart:   final Future<T> result;
+src/async_bindings.dart: class HvWorkerDeath {
+src/async_bindings.dart:   Future<Never> get future => _completer.future;
+src/async_bindings.dart:   void dispose() {
+src/async_bindings.dart:   overrideDylib(DynamicLibrary.open(config.dylibPath!));
+src/async_bindings.dart:   final SpaceHandleBindings space;
+src/async_bindings.dart:   void run<T>(T Function() body) {
+src/async_bindings.dart:   run(() => space.commit(ops));
+src/async_bindings.dart:   run(() => space.get(namespace, key));
+src/async_bindings.dart:   run(() => space.iterLogRange(
+src/async_bindings.dart:   run(() => space.commitSeq());
+src/async_bindings.dart:   run(() => space.commitHistory());
+src/async_bindings.dart:   run(() => space.count(namespace));
+src/async_bindings.dart:   run(() => space.eraseNamespace(namespace));
+src/async_bindings.dart:   run(() => space.readLog(namespace, logId));
+src/async_bindings.dart:   run(() => space.listNamespaces());
+src/async_bindings.dart:   run<Object?>(() {
+src/async_bindings.dart:   run(() => space.stats());
+src/async_bindings.dart:   run<Object?>(() {
+src/async_bindings.dart:   run(() => space.vacuumDataBatches());
+src/async_bindings.dart:   run(() => space.vacuumAfterOpen());
+src/async_bindings.dart:   run(() => space.verifyIntegrity());
+src/async_bindings.dart:   requireU64(op.logId, 'logId');
+src/async_bindings.dart:   requireU64(op.logId, 'logId');
+src/async_bindings.dart: class HvAsyncSpace {
+src/async_bindings.dart:   static HvAsyncSpace debugOverWorker({
+src/async_bindings.dart:   static void debugReapAbandonedWorker({
+src/async_bindings.dart:   HvOpOutcome outcomeOf(int opId) =>
+src/async_bindings.dart:   static Future<HvAsyncSpace> create({
+src/async_bindings.dart:   static Future<HvAsyncSpace> open({
+src/async_bindings.dart:   final Object? r;
+src/async_bindings.dart:   Future<int> commit(List<HvWriteOp> ops) async => commitOperation(ops).result;
+src/async_bindings.dart:   HvOperation<int> commitOperation(List<HvWriteOp> ops) {
+src/async_bindings.dart:   Future<List<HvLogEntry>> iterLogRange({
+src/async_bindings.dart:   requireU64(start, 'start');
+src/async_bindings.dart:   requireU64(end, 'end');
+src/async_bindings.dart:   Future<int> commitSeq() =>
+src/async_bindings.dart:   Future<List<int>> commitHistory() =>
+src/async_bindings.dart:   Future<int> count(int namespace) =>
+src/async_bindings.dart:   Future<int> eraseNamespace(int namespace) async =>
+src/async_bindings.dart:   eraseNamespaceOperation(namespace).result;
+src/async_bindings.dart:   requireU64(logId, 'logId');
+src/async_bindings.dart:   Future<void> setPaddingPolicy(PaddingPreset preset) async =>
+src/async_bindings.dart:   setPaddingPolicyOperation(preset).result;
+src/async_bindings.dart:   HvOperation<void> setPaddingPolicyOperation(PaddingPreset preset) =>
+src/async_bindings.dart:   Future<HvStatsInfo> stats() =>
+src/async_bindings.dart:   Future<void> acknowledgeHardeningError() =>
+src/async_bindings.dart:   Future<int> vacuumDataBatches() async => vacuumDataBatchesOperation().result;
+src/async_bindings.dart:   HvOperation<int> vacuumDataBatchesOperation() =>
+src/async_bindings.dart:   Future<int> vacuumAfterOpen() async => vacuumAfterOpenOperation().result;
+src/async_bindings.dart:   HvOperation<int> vacuumAfterOpenOperation() =>
+src/async_bindings.dart:   Duration scheduleDeferredVacuum({
+src/async_bindings.dart:   unawaited(vacuumAfterOpen().catchError((Object _) => 0));
+src/async_bindings.dart:   Duration? get pendingVacuumDelay => _deferredVacuum.pendingDelay;
+src/async_bindings.dart:   static Object debugCloseError(String kind, String message) =>
+src/async_bindings.dart:   Future<void> close() async {
+src/async_bindings.dart:   unawaited(done.catchError((Object _) => null).whenComplete(() {
+src/async_bindings.dart:   final Isolate isolate;
+src/async_bindings.dart:   final SendPort toWorker;
+src/async_bindings.dart:   final HvWorkerDeath death;
+src/async_bindings.dart:   void reap() {
+src/async_bindings.dart:   unawaited(
+src/async_bindings.dart:   overrideDylib(DynamicLibrary.open(dylibPath));
+src/async_bindings.dart:   return headerInfo(path);
+src/async_bindings.dart: Future<HvHeaderInfo> headerInfoAsync(String path, {String? dylibPath}) {
+src/async_bindings.dart:   overrideDylib(DynamicLibrary.open(dylibPath));
+src/async_bindings.dart:   changePasswords(path, rotations);
+src/async_bindings.dart: Future<void> changePasswordsAsync(
+src/async_bindings.dart:   overrideDylib(DynamicLibrary.open(dylibPath));
+src/async_bindings.dart:   compactKnown(path, passwords);
+src/async_bindings.dart: Future<void> compactKnownAsync(String path, List<Uint8List> passwords,
+src/bindings.dart: int requireU64(int v, String name) {
+src/bindings.dart: void overrideDylib(ffi.DynamicLibrary lib) {
+src/bindings.dart: typedef DynamicLibrary = ffi.DynamicLibrary;
+src/bindings.dart: final class RustBuffer extends ffi.Struct {
+src/bindings.dart: final class ForeignBytes extends ffi.Struct {
+src/bindings.dart: final class RustCallStatus extends ffi.Struct {
+src/bindings.dart:   final int actual;
+src/bindings.dart: void verifyAbiCompatibility() {
+src/bindings.dart: Map<String, int> get expectedMethodChecksums =>
+src/bindings.dart: void resetAbiVerificationForTest() {
+src/bindings.dart:   verifyAbiCompatibility();
+src/bindings.dart: T rustCall<T>(T Function(ffi.Pointer<RustCallStatus>) body) {
+src/bindings.dart:   int get remaining => _bytes.length - _pos;
+src/bindings.dart:   int readI32() {
+src/bindings.dart:   int readU32() {
+src/bindings.dart:   int readU64() {
+src/bindings.dart:   String readString() {
+src/bindings.dart:   void writeI32(int v) {
+src/bindings.dart:   void writeU32(int v) {
+src/bindings.dart:   void writeU64(int v) {
+src/bindings.dart:   void writeString(String s) {
+src/bindings.dart:   writeI32(bytes.length);
+src/bindings.dart:   writeRaw(bytes);
+src/bindings.dart:   void writeByteVec(Uint8List bytes) {
+src/bindings.dart:   writeI32(bytes.length);
+src/bindings.dart:   writeRaw(bytes);
+src/bindings.dart:   return rustCall<RustBuffer>((status) {
+src/bindings.dart:   ? calloc<ffi.Uint8>(1) // calloc(0) UB on some libcs
+src/bindings.dart: enum ArgonPreset {
+src/bindings.dart:   min(1),
+src/bindings.dart:   light(2),
+src/bindings.dart:   defaults(3),
+src/bindings.dart:   heavy(4);
+src/bindings.dart:   final int tag;
+src/bindings.dart: enum PaddingPreset {
+src/bindings.dart:   none(1),
+src/bindings.dart:   bucket256KiB(2),
+src/bindings.dart:   bucket1MiB(3),
+src/bindings.dart:   bucket16MiB(4);
+src/bindings.dart:   final int tag;
+src/bindings.dart: sealed class HvWriteOp {
+src/bindings.dart:   int get byteSize;
+src/bindings.dart: final class HvWriteOpPut extends HvWriteOp {
+src/bindings.dart:   final int namespace;
+src/bindings.dart:   int get byteSize => key.length + value.length;
+src/bindings.dart: final class HvWriteOpDelete extends HvWriteOp {
+src/bindings.dart:   final int namespace;
+src/bindings.dart:   int get byteSize => key.length;
+src/bindings.dart: final class HvWriteOpAppendLog extends HvWriteOp {
+src/bindings.dart:   final int namespace;
+src/bindings.dart:   final int logId;
+src/bindings.dart:   int get byteSize => payload.length;
+src/bindings.dart: final class HvWriteOpDeleteLog extends HvWriteOp {
+src/bindings.dart:   final int namespace;
+src/bindings.dart:   final int logId;
+src/bindings.dart:   int get byteSize => 0;
+src/bindings.dart: class HvHeaderInfo {
+src/bindings.dart:   final String saltHex;
+src/bindings.dart:   final int argonMCostKib;
+src/bindings.dart:   final int argonTCost;
+src/bindings.dart:   final int argonPCost;
+src/bindings.dart:   final int fileSizeBytes;
+src/bindings.dart:   String toString() => 'HvHeaderInfo(salt=${saltHex.substring(0, 16)}…, '
+src/bindings.dart: class HvLogEntry {
+src/bindings.dart:   final int logId;
+src/bindings.dart: class HvIntegrityResult {
+src/bindings.dart:   final int namespacesVerified;
+src/bindings.dart:   final int chunksVerified;
+src/bindings.dart:   final int maxDepth;
+src/bindings.dart:   final int dataBatchesVerified;
+src/bindings.dart:   String toString() =>
+src/bindings.dart: class HvNamespaceCount {
+src/bindings.dart:   final int namespace;
+src/bindings.dart:   final int count;
+src/bindings.dart: enum HvHardeningStep {
+src/bindings.dart: class HvHardeningFailure {
+src/bindings.dart:   final HvHardeningStep step;
+src/bindings.dart:   final String message;
+src/bindings.dart:   String toString() => 'HvHardeningFailure(${step.name}: $message)';
+src/bindings.dart: class HvStatsInfo {
+src/bindings.dart:   final int commitSeq;
+src/bindings.dart:   final int commitHistoryLen;
+src/bindings.dart:   final int ownedChunkCount;
+src/bindings.dart:   final int totalSlotCount;
+src/bindings.dart:   final int reusableSlotCount;
+src/bindings.dart:   final int totalEntries;
+src/bindings.dart:   final List<HvNamespaceCount> namespaceCounts;
+src/bindings.dart:   final HvHardeningFailure? hardeningFailure;
+src/bindings.dart:   double utilizationRatio() =>
+src/bindings.dart: class HvPasswordRotation {
+src/bindings.dart: class HvException implements Exception {
+src/bindings.dart:   final String kind;
+src/bindings.dart:   final String message;
+src/bindings.dart:   bool get mayHaveApplied => _kindsThatMayHaveApplied.contains(kind);
+src/bindings.dart:   String toString() => 'HvException.$kind: $message';
+src/bindings.dart: HvHeaderInfo headerInfo(String path) {
+src/bindings.dart: void changePasswords(String path, List<HvPasswordRotation> rotations) {
+src/bindings.dart:   rustCall<void>((s) {
+src/bindings.dart: void compactKnown(String path, List<Uint8List> passwords) {
+src/bindings.dart:   rustCall<void>((s) {
+src/bindings.dart: class SpaceHandleBindings {
+src/bindings.dart:   static SpaceHandleBindings create({
+src/bindings.dart:   static SpaceHandleBindings open({
+src/bindings.dart:   static SpaceHandleBindings addSpace({
+src/bindings.dart:   static SpaceHandleBindings openWithKeys({
+src/bindings.dart:   int commit(List<HvWriteOp> ops) {
+src/bindings.dart:   List<HvLogEntry> iterLogRange({
+src/bindings.dart:   int commitSeq() {
+src/bindings.dart:   List<int> commitHistory() {
+src/bindings.dart:   int count(int namespace) {
+src/bindings.dart:   int eraseNamespace(int namespace) {
+src/bindings.dart:   void setPaddingPolicy(PaddingPreset preset) {
+src/bindings.dart:   rustCall<void>((s) {
+src/bindings.dart:   HvStatsInfo stats() {
+src/bindings.dart:   void acknowledgeHardeningError() {
+src/bindings.dart:   rustCall<void>((s) {
+src/bindings.dart:   int vacuumDataBatches() {
+src/bindings.dart:   int vacuumAfterOpen() {
+src/bindings.dart:   HvIntegrityResult verifyIntegrity() {
+src/bindings.dart:   void close() {
+src/bindings.dart:   rustCall<void>((s) {
+src/bindings.dart: class MultiSpaceHandleBindings {
+src/bindings.dart:   static MultiSpaceHandleBindings open({required String path}) {
+src/bindings.dart:   int openSpace(Uint8List keys) {
+src/bindings.dart:   void vacuumSpace(int spaceId) {
+src/bindings.dart:   int spaceCount() {
+src/bindings.dart:   void setPaddingPolicy(PaddingPreset preset) {
+src/bindings.dart:   rustCall<void>((s) {
+src/bindings.dart:   int commit(int id, List<HvWriteOp> ops) {
+src/bindings.dart:   List<HvLogEntry> iterLogRange({
+src/bindings.dart:   int count(int id, int namespace) {
+src/bindings.dart:   int commitSeq(int id) {
+src/bindings.dart:   int vacuumDataBatches(int id) {
+src/bindings.dart:   void close() {
+src/bindings.dart:   rustCall<void>((s) {
+src/deferred_vacuum.dart: class DeferredVacuumWindow {
+src/deferred_vacuum.dart:   static const int maxSpanMs = 1 << 32;
+src/deferred_vacuum.dart:   static const DeferredVacuumWindow standard =
+src/deferred_vacuum.dart:   final Duration min;
+src/deferred_vacuum.dart:   final Duration max;
+src/deferred_vacuum.dart:   void validate() {
+src/deferred_vacuum.dart:   Duration pick([Random? random]) {
+src/deferred_vacuum.dart: class DeferredVacuum {
+src/deferred_vacuum.dart:   Duration? get pendingDelay => _timer == null ? null : _pending;
+src/deferred_vacuum.dart:   Duration arm(DeferredVacuumWindow window, void Function() run,
+src/deferred_vacuum.dart:   run();
+src/deferred_vacuum.dart:   void cancel() {
 
