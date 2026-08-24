@@ -837,6 +837,15 @@ pub(crate) fn read_checkpoint_chain(
     // repeats run to `MAX_CHECKPOINT_CHAIN` hops for free.
     let mut entries: usize = 0;
     let mut high_water: Option<u64> = None;
+    // `cp_seq` carries the same promise `cp_high_water` does — "same value in
+    // every chunk of one chain", says its doc — and nothing outside the tests
+    // read it. A field written by the writer, decoded by the reader and then
+    // ignored states an invariant it does not hold: two chunks from DIFFERENT
+    // checkpoints could be spliced into one walk and the result folded into a
+    // single recorded state. AEAD keeps a keyless attacker out of this, so
+    // what it refuses is a faulty or key-holding writer — the same audience as
+    // the high-water check beside it, which is enforced.
+    let mut seq: Option<u64> = None;
     let mut cur = head;
     let mut hops: u64 = 0;
     while cur != NO_RECORD {
@@ -863,6 +872,14 @@ pub(crate) fn read_checkpoint_chain(
             Ok(c) => c,
             Err(_) => return Ok(None),
         };
+        match seq {
+            None => seq = Some(cc.cp_seq),
+            Some(first) if first == cc.cp_seq => {},
+            // A link from another checkpoint. Same answer as a mismatched
+            // high-water: stop and let the caller fall back to a full scan,
+            // rather than fold two eras into one state.
+            Some(_) => return Ok(None),
+        }
         let hw = match high_water {
             None => {
                 // Checked HERE, before a single bit is set, and not by the
