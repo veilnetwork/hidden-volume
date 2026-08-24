@@ -577,7 +577,7 @@ fn merge_commit_anchors(history: &mut Vec<u64>, other: Vec<u64>) {
 /// Fold one owned (AEAD-passing) slot's plaintext into the accumulator.
 /// Shared verbatim by the full and selective (fast) scan loops so they
 /// produce identical state for the same slot set.
-fn accumulate_owned_slot(acc: &mut ScanAcc, slot: u64, pt: Plaintext) {
+fn accumulate_owned_slot(acc: &mut ScanAcc, slot: u64, mut pt: Plaintext) {
     acc.owned_slots.insert(slot);
     if pt.kind == ChunkKind::Superblock {
         push_commit_anchor(&mut acc.commit_history, pt.seq);
@@ -609,7 +609,7 @@ fn accumulate_owned_slot(acc: &mut ScanAcc, slot: u64, pt: Plaintext) {
             note_unparsable_sb(&mut acc.unparsable_sb_seq, pt.seq);
         }
         if Superblock::is_valid_encoded_len(pt.payload.len()) {
-            push_sb_candidate(&mut acc.sb_candidates, pt.seq, pt.payload);
+            push_sb_candidate(&mut acc.sb_candidates, pt.seq, std::mem::take(&mut pt.payload));
         }
     }
 }
@@ -743,7 +743,7 @@ fn find_latest_superblock_reverse(
         }
         examined += 1;
         let chunk = container.read_slot(slot)?;
-        let pt = match try_decrypt_with_options(keys, container_id, slot, &chunk, constant_time) {
+        let mut pt = match try_decrypt_with_options(keys, container_id, slot, &chunk, constant_time) {
             Some(pt) => pt,
             None => continue,
         };
@@ -763,7 +763,7 @@ fn find_latest_superblock_reverse(
             // The cap keeps the highest seqs, which is what this function
             // returns; the D2 fallback depth becomes 64, the same as
             // everywhere else.
-            push_sb_candidate(&mut sb_candidates, pt.seq, pt.payload);
+            push_sb_candidate(&mut sb_candidates, pt.seq, std::mem::take(&mut pt.payload));
         }
     }
     Ok(sb_candidates.iter().rev().find_map(|(chunk_seq, payload)| {
@@ -1185,7 +1185,7 @@ fn scan_and_recover_parallel_inner(
                 let end = (start + CHUNK_SIZE).min(total);
                 for slot in start..end {
                     let chunk = container.read_slot_concurrent(slot)?;
-                    let pt = match try_decrypt_with_options(
+                    let mut pt = match try_decrypt_with_options(
                         &keys,
                         &container_id,
                         slot,
@@ -1207,7 +1207,7 @@ fn scan_and_recover_parallel_inner(
                             note_unparsable_sb(&mut acc.unparsable_sb_seq, pt.seq);
                         }
                         if Superblock::is_valid_encoded_len(pt.payload.len()) {
-                            push_sb_candidate(&mut acc.sb_candidates, pt.seq, pt.payload);
+                            push_sb_candidate(&mut acc.sb_candidates, pt.seq, std::mem::take(&mut pt.payload));
                         }
                     }
                 }
@@ -1402,7 +1402,7 @@ fn scan_and_recover_mmap_inner(
             .try_into()
             .map_err(|_| Error::Internal("mmap slice not chunk-sized"))?;
 
-        let pt = match try_decrypt_with_options(&keys, &container_id, slot, chunk, constant_time) {
+        let mut pt = match try_decrypt_with_options(&keys, &container_id, slot, chunk, constant_time) {
             Some(pt) => pt,
             None => continue,
         };
@@ -1431,7 +1431,7 @@ fn scan_and_recover_mmap_inner(
                 note_unparsable_sb(&mut unparsable_sb_seq, pt.seq);
             }
             if Superblock::is_valid_encoded_len(pt.payload.len()) {
-                push_sb_candidate(&mut sb_candidates, pt.seq, pt.payload);
+                push_sb_candidate(&mut sb_candidates, pt.seq, std::mem::take(&mut pt.payload));
             }
         }
     }

@@ -30,18 +30,18 @@ fn scratch_path() -> std::path::PathBuf {
     p
 }
 
-/// Which side of the dispatch line an abandonment lands on is NOT testable.
-///
-/// `run_blocking` short-circuits a closure the pool has not started yet, so a
-/// create abandoned early leaves nothing — and one abandoned a moment later
-/// runs to completion and leaves a container. Whether a given timeout beats
-/// the pool is a race the test cannot arrange: the same one-nanosecond timeout
-/// produced both outcomes on this machine, minutes apart. An assertion about
-/// either side would be a coin flip wearing a test's clothes.
-///
-/// So what is pinned below is the property that holds on BOTH sides.
+// Which side of the dispatch line an abandonment lands on is NOT testable.
+//
+// `run_blocking` short-circuits a closure the pool has not started yet, so a
+// create abandoned early leaves nothing — and one abandoned a moment later
+// runs to completion and leaves a container. Whether a given timeout beats the
+// pool is a race the test cannot arrange: the same one-nanosecond timeout
+// produced both outcomes on this machine, minutes apart. An assertion about
+// either side would be a coin flip wearing a test's clothes.
+//
+// So what is pinned below is the property that holds on BOTH sides.
 
-/// And whichever side of that line an abandoned create falls on, the path is
+/// Whichever side of that line an abandoned create falls on, the path is
 /// usable afterwards.
 ///
 /// This is what a caller retrying the same path needs: if the closure did run,

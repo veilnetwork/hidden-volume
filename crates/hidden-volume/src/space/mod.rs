@@ -1517,7 +1517,7 @@ impl<'f> Space<'f> {
         {
             return Ok(CommitPayload::decode(bytes)?.roots);
         }
-        let pt = self.read_owned_chunk(self.state.superblock.root_slot)?;
+        let mut pt = self.read_owned_chunk(self.state.superblock.root_slot)?;
         if pt.kind != ChunkKind::Commit {
             return Err(Error::Malformed(
                 "superblock root_slot is not a Commit chunk",
@@ -1526,7 +1526,7 @@ impl<'f> Space<'f> {
         let cp = CommitPayload::decode(&pt.payload)?;
         // Cache the verified, AEAD-decrypted payload bytes (Zeroizing) keyed by
         // the current seq for subsequent lookups in the same commit era.
-        self.state.roots_payload_cache = Some((seq, Redacted::new(pt.payload)));
+        self.state.roots_payload_cache = Some((seq, Redacted::new(std::mem::take(&mut pt.payload))));
         Ok(cp.roots)
     }
 

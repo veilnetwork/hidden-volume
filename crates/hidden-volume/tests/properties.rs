@@ -111,7 +111,7 @@ proptest! {
 
         prop_assert_eq!(decoded.kind, kind);
         prop_assert_eq!(decoded.seq, seq);
-        prop_assert_eq!(decoded.payload, payload);
+        prop_assert_eq!(decoded.payload.as_slice(), payload.as_slice());
     }
 
     #[test]

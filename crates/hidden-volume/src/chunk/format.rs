@@ -54,6 +54,39 @@ pub struct Plaintext {
     pub payload: Vec<u8>,
 }
 
+impl Plaintext {
+    /// Overwrite the decrypted payload in place.
+    ///
+    /// Called from [`Drop`], and available on its own for a caller that wants
+    /// the bytes gone before the value is.
+    ///
+    /// What this does and does not reach: the buffer the struct is holding
+    /// NOW. Bytes left behind by an earlier reallocation of the same `Vec`
+    /// are unreachable from here, and so is anything a caller moved out —
+    /// nothing does either today, and both are why this is a hardening step
+    /// rather than a guarantee.
+    pub fn zeroize_payload(&mut self) {
+        use zeroize::Zeroize as _;
+        self.payload.zeroize();
+    }
+}
+
+impl Drop for Plaintext {
+    /// The decrypted bytes do not outlive the struct that decoded them.
+    ///
+    /// A previous audit redacted this type's `Debug` because the payload is
+    /// user plaintext — a message, an index node, a key/value pair — and any
+    /// `{:?}` wrote it into a log or a crash dump (HV-09). The same bytes were
+    /// left in the heap when the value went out of scope, waiting for the
+    /// allocator to reuse them: a crash dump, a swap file or a core taken
+    /// after the read is over could still carry the whole chunk. For a
+    /// container whose point is deniability, "already dropped" is not the same
+    /// as "gone" (report12 HV-L2).
+    fn drop(&mut self) {
+        self.zeroize_payload();
+    }
+}
+
 impl core::fmt::Debug for Plaintext {
     /// REDACTED (audit HV-09). The derive printed `payload` — the decrypted
     /// bytes of a message, an index node or a key/value pair — so any
@@ -154,6 +187,44 @@ impl Plaintext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The decrypted payload is overwritten, not merely dropped.
+    ///
+    /// A previous audit redacted this type's `Debug` because the payload is
+    /// user plaintext (HV-09); the same bytes were then left in the heap for
+    /// the allocator to hand out later, so a crash dump, a core or a swap file
+    /// taken after the read could still carry the whole chunk.
+    #[test]
+    fn the_payload_is_wiped_rather_than_abandoned() {
+        let mut pt = Plaintext {
+            kind: ChunkKind::DataBatch,
+            seq: 7,
+            payload: b"a message nobody else should read".to_vec(),
+        };
+        pt.zeroize_payload();
+        assert!(
+            pt.payload.is_empty(),
+            "the buffer has to be overwritten in place, not just released",
+        );
+    }
+
+    /// The wipe reaches a payload handed onward only if the caller takes it.
+    ///
+    /// `std::mem::take` is what the three sites that keep a payload use — the
+    /// superblock candidates and the roots cache. The struct then wipes an
+    /// empty buffer and the TAKEN one belongs to whoever asked for it, which
+    /// is the honest boundary of this hardening rather than a hole in it.
+    #[test]
+    fn a_taken_payload_leaves_the_struct_empty() {
+        let mut pt = Plaintext {
+            kind: ChunkKind::Superblock,
+            seq: 1,
+            payload: vec![9u8; 32],
+        };
+        let taken = std::mem::take(&mut pt.payload);
+        assert_eq!(taken.len(), 32, "the caller gets the bytes");
+        assert!(pt.payload.is_empty(), "and the struct keeps nothing");
+    }
 
     /// The frame must define every byte it owns, because the buffer is the
     /// caller's now and a caller reuses buffers.
