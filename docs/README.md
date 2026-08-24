@@ -134,10 +134,11 @@ append-only контейнер, примитив хранения для мес�
 
 ## Status / Статус
 
-Pre-1.0 freeze. Code-side complete; release engineering + external
-crypto review remain. See [`TASKS.md`](../TASKS.md) for the full
-backlog (project file, mixed Russian/English).
+Released, 2.x. The on-disk format is shipped and changing it is a major
+version. External crypto review is still outstanding. See
+[`TASKS.md`](../TASKS.md) for the full backlog (project file, mixed
+Russian/English).
 
-Pre-1.0 freeze. Кодовая часть готова; остаются release-инжиниринг
-и внешнее crypto-ревью. Полный backlog — в [`TASKS.md`](../TASKS.md)
+Выпущено, 2.x. Формат на диске поставлен: его изменение — мажорная
+версия. Внешнее crypto-ревью ещё впереди. Полный backlog — в [`TASKS.md`](../TASKS.md)
 (внутренний рабочий файл, смесь русского и английского).

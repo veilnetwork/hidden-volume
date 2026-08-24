@@ -279,9 +279,11 @@ jobs:
         # opt-out. The crate is silently skipped; flip the flag (or
         # remove the line) to enable publish for the next tag.
         #
-        # As of 2026-05-28 every workspace crate has `publish = false`:
-        # the project is pre-1.0 and intentionally not on crates.io yet
-        # (gated on external crypto-review — see TASKS.md v1.0). When
+        # Every workspace crate has `publish = false`: the project ships
+        # from this repository rather than crates.io, and putting it there
+        # is still gated on external crypto-review. (This used to say the
+        # project was "pre-1.0"; it is 2.x — the gate is the review, not
+        # the version.) When
         # that gate clears, the maintainer flips the flag for the
         # crates that should ship publicly and the next tag publishes
         # them in dependency order.
