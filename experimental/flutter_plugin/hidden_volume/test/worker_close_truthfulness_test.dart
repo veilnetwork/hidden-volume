@@ -18,7 +18,9 @@
 // parked inside an FFI frame on demand, and `close()` drains the in-flight call
 // first, so there is no way to catch one mid-flight through the public API.
 
+import 'dart:async';
 import 'dart:isolate';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hidden_volume/hidden_volume.dart';
@@ -154,6 +156,67 @@ void main() {
       isNot(contains('call')),
       reason: 'the isolate must be gone once its close has landed',
     );
+  });
+
+  test('a wedged worker is refused by WEIGHT, not only by count', () async {
+    // `SendPort.send` copies the message into the worker's heap
+    // synchronously, before this side awaits anything, so a batch's payload is
+    // spent at submission and held until the worker — which serves one call at
+    // a time — gets to it. The in-flight ceiling counted operations, which
+    // says nothing about that: 4096 batches of two megabytes is eight
+    // gigabytes of copies, admitted one at a time by a limit that saw only the
+    // number 4096.
+    final events = ReceivePort();
+    events.listen((dynamic _) {});
+    addTearDown(events.close);
+
+    // A worker that never answers: every submission stays in flight.
+    final live = await _spawnStubWorker(events.sendPort, answerClose: false);
+    final space = HvAsyncSpace.debugOverWorker(
+      isolate: live.isolate,
+      toWorker: live.port,
+      watch: live.watch,
+    );
+
+    // 4 MiB per batch — far below the 4096-operation ceiling in count, far
+    // above the byte ceiling in weight after sixteen of them.
+    List<HvWriteOp> batch(int i) => [
+          HvWriteOpPut(
+            namespace: 0,
+            key: Uint8List.fromList([i]),
+            value: Uint8List(4 * 1024 * 1024),
+          ),
+        ];
+
+    var admitted = 0;
+    Object? refusal;
+    for (var i = 0; i < 64; i++) {
+      try {
+        // The stub answers with something a commit reply is not, and this
+        // test is about ADMISSION, not about results — so the failures are
+        // absorbed here rather than left dangling for a later test to trip on.
+        unawaited(space.commitOperation(batch(i)).result.catchError((
+          Object _,
+        ) => 0));
+        admitted++;
+      } catch (e) {
+        refusal = e;
+        break;
+      }
+    }
+
+    expect(
+      refusal,
+      isA<StateError>(),
+      reason: 'the budget has to refuse, not accumulate copies',
+    );
+    expect(
+      admitted,
+      lessThan(64),
+      reason: 'sixty-four 4 MiB batches is 256 MiB of pending copies, and the '
+          'operation count never came near its own ceiling',
+    );
+    expect('$refusal', contains('payload bytes'));
   });
 
   test('CONTROL: a worker that DOES answer its close is shut down cleanly, '
