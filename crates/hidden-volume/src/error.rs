@@ -190,6 +190,21 @@ pub enum Error {
     #[error("operation cancelled")]
     Cancelled,
 
+    /// A `run` closure asked for another `run` on a handle that shares its
+    /// permit, from inside itself.
+    ///
+    /// The async wrappers admit one operation at a time across a handle and
+    /// every clone of it, and the permit is taken before the closure starts.
+    /// A nested call therefore waits for a permit its own caller is holding:
+    /// a genuine hang that no timeout unwinds, reachable from entirely safe
+    /// code. Refusing says so instead.
+    ///
+    /// There is nothing a nested call could reach that the outer one cannot —
+    /// the closure already holds the handle it would ask through — so the fix
+    /// on the caller's side is to do the whole job in one closure.
+    #[error("reentrant run: this closure already holds the handle's operation permit")]
+    ReentrantRun,
+
     /// A namespace's stored shape is not what the called API
     /// expects. Currently raised by `iter_log_*` / `read_log` when the
     /// namespace is a regular KV namespace (entries don't match the
