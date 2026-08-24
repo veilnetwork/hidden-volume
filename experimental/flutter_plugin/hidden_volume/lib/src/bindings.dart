@@ -766,6 +766,19 @@ enum PaddingPreset {
 sealed class HvWriteOp {
   const HvWriteOp();
   void _write(_Writer w);
+
+  /// Roughly what this op costs in bytes when the batch is sent to the worker.
+  ///
+  /// `SendPort.send` copies the whole message into the receiving isolate's
+  /// heap SYNCHRONOUSLY, before the caller awaits anything, so a batch's
+  /// payload is spent the moment it is submitted. The async handle's
+  /// in-flight ceiling counts operations, which says nothing about that: 4096
+  /// batches of two megabytes is eight gigabytes of copies, admitted one at a
+  /// time by a limit that saw only the number 4096.
+  ///
+  /// The keys and values, not the framing — a few bytes of tag and length per
+  /// op are noise beside the payloads this exists to bound.
+  int get byteSize;
 }
 
 /// Insert or replace a KV entry in `namespace`.
@@ -775,6 +788,9 @@ final class HvWriteOpPut extends HvWriteOp {
   final int namespace;
   final Uint8List key;
   final Uint8List value;
+
+  @override
+  int get byteSize => key.length + value.length;
 
   @override
   void _write(_Writer w) {
@@ -791,6 +807,9 @@ final class HvWriteOpDelete extends HvWriteOp {
   const HvWriteOpDelete({required this.namespace, required this.key});
   final int namespace;
   final Uint8List key;
+
+  @override
+  int get byteSize => key.length;
 
   @override
   void _write(_Writer w) {
@@ -810,6 +829,9 @@ final class HvWriteOpAppendLog extends HvWriteOp {
   final Uint8List payload;
 
   @override
+  int get byteSize => payload.length;
+
+  @override
   void _write(_Writer w) {
     w
       ..writeI32(3)
@@ -824,6 +846,9 @@ final class HvWriteOpDeleteLog extends HvWriteOp {
   const HvWriteOpDeleteLog({required this.namespace, required this.logId});
   final int namespace;
   final int logId;
+
+  @override
+  int get byteSize => 0;
 
   @override
   void _write(_Writer w) {

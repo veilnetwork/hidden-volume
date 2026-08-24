@@ -679,6 +679,28 @@ class HvAsyncSpace {
   /// the oldest pending entry said nothing and lost the record.
   static const int _maxInFlight = 4096;
 
+  /// How many payload bytes may be in flight at once.
+  ///
+  /// [_maxInFlight] counts operations, and an operation's cost is whatever the
+  /// caller put in it. `SendPort.send` copies the message into the worker's
+  /// heap SYNCHRONOUSLY, before this side awaits anything, so those bytes are
+  /// spent at submission and held until the worker — which serves one call at
+  /// a time — gets to them. 4096 batches of two megabytes is eight gigabytes
+  /// of copies, admitted one at a time by a ceiling that saw only the number
+  /// 4096.
+  ///
+  /// 64 MiB is far above any real batch and far below what a phone can lose;
+  /// like the count, it is a ceiling rather than a working limit, and reaching
+  /// it means the worker is wedged or is being outrun.
+  static const int _maxInFlightBytes = 64 * 1024 * 1024;
+
+  /// Payload bytes admitted and not yet answered.
+  int _inFlightBytes = 0;
+
+  /// Payload bytes per live operation, so the release subtracts exactly what
+  /// the admission added even if the caller mutated its list afterwards.
+  final Map<int, int> _inFlightBytesById = <int, int>{};
+
   /// What became of the operation [opId] (audit HV-07).
   ///
   /// The one thing a `.timeout(...)` on any of the calls below leaves
@@ -697,12 +719,21 @@ class HvAsyncSpace {
   /// File an operation as pending. Called after the [_maxInFlight] check in
   /// [_submit] and before the send, so an id exists in exactly one of the two
   /// maps from the moment it is issued.
-  void _admit(int opId) {
+  void _admit(int opId, [int payloadBytes = 0]) {
     _inFlight[opId] = const HvOpPending();
+    if (payloadBytes > 0) {
+      _inFlightBytesById[opId] = payloadBytes;
+      _inFlightBytes += payloadBytes;
+    }
   }
 
   void _record(int opId, HvOpOutcome outcome) {
     _inFlight.remove(opId);
+    // Released by the number this id was ADMITTED with. Re-measuring the
+    // caller's list here would let a batch mutated after submission release
+    // more or less than it took, and the budget would drift either way.
+    final held = _inFlightBytesById.remove(opId);
+    if (held != null) _inFlightBytes -= held;
     _finished[opId] = outcome;
     while (_finished.length > _outcomeHistory) {
       _finished.remove(_finished.keys.first);
@@ -820,7 +851,8 @@ class HvAsyncSpace {
   /// the future rather than by whoever awaits it — so a caller who
   /// walks away (a `.timeout(...)`, a widget disposed mid-flight) still
   /// leaves a record behind (audit HV-07).
-  HvOperation<T> _submit<T>(_Request Function(SendPort reply) build) {
+  HvOperation<T> _submit<T>(_Request Function(SendPort reply) build,
+      {int payloadBytes = 0}) {
     if (_closed) {
       throw StateError('HvAsyncSpace is closed');
     }
@@ -831,8 +863,18 @@ class HvAsyncSpace {
           'HvAsyncSpace has $_maxInFlight operations in flight; the worker '
           'serves one at a time, so it is either wedged or being outrun');
     }
+    // The same refusal by weight. A count says nothing about what the copies
+    // cost, and the copy happens at send — see [_maxInFlightBytes]. Checked
+    // before the id for the same reason as the count above.
+    if (_inFlightBytes + payloadBytes > _maxInFlightBytes) {
+      throw StateError(
+          'HvAsyncSpace has $_inFlightBytes payload bytes in flight and this '
+          'submission adds $payloadBytes, past the ${_maxInFlightBytes}-byte '
+          'ceiling; the worker serves one call at a time, so it is either '
+          'wedged or being outrun');
+    }
     final opId = _nextOpId++;
-    _admit(opId);
+    _admit(opId, payloadBytes);
     final result = _run<T>(opId, build);
     return HvOperation<T>(opId, result);
   }
@@ -892,7 +934,14 @@ class HvAsyncSpace {
   /// ```
   HvOperation<int> commitOperation(List<HvWriteOp> ops) {
     _requireLowerableIds(ops);
-    return _submit<int>((reply) => _CommitRequest(ops: ops, reply: reply));
+    var payloadBytes = 0;
+    for (final op in ops) {
+      payloadBytes += op.byteSize;
+    }
+    return _submit<int>(
+      (reply) => _CommitRequest(ops: ops, reply: reply),
+      payloadBytes: payloadBytes,
+    );
   }
 
   /// Read a KV value, or null if absent.
