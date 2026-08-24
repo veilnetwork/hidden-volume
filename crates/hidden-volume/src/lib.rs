@@ -130,14 +130,16 @@
 //!
 //! # Status
 //!
-//! Pre-1.0 freeze. v0.1 through v0.7 closed (foundation, KV +
-//! transactions, repack/integrity, locking + multi-device, hardening +
-//! audits, performance, async wrapper). v0.8 FFI scaffold (sync +
-//! async sibling surfaces) shipped; iOS xcframework / Android
-//! `.aar` / Flutter sample app remain platform-toolchain-bound.
-//! Remaining v1.0 work is release engineering + external crypto
-//! review. The async wrapper lives in the sibling
-//! `hidden-volume-async` crate; FFI bindings in `hidden-volume-ffi`.
+//! Released, 2.x. The on-disk format is shipped: containers written by
+//! earlier 2.x builds are opened by this one, and anything that changes
+//! their layout is a major version rather than a cleanup. External
+//! crypto review is still outstanding, and that is the one part of the
+//! old "remaining v1.0 work" note that survives — the rest of it
+//! described a project that had not been released, which stopped being
+//! true at 2.0.
+//!
+//! The async wrapper lives in the sibling `hidden-volume-async` crate;
+//! FFI bindings in `hidden-volume-ffi`.
 //! See `TASKS.md` for the live backlog and `CHANGELOG.md` for the
 //! per-pass cleanup history.
 //!

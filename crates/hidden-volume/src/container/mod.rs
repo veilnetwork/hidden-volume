@@ -33,9 +33,12 @@ use crate::{Error, Result};
 /// entirely (even with FRU `..Default::default()`), forcing every
 /// caller into a `let mut opts = ContainerOptions::default(); opts.x = ...`
 /// pattern. Instead we accept that adding fields here is a major
-/// (post-1.0) breaking change and budget for it via the
-/// `docs/en/reference/semver.md` policy. Until v1.0 we add fields freely; after
-/// v1.0 a new field is a 2.0 ticket.
+/// breaking change and budget for it via the
+/// `docs/en/reference/semver.md` policy. That budget is now SPENT: the crate
+/// is 2.x and published, so a new field here is a major bump, not a free
+/// addition. The sentence this replaces said fields could be added freely
+/// "until v1.0" — read at 2.0.2 it invited exactly the silent break it was
+/// written to prevent.
 #[derive(Debug, Clone)]
 pub struct ContainerOptions {
     /// Argon2id KDF parameters baked into the new container's header.
