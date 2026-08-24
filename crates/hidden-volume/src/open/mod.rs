@@ -409,6 +409,14 @@ fn push_sb_candidate(
     seq: u64,
     payload: Vec<u8>,
 ) {
+    // No `debug_assert!` that same-seq payloads are bit-equal, though the
+    // accumulation sites cited one for four audit passes. It cannot exist here:
+    // a container written by an older build legitimately holds two different
+    // payloads under one seq — `a_repeated_seq_keeps_the_later_payload` is
+    // exactly that shape — so asserting it would abort a debug build for
+    // reading a file this library must read. The condition is a writer-bug
+    // signal only for containers THIS build wrote, and this function cannot
+    // tell the two apart.
     candidates.insert(seq, payload);
     while candidates.len() > MAX_SB_CANDIDATES {
         candidates.pop_first();
@@ -573,11 +581,18 @@ fn accumulate_owned_slot(acc: &mut ScanAcc, slot: u64, pt: Plaintext) {
     acc.owned_slots.insert(slot);
     if pt.kind == ChunkKind::Superblock {
         push_commit_anchor(&mut acc.commit_history, pt.seq);
-        // First-wins on tie. Audit pass 7 (D4): same-seq replicas MUST
-        // be bit-equal by construction — `commit_tx` writes the same
-        // `new_sb` payload N times. The `debug_assert!` catches a
-        // writer-bug regression in tests; release builds keep
-        // first-wins with no cost.
+        // LAST writer wins on a tie, and this comment used to say the
+        // opposite. Every path here funnels into `push_sb_candidate`,
+        // whose `BTreeMap::insert` replaces — see its doc for why that
+        // is the right answer: slots are append-only, so the later
+        // entry is the later commit, and first-wins reverted to one
+        // that had already returned Ok.
+        //
+        // It also promised a `debug_assert!` catching a writer bug that
+        // produces same-seq-different-payload superblocks. There is
+        // none, and there cannot be one here: an older build's container
+        // holds exactly that shape legitimately, so the assert would
+        // abort a debug build for reading a file this library must read.
         //
         // Length-gate to the two canonical superblock lengths (48 short
         // / 56 long-with-checkpoint) — a memory bound (audit pass 20):
@@ -1402,8 +1417,9 @@ fn scan_and_recover_mmap_inner(
             // a few hundred entries for the same input (report13 HV13-L1).
             push_commit_anchor(&mut commit_history, pt.seq);
             // Audit pass 7 (D4): see sequential variant for rationale.
-            // `debug_assert!` catches a writer-bug regression that
-            // produces same-seq-different-payload SBs.
+            // The tie goes to the LAST writer, and the `debug_assert!`
+            // this used to cite does not exist — an older container holds
+            // same-seq-different-payload legitimately, so it cannot.
             //
             // Length-gate the retained payload to the two canonical
             // superblock lengths (48 / 56) — same memory bound the
