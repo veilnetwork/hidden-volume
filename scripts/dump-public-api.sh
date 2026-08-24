@@ -119,14 +119,22 @@ for crate in "${CRATES[@]}"; do
         #   ^pub use             — re-exports
         # Strip trailing `{` from struct/enum/impl headers for cleanliness.
         awk -v fname="$rel" '
-            # top-level pub item declarations (one per line, no leading whitespace)
-            /^pub (fn|async fn|struct|enum|trait|const|static|type|mod|use)/ {
-                print fname ":  " NR ":" $0
-                next
-            }
-            # methods inside impl (one indent level)
-            /^[[:space:]]+pub (fn|async fn|const)/ {
-                print fname ":  " NR ":" $0
+            # NO LINE NUMBER. It used to be part of every entry, which made a
+            # COMMENT a public-API change: adding three lines of prose shifted
+            # every signature below it and the gate reported eighty-eight
+            # changed items. The snapshot was then regenerated mechanically to
+            # get back to green, and a real signature change would have arrived
+            # inside that noise looking exactly like the rest of it. The file
+            # and the declaration are what the gate is about.
+            #
+            # Indentation-tolerant on BOTH patterns now: a `pub struct` inside
+            # an inline `mod` block never appeared at all, so adding, renaming
+            # or removing one passed silently. Nothing in the tree is declared
+            # that way today, which is why this cost nothing to fix and would
+            # have cost the whole gate to discover later.
+            /^[[:space:]]*pub (fn|async fn|struct|enum|trait|const|static|type|mod|use)/ {
+                sub(/^[[:space:]]+/, "  ")
+                print fname ": " $0
                 next
             }
         ' "$file" >>"$TMP"
@@ -134,6 +142,63 @@ for crate in "${CRATES[@]}"; do
 
     echo >>"$TMP"
 done
+
+# The Flutter plugin's Dart surface.
+#
+# Not Rust and therefore not in the loop above, and it is what the app
+# actually compiles against: xVeil imports this package directly. A rename
+# here breaks that build, and until now the API gate could not see it — the
+# snapshot described four Rust crates and called itself the public API.
+DART_LIB="$ROOT/experimental/flutter_plugin/hidden_volume/lib"
+echo "==========================================" >>"$TMP"
+echo "dart: hidden_volume (flutter plugin)" >>"$TMP"
+echo "==========================================" >>"$TMP"
+echo >>"$TMP"
+if [[ -d "$DART_LIB" ]]; then
+    while IFS= read -r file; do
+        rel="${file#$DART_LIB/}"
+        # Public means "not underscore-prefixed", which is the whole of Dart's
+        # visibility rule. Declarations only: types, top-level functions and
+        # members, skipping bodies and comments.
+        awk -v fname="$rel" '
+            /^[[:space:]]*\/\// { next }
+            /^[[:space:]]*(abstract |final |sealed |base )*(class|enum|mixin|extension|typedef) [A-Z]/ {
+                sub(/^[[:space:]]+/, "  ")
+                print fname ": " $0
+                next
+            }
+            # Methods and top-level functions: a return type, a public name,
+            # then a parameter list or type arguments.
+            /^[[:space:]]*(static |external )*[A-Za-z_<>?, ]+ [a-z][A-Za-z0-9_]*[(<]/ {
+                if ($0 ~ /[[:space:]]_[a-zA-Z]/) next
+                sub(/^[[:space:]]+/, "  ")
+                print fname ": " $0
+                next
+            }
+            # Getters. `int get byteSize => ...` has no parameter list, so the
+            # rule above walked straight past it — and a getter is API in
+            # exactly the way a method is. Found by checking the extractor
+            # against three members added the same day: it saw one of them.
+            /^[[:space:]]*(static |external )*[A-Za-z_<>?, ]+ get [a-z][A-Za-z0-9_]*/ {
+                sub(/^[[:space:]]+/, "  ")
+                print fname ": " $0
+                next
+            }
+            # Constants and fields, which carry values callers depend on —
+            # `static const int defaultMaxConcurrentServes = 8` is a promise
+            # about behaviour, not an implementation detail.
+            /^[[:space:]]*(static )*(const|final) [A-Za-z_<>?, ]+ [a-z][A-Za-z0-9_]*[[:space:]]*[=;]/ {
+                if ($0 ~ /[[:space:]]_[a-zA-Z]/) next
+                sub(/^[[:space:]]+/, "  ")
+                print fname ": " $0
+                next
+            }
+        ' "$file" >>"$TMP"
+    done < <(find "$DART_LIB" -name '*.dart' | LC_ALL=C sort)
+else
+    echo "# (plugin not present)" >>"$TMP"
+fi
+echo >>"$TMP"
 
 if [[ "${1:-}" == "--check" ]]; then
     # Strip the volatile `Captured:` line before comparing — every
