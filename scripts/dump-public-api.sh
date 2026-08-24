@@ -158,15 +158,37 @@ if [[ -d "$DART_LIB" ]]; then
     while IFS= read -r file; do
         rel="${file#$DART_LIB/}"
         # Public means "not underscore-prefixed", which is the whole of Dart's
-        # visibility rule. Declarations only: types, top-level functions and
-        # members, skipping bodies and comments.
+        # visibility rule — but only half of what makes a line API. The other
+        # half is WHERE it sits, and the first version of this extractor had
+        # no idea: it took any `final Type name;` at any indentation, so the
+        # snapshot filled up with private classes' fields, statements lifted
+        # out of function bodies and method locals. 257 lines, most of them
+        # not surface at all — a baseline that noisy reddens on refactors
+        # while staying blind to real additions.
+        #
+        # Brace depth is the discriminator, not indentation: a type sits at
+        # depth 0, its members at depth 1, anything inside a body at 2 or
+        # more. Members of a private type are skipped whole.
         awk -v fname="$rel" '
+            {
+                start_depth = depth
+                t = $0; ob = gsub(/\{/, "{", t)
+                u = $0; cb = gsub(/\}/, "}", u)
+                depth += ob - cb
+                if (depth <= 0) { depth = 0; private_type = 0 }
+            }
             /^[[:space:]]*\/\// { next }
-            /^[[:space:]]*(abstract |final |sealed |base )*(class|enum|mixin|extension|typedef) [A-Z]/ {
+            start_depth == 0 && /^[[:space:]]*(abstract |final |sealed |base )*(class|enum|mixin|extension|typedef) [A-Za-z_]/ {
+                match($0, /(class|enum|mixin|extension|typedef)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/)
+                decl = substr($0, RSTART, RLENGTH)
+                sub(/^[a-z]+[[:space:]]+/, "", decl)
+                private_type = (substr(decl, 1, 1) == "_")
+                if (private_type) next
                 sub(/^[[:space:]]+/, "  ")
                 print fname ": " $0
                 next
             }
+            start_depth > 1 || private_type { next }
             # Methods and top-level functions: a return type, a public name,
             # then a parameter list or type arguments.
             /^[[:space:]]*(static |external )*[A-Za-z_<>?, ]+ [a-z][A-Za-z0-9_]*[(<]/ {
@@ -184,11 +206,14 @@ if [[ -d "$DART_LIB" ]]; then
                 print fname ": " $0
                 next
             }
-            # Constants and fields, which carry values callers depend on —
+            # Fields and constants, which carry values callers depend on —
             # `static const int defaultMaxConcurrentServes = 8` is a promise
-            # about behaviour, not an implementation detail.
-            /^[[:space:]]*(static )*(const|final) [A-Za-z_<>?, ]+ [a-z][A-Za-z0-9_]*[[:space:]]*[=;]/ {
+            # about behaviour, not an implementation detail. `const|final` is
+            # NOT required: a settable `static Object? debugSpawnFailure;` is
+            # just as reachable, and demanding it hid every seam of that kind.
+            /^[[:space:]]*(static )*(const |final |late |covariant )*[A-Za-z_][A-Za-z0-9_<>?, ]* [a-z][A-Za-z0-9_]*[[:space:]]*[=;]/ {
                 if ($0 ~ /[[:space:]]_[a-zA-Z]/) next
+                if ($0 ~ /^[[:space:]]*(return|await|throw|yield|assert|if|for|while|case)[[:space:]]/) next
                 sub(/^[[:space:]]+/, "  ")
                 print fname ": " $0
                 next
