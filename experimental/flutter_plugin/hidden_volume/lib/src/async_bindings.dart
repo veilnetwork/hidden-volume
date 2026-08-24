@@ -366,6 +366,12 @@ class HvOperation<T> {
 /// Public (rather than library-private) only so a test can watch a stub worker
 /// of its own — see [HvAsyncSpace.debugOverWorker]. Not part of the supported
 /// API.
+/// Signature of [HvAsyncSpace.debugOnSpawnStart]. Named rather than written
+/// inline so the declaration fits one line — the API-surface extractor reads
+/// line by line, and a wrapped declaration is one it cannot see.
+typedef HvSpawnStartHook = void Function(
+    HvWorkerDeath death, ReceivePort bootReply);
+
 class HvWorkerDeath {
   HvWorkerDeath() {
     errorPort.listen((message) {
@@ -809,19 +815,47 @@ class HvAsyncSpace {
     return space;
   }
 
+  /// Test seam (report12 HV-M4): makes the spawn fail, which is the one
+  /// step on this path that happens before anything is watchable. Production
+  /// never sets it — `Isolate.spawn` fails on its own on a memory-pressed
+  /// device, and that is the case this stands in for.
+  @visibleForTesting
+  static Object? debugSpawnFailure;
+
+  /// Test seam (report12 HV-M4): handed the watcher and the bootstrap port
+  /// as soon as they exist, so a test can ask what became of them after a
+  /// failed spawn. Production never sets it.
+  @visibleForTesting
+  static HvSpawnStartHook? debugOnSpawnStart;
+
   static Future<HvAsyncSpace> _spawn(
       _Bootstrap boot, ReceivePort bootReply, String? dylibPath) async {
     // Watch it BEFORE it can die (audit HV-09): a worker that fails while
     // opening the container fails FAST — usually on its very first FFI call —
     // and a watcher attached afterwards would miss exactly that case.
     final death = HvWorkerDeath();
-    final isolate = await Isolate.spawn<_SpawnConfig>(
-      _workerEntry,
-      _SpawnConfig(dylibPath: dylibPath, bootstrap: boot),
-      errorsAreFatal: true,
-      onExit: death.exitPort.sendPort,
-      onError: death.errorPort.sendPort,
-    );
+    debugOnSpawnStart?.call(death, bootReply);
+    final Isolate isolate;
+    try {
+      final forced = debugSpawnFailure;
+      if (forced != null) throw forced;
+      isolate = await Isolate.spawn<_SpawnConfig>(
+        _workerEntry,
+        _SpawnConfig(dylibPath: dylibPath, bootstrap: boot),
+        errorsAreFatal: true,
+        onExit: death.exitPort.sendPort,
+        onError: death.errorPort.sendPort,
+      );
+    } catch (_) {
+      // The spawn itself failed, so there is no isolate to kill — but the
+      // watcher's two ports and the bootstrap port already exist, and every
+      // path BELOW this one closes them. Left open they last the life of the
+      // PROCESS and each keeps the event loop alive, so a caller that retries
+      // a failing open accumulates them without bound (report12 HV-M4).
+      bootReply.close();
+      death.dispose();
+      rethrow;
+    }
     Object? firstReply;
     try {
       firstReply = await Future.any<Object?>([bootReply.first, death.future]);

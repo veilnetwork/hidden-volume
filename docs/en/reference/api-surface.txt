@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-24T21:56:41Z
+# Captured: 2026-08-24T21:56:47Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -480,6 +480,7 @@ src/async_bindings.dart:   String toString() => 'HvOpUnknown()';
 src/async_bindings.dart: class HvOperation<T> {
 src/async_bindings.dart:   final int id;
 src/async_bindings.dart:   final Future<T> result;
+src/async_bindings.dart: typedef HvSpawnStartHook = void Function(
 src/async_bindings.dart: class HvWorkerDeath {
 src/async_bindings.dart:   final exitPort = ReceivePort();
 src/async_bindings.dart:   final errorPort = ReceivePort();
@@ -496,6 +497,8 @@ src/async_bindings.dart:   static Duration closeTimeout = const Duration(seconds
 src/async_bindings.dart:   HvOpOutcome outcomeOf(int opId) =>
 src/async_bindings.dart:   static Future<HvAsyncSpace> create({
 src/async_bindings.dart:   static Future<HvAsyncSpace> open({
+src/async_bindings.dart:   static Object? debugSpawnFailure;
+src/async_bindings.dart:   static HvSpawnStartHook? debugOnSpawnStart;
 src/async_bindings.dart:   Future<int> commit(List<HvWriteOp> ops) async => commitOperation(ops).result;
 src/async_bindings.dart:   HvOperation<int> commitOperation(List<HvWriteOp> ops) {
 src/async_bindings.dart:   Future<List<HvLogEntry>> iterLogRange({
