@@ -336,6 +336,15 @@ impl DecoyPool {
     /// durable part — the cost is linear in the file's WIDTH — and the
     /// absolute microseconds are not.
     ///
+    /// Reproduced 2026-08-24 against audit report12 HV-M3, which asks for the
+    /// hierarchical index this doc declines: 3.3 µs/draw at 1 M slots,
+    /// 9.5 µs at 4 M, 40.7 µs at 16.8 M — the table above, within noise. The
+    /// degenerate single transaction it prices (12,500 draws at the hard cap)
+    /// came to 508 ms. Run it with
+    /// `cargo test -p hidden-volume --release measure_sample_distinct --
+    /// --ignored --nocapture`; the decision below is unchanged, and the
+    /// measurement is what makes it a decision rather than an assumption.
+    ///
     /// Sixty-four draws is one ILLUSTRATIVE commit — one that reuses
     /// thirty-two slots and churns thirty-two. It is not a worst case, and
     /// nothing caps a commit at sixty-four draws. The real bound, traced
@@ -653,6 +662,35 @@ mod tests {
     /// half silently biases the draw. Checked against the sorted list at
     /// every rank, across a bitmap wide enough to span several words.
     #[test]
+    /// MEASUREMENT, not an assertion about speed: what one churn's victim
+    /// draw actually costs on a pool the size the report is about. Printed so
+    /// the number decides whether a hierarchical rank-select is worth its
+    /// invariants.
+    #[test]
+    #[ignore = "measurement"]
+    fn measure_sample_distinct_cost() {
+        for &(slots, n) in &[
+            (1_000_000u64, 100usize),
+            (4_000_000, 1_000),
+            (16_777_216, 12_500),
+        ] {
+            // A pool holding every other slot: half the bitmap set, which is
+            // the worst realistic density for a linear scan.
+            let recorded: Vec<u64> = (0..slots).step_by(2).collect();
+            let mut p = DecoyPool::from_recorded(recorded, slots);
+            let t0 = std::time::Instant::now();
+            let got = p.sample_distinct(n).unwrap();
+            let dt = t0.elapsed();
+            println!(
+                "MEASURED slots={slots} pool={} draws={n} -> {:?} ({:?}/draw)",
+                p.len(),
+                dt,
+                dt / n as u32,
+            );
+            assert_eq!(got.len(), n);
+        }
+    }
+
     fn select_agrees_with_the_sorted_order() {
         let slots: Vec<u64> = vec![0, 1, 63, 64, 65, 127, 128, 200, 511];
         let p = DecoyPool::from_recorded(slots.clone(), 512);
