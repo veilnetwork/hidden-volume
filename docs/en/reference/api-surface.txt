@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-24T20:02:01Z
+# Captured: 2026-08-24T20:29:36Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -41,6 +41,7 @@ chunk/format.rs: pub const MAGIC: [u8; 4] = *b"HVC1";
 chunk/format.rs: pub const PLAINTEXT_HEADER_LEN: usize = 4 + 1 + 1 + 8 + 2;
 chunk/format.rs: pub const PAYLOAD_CAP: usize = PLAINTEXT_LEN - PLAINTEXT_HEADER_LEN;
 chunk/format.rs: pub struct Plaintext {
+chunk/format.rs:   pub fn zeroize_payload(&mut self) {
 chunk/format.rs:   pub fn encode(&self) -> Result<[u8; PLAINTEXT_LEN]> {
 chunk/format.rs:   pub fn decode(buf: &[u8]) -> Result<Self> {
 chunk/kind.rs: pub enum ChunkKind {

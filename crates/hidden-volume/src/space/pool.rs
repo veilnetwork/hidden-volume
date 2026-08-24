@@ -661,7 +661,6 @@ mod tests {
     /// `select` has to walk words and then bits; an off-by-one in either
     /// half silently biases the draw. Checked against the sorted list at
     /// every rank, across a bitmap wide enough to span several words.
-    #[test]
     /// MEASUREMENT, not an assertion about speed: what one churn's victim
     /// draw actually costs on a pool the size the report is about. Printed so
     /// the number decides whether a hierarchical rank-select is worth its
@@ -691,6 +690,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn select_agrees_with_the_sorted_order() {
         let slots: Vec<u64> = vec![0, 1, 63, 64, 65, 127, 128, 200, 511];
         let p = DecoyPool::from_recorded(slots.clone(), 512);
