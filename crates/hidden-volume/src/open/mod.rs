@@ -609,7 +609,11 @@ fn accumulate_owned_slot(acc: &mut ScanAcc, slot: u64, mut pt: Plaintext) {
             note_unparsable_sb(&mut acc.unparsable_sb_seq, pt.seq);
         }
         if Superblock::is_valid_encoded_len(pt.payload.len()) {
-            push_sb_candidate(&mut acc.sb_candidates, pt.seq, std::mem::take(&mut pt.payload));
+            push_sb_candidate(
+                &mut acc.sb_candidates,
+                pt.seq,
+                std::mem::take(&mut pt.payload),
+            );
         }
     }
 }
@@ -743,7 +747,8 @@ fn find_latest_superblock_reverse(
         }
         examined += 1;
         let chunk = container.read_slot(slot)?;
-        let mut pt = match try_decrypt_with_options(keys, container_id, slot, &chunk, constant_time) {
+        let mut pt = match try_decrypt_with_options(keys, container_id, slot, &chunk, constant_time)
+        {
             Some(pt) => pt,
             None => continue,
         };
@@ -1207,7 +1212,11 @@ fn scan_and_recover_parallel_inner(
                             note_unparsable_sb(&mut acc.unparsable_sb_seq, pt.seq);
                         }
                         if Superblock::is_valid_encoded_len(pt.payload.len()) {
-                            push_sb_candidate(&mut acc.sb_candidates, pt.seq, std::mem::take(&mut pt.payload));
+                            push_sb_candidate(
+                                &mut acc.sb_candidates,
+                                pt.seq,
+                                std::mem::take(&mut pt.payload),
+                            );
                         }
                     }
                 }
@@ -1402,10 +1411,11 @@ fn scan_and_recover_mmap_inner(
             .try_into()
             .map_err(|_| Error::Internal("mmap slice not chunk-sized"))?;
 
-        let mut pt = match try_decrypt_with_options(&keys, &container_id, slot, chunk, constant_time) {
-            Some(pt) => pt,
-            None => continue,
-        };
+        let mut pt =
+            match try_decrypt_with_options(&keys, &container_id, slot, chunk, constant_time) {
+                Some(pt) => pt,
+                None => continue,
+            };
         owned_slots.insert(slot);
 
         if pt.kind == ChunkKind::Superblock {

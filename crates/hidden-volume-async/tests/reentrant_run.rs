@@ -38,8 +38,7 @@ async fn a_nested_run_is_refused_rather_than_deadlocked() {
     // Exactly the shape the doc calls out as fatal.
     let nested = c
         .run(move |_container| {
-            tokio::runtime::Handle::current()
-                .block_on(async { clone.run(|_c| Ok(7u32)).await })
+            tokio::runtime::Handle::current().block_on(async { clone.run(|_c| Ok(7u32)).await })
         })
         .await;
 
