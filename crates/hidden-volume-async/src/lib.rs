@@ -83,6 +83,55 @@ pub struct AsyncContainer {
     ops: Arc<OpLedger>,
 }
 
+
+/// Which operation permits this THREAD is currently holding, innermost last.
+///
+/// A `run` closure executes on a blocking thread, and a nested `run` driven
+/// from inside it — `Handle::current().block_on(clone.run(..))` — is first
+/// polled on that same thread. So the one place a nested call can be seen
+/// before it goes to sleep on a permit is a thread-local, which is why this
+/// is one rather than the task-local the doc on `AsyncSpace::run` says std
+/// does not surface.
+///
+/// Identified by the ledger's address, not by a bare flag: handles that share
+/// a permit share one `Arc<OpLedger>`, and that is exactly the set of calls
+/// that can deadlock each other. A closure that reaches for a DIFFERENT
+/// container is not reentrant and must not be refused.
+mod reentrancy {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static HELD: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn holds(ledger: usize) -> bool {
+        HELD.with(|h| h.borrow().contains(&ledger))
+    }
+
+    /// Marks `ledger` held for as long as the returned guard lives.
+    pub(super) fn enter(ledger: usize) -> Guard {
+        HELD.with(|h| h.borrow_mut().push(ledger));
+        Guard(ledger)
+    }
+
+    pub(super) struct Guard(usize);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            HELD.with(|h| {
+                let mut held = h.borrow_mut();
+                // By address rather than by position: a panicking inner
+                // closure could leave the stack in any shape, and removing the
+                // wrong entry would either re-arm a permit that is still held
+                // or leave one marked held forever.
+                if let Some(i) = held.iter().rposition(|&x| x == self.0) {
+                    held.remove(i);
+                }
+            });
+        }
+    }
+}
+
 impl std::fmt::Debug for AsyncContainer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AsyncContainer").finish_non_exhaustive()
@@ -208,10 +257,16 @@ impl AsyncContainer {
         F: FnOnce(&mut Container) -> Result<R> + Send + 'static,
         R: Send + 'static,
     {
+        let ledger = Arc::as_ptr(&self.ops) as usize;
+        // Refused BEFORE the permit is awaited — waiting is the bug.
+        if reentrancy::holds(ledger) {
+            return Err(Error::ReentrantRun);
+        }
         let inner = self.inner.clone();
         self.ops
             .run(
                 move || {
+                    let _held = reentrancy::enter(ledger);
                     let mut guard = inner.lock().map_err(|_| {
                         Error::Internal("AsyncContainer mutex poisoned by prior panicked task")
                     })?;
@@ -561,10 +616,16 @@ impl AsyncSpace {
         F: FnOnce(&mut Space<'_>) -> Result<R> + Send + 'static,
         R: Send + 'static,
     {
+        let ledger = Arc::as_ptr(&self.ops) as usize;
+        // Refused BEFORE the permit is awaited — waiting is the bug.
+        if reentrancy::holds(ledger) {
+            return Err(Error::ReentrantRun);
+        }
         let inner = self.inner.clone();
         self.ops
             .run(
                 move || {
+                    let _held = reentrancy::enter(ledger);
                     let mut guard = inner.lock().map_err(|_| {
                         Error::Internal("AsyncSpace mutex poisoned by prior panicked task")
                     })?;
