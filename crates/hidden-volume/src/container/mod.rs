@@ -293,9 +293,21 @@ impl Container {
     ///   `Container::open_space` would normally run is suppressed for
     ///   shared-locked handles, see `open_space_with_keys_inner_opts`)
     ///
-    /// Use case: a P2P sync agent reading the container while the main
-    /// app process is writing, OR a forensics / backup tool inspecting
-    /// without risk of corruption.
+    /// Use case: a forensics / backup tool inspecting without risk of
+    /// corruption, and any number of readers doing so at once.
+    ///
+    /// NOT a reader running alongside a writer. `flock` is what it is: a
+    /// shared lock excludes an exclusive one in BOTH directions, so a reader
+    /// holding this blocks the app from opening the container for writing, and
+    /// an app already writing makes this return [`Error::Busy`]. This doc used
+    /// to name "a P2P sync agent reading the container while the main app
+    /// process is writing" as a use case, which the lock has never allowed —
+    /// an integrator designing for it would have been designing for something
+    /// that cannot happen — `tests/readonly.rs` has pinned the real matrix all
+    /// along, in `multiple_readers_can_coexist`,
+    /// `reader_blocks_while_writer_active` and
+    /// `writer_blocks_while_reader_active`. The behaviour was never wrong; only
+    /// these three doc claims were.
     ///
     /// [`Error::Busy`]: crate::Error::Busy
     /// [`Error::ReadOnly`]: crate::Error::ReadOnly
@@ -946,13 +958,22 @@ impl Container {
     /// against concurrent invocations on `path`.
     ///
     /// **Concurrency on `source` — snapshot-at-Phase-1 semantics.**
-    /// `repack` acquires `LOCK_EX` on `source` while reading state
-    /// (Phase 1) and continues to hold it through Phase 2 (writing
-    /// `dest`). The `dest` thus reflects `source`'s state at the
-    /// moment Phase 1 acquired the lock — a **point-in-time
-    /// snapshot**, not a "live" mirror. Concurrent processes that
-    /// try to `Container::open(source)` during a repack get
-    /// `Error::Busy` until this call returns. For atomic
+    /// `repack` opens `source` READ-ONLY, taking `LOCK_SH`, and holds it
+    /// through Phase 1 (read) and Phase 2 (writing `dest`). The `dest` thus
+    /// reflects `source`'s state at the moment the lock was acquired — a
+    /// **point-in-time snapshot**, not a "live" mirror.
+    ///
+    /// Shared rather than exclusive ON PURPOSE, and this doc used to say
+    /// `LOCK_EX`: a writable open runs the auto-vacuum, so merely reading the
+    /// source to copy it rewrote its bytes and a backup no longer matched the
+    /// hash of what it was taken from. The consistency is unchanged — a shared
+    /// lock still excludes every writer — and what is given up is our own
+    /// ability to mutate, which an out-of-place repack must not do anyway.
+    ///
+    /// So: another `Container::open(source)` (writable) gets `Error::Busy`
+    /// until this returns, while another `open_readonly(source)` succeeds.
+    /// Anyone reading `LOCK_EX` here and "correcting" the read-only open to a
+    /// writable one would put the source-mutating auto-vacuum straight back. For atomic
     /// snapshot-and-rename use the in-place
     /// [`Self::compact_known`] / [`Self::change_passwords`] APIs,
     /// which additionally rename `dest` over `source` while still
@@ -1037,8 +1058,9 @@ impl Container {
             return Err(Error::Internal("repack: source and dest must differ"));
         }
         // Out-of-place repack. `src` is held by `&mut` for the
-        // entire duration of `repack_into_dest`, so source `LOCK_EX`
-        // is held through BOTH Phase 1 (read) AND Phase 2 (write
+        // entire duration of `repack_into_dest`, so the source lock —
+        // SHARED, see the read-only open below — is held through BOTH
+        // Phase 1 (read) AND Phase 2 (write
         // dest). After this function returns, `src` drops and the
         // lock is released — at that point the public `repack` API
         // is done; rename of `dest` over `source` (if desired) is
