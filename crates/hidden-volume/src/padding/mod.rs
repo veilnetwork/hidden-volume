@@ -63,6 +63,16 @@ pub enum PaddingPolicy {
     /// - 64 (256 KiB) for embedded / very weak phones
     /// - 256 (1 MiB) for typical mobile (recommended default)
     /// - 4096 (16 MiB) for desktop / unconstrained storage
+    ///
+    /// ⚠️ `bucket_chunks: 0` PADS NOTHING. It is accepted, and
+    /// [`Self::garbage_after_commit`] returns `Ok(0)` for it rather than
+    /// dividing by zero — see `bucket_zero_is_safe_noop`. That is deliberate,
+    /// but it means this variant can be constructed in a shape that reads as
+    /// "padding is configured" while the size-quantization mitigation is off
+    /// entirely. It is not rejected because the variant is `#[non_exhaustive]`
+    /// in a released 2.x API and a `NonZeroU64` field would be a breaking
+    /// change; callers that build a policy from configuration should treat 0
+    /// as "no padding" explicitly, or use [`Self::None`], which says so.
     BucketGrowth {
         /// Bucket size in chunks. After each commit the file is
         /// padded with garbage chunks until
