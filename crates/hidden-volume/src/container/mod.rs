@@ -1560,6 +1560,31 @@ where
         tmp_handle.metadata().ok().map(|m| (m.dev(), m.ino()))
     };
 
+    // THE LAST MOMENT NOTHING IS IRREVERSIBLE.
+    //
+    // The writer polls the token as it goes, but its last poll is before the
+    // final page is written and committed, and everything from there to here —
+    // that commit, the empty-space creation, re-opening tmp, taking the lock,
+    // validating the header — ran with no check at all. A token that fired in
+    // that window still replaced the source and still returned `Ok`, which is
+    // the opposite of what a cancellable call promises: `Cancelled`, and the
+    // source as it was.
+    //
+    // What that cost depended on the caller. A cancelled password rotation
+    // completed anyway, so the old password stopped working with nothing to
+    // say it would. A cancelled compaction replaced the container with the one
+    // the writer had got as far as building.
+    //
+    // Here the source is still untouched and tmp is ours to throw away, so
+    // this is where the promise can still be kept.
+    if let Some(token) = cancel
+        && token.is_cancelled()
+    {
+        let _ = std::fs::remove_file(&tmp);
+        drop(tmp_handle);
+        return Err(Error::Cancelled);
+    }
+
     // Atomic rename — on POSIX this overwrites `path` atomically.
     // On Windows, std's rename is also atomic since 1.43 (uses MoveFileEx
     // with MOVEFILE_REPLACE_EXISTING).
@@ -2072,6 +2097,61 @@ mod hv06_tests {
     /// process, which is a separate open file description and therefore
     /// contends for `flock(2)` exactly as another process would (see
     /// `tests/locking.rs`).
+    /// A cancellable rewrite promises `Cancelled` AND an unchanged source.
+    ///
+    /// The writer polls the token as it works, but its last poll is before the
+    /// final page is committed — and everything after that (the commit, the
+    /// empty-space creation, re-opening tmp, the lock, the header validation)
+    /// used to run with no check at all. A token fired in that window still
+    /// renamed tmp over the source and still returned `Ok`. For a password
+    /// rotation that meant the old password stopped working with nothing to
+    /// say it would.
+    #[test]
+    fn a_token_fired_before_the_rename_leaves_the_source_alone() {
+        let (_guard, path) = scratch("cancel-before-rename");
+        {
+            let mut c = Container::create_with_options(&path, options()).unwrap();
+            let _ = c.create_space(b"pw").unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+
+        let token = crate::cancel::CancelToken::new();
+        let err = atomic_rewrite_under_source_lock(
+            &path,
+            "hv-compact",
+            Some(&token),
+            |_src, tmp, _c| {
+                // The writer finishes: a complete, valid replacement is on
+                // disk and would pass every substitution check below.
+                let mut out = Container::create_with_options(tmp, options())?;
+                let _ = out.create_space(b"other")?;
+                drop(out);
+                // Only now does the user cancel — the window between the
+                // writer's last poll and the rename.
+                token.cancel();
+                Ok(())
+            },
+        )
+        .expect_err("a cancelled rewrite must not publish");
+        assert!(matches!(err, Error::Cancelled), "got {err:?}");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "the source must be exactly as it was",
+        );
+
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("hv-compact"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "the refused replacement must not be left behind: {leftovers:?}",
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_tmp_pin_refuses_a_tmp_someone_else_has_locked() {
