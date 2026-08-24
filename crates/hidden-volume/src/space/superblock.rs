@@ -98,6 +98,14 @@ impl Superblock {
     /// canonical-uniqueness contract on [`Self::decode`].
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
+        // States the invariant where a future writer would break it. `decode`
+        // refuses this combination, so producing it would write a superblock
+        // the next open cannot read — worth failing loudly in development
+        // rather than discovering on someone's container.
+        debug_assert!(
+            self.root_slot != NO_RECORD || self.root_hash == [0u8; 32],
+            "a superblock with no committed root must carry a zero root hash",
+        );
         let mut buf = Vec::with_capacity(Self::ENCODED_LEN_WITH_CHECKPOINT);
         let mut head = [0u8; Self::ENCODED_LEN];
         LittleEndian::write_u64(&mut head[0..8], self.seq);
@@ -134,6 +142,7 @@ impl Superblock {
                 let root_slot = LittleEndian::read_u64(&bytes[8..16]);
                 let mut root_hash = [0u8; 32];
                 root_hash.copy_from_slice(&bytes[16..48]);
+                Self::reject_rootless_hash(root_slot, &root_hash)?;
                 Ok(Self {
                     seq,
                     root_slot,
@@ -155,6 +164,7 @@ impl Superblock {
                         "non-canonical superblock: 56-byte form with NO_RECORD checkpoint",
                     ));
                 }
+                Self::reject_rootless_hash(root_slot, &root_hash)?;
                 Ok(Self {
                     seq,
                     root_slot,
@@ -167,11 +177,90 @@ impl Superblock {
             )),
         }
     }
+
+    /// The invariant stated on [`Self::root_hash`]: a space with no committed
+    /// root has nothing to hash, so the field is zero.
+    ///
+    /// `decode` enforced the checkpoint half of canonical form and left this
+    /// half unchecked, so `root_slot == NO_RECORD` with a non-zero hash
+    /// decoded into a `Superblock` the struct's own documentation says cannot
+    /// exist. AEAD keeps a keyless attacker out, so what this refuses is a
+    /// faulty — or key-holding — writer, and the reason to refuse it is that
+    /// `verify_integrity` returns success immediately on a NO_RECORD root: a
+    /// hash nobody can check would be carried, replica to replica, as though
+    /// it had been.
+    ///
+    /// Safe against existing containers. Every construction site keeps the
+    /// pair consistent: the two initial superblocks write zeros, `commit_tx`
+    /// writes a real slot with the hash of that commit, and `checkpointing`
+    /// copies `root_slot` and `root_hash` together. No writer in this library
+    /// can produce the combination, so nothing on disk carries it.
+    fn reject_rootless_hash(root_slot: u64, root_hash: &[u8; 32]) -> Result<()> {
+        if root_slot == NO_RECORD && root_hash != &[0u8; 32] {
+            return Err(Error::Malformed(
+                "non-canonical superblock: NO_RECORD root with a non-zero root hash",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The struct's own doc says `root_hash` is "Zero-valued when `root_slot ==
+    /// NO_RECORD`". `decode` enforced the checkpoint half of canonical form and
+    /// left this half unchecked, so a state the documentation says cannot exist
+    /// decoded cleanly — and `verify_integrity` returns success immediately on
+    /// a NO_RECORD root, so the unverifiable hash would ride along, replica to
+    /// replica, as though it had been checked.
+    #[test]
+    fn a_rootless_superblock_may_not_carry_a_root_hash() {
+        let mut bytes = vec![0u8; Superblock::ENCODED_LEN];
+        byteorder::LittleEndian::write_u64(&mut bytes[0..8], 9);
+        byteorder::LittleEndian::write_u64(&mut bytes[8..16], NO_RECORD);
+        bytes[16] = 1; // a hash for a root that is not there
+        assert!(
+            Superblock::decode(&bytes).is_err(),
+            "NO_RECORD root with a non-zero hash is not a superblock",
+        );
+
+        // Same in the long form, so the check cannot be dodged by adding a
+        // checkpoint pointer.
+        let mut long = vec![0u8; Superblock::ENCODED_LEN_WITH_CHECKPOINT];
+        byteorder::LittleEndian::write_u64(&mut long[0..8], 9);
+        byteorder::LittleEndian::write_u64(&mut long[8..16], NO_RECORD);
+        long[16] = 1;
+        byteorder::LittleEndian::write_u64(&mut long[48..56], 42);
+        assert!(Superblock::decode(&long).is_err());
+    }
+
+    /// The canonical empty space, and an ordinary populated one, both still
+    /// decode — the check must refuse a combination, not a shape.
+    #[test]
+    fn the_canonical_forms_still_decode() {
+        let empty = Superblock {
+            seq: 1,
+            root_slot: NO_RECORD,
+            root_hash: [0u8; 32],
+            checkpoint_slot: NO_RECORD,
+        };
+        let back = Superblock::decode(&empty.encode()).expect("empty space decodes");
+        assert_eq!(back.root_slot, NO_RECORD);
+        assert_eq!(back.root_hash, [0u8; 32]);
+
+        let populated = Superblock {
+            seq: 7,
+            root_slot: 12,
+            root_hash: [0xAB; 32],
+            checkpoint_slot: 5,
+        };
+        let back = Superblock::decode(&populated.encode()).expect("populated decodes");
+        assert_eq!(back.root_slot, 12);
+        assert_eq!(back.root_hash, [0xAB; 32]);
+        assert_eq!(back.checkpoint_slot, 5);
+    }
 
     fn sb(checkpoint_slot: u64) -> Superblock {
         Superblock {
