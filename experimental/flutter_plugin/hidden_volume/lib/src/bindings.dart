@@ -29,6 +29,8 @@ import 'dart:ffi' as ffi;
 import 'dart:io' show File, Platform;
 import 'dart:typed_data';
 
+import 'package:meta/meta.dart';
+
 import 'package:ffi/ffi.dart';
 
 /// Refuse an out-of-range namespace before it reaches the FFI.
@@ -392,20 +394,31 @@ void verifyAbiCompatibility() {
 Map<String, int> get expectedMethodChecksums =>
     Map<String, int>.unmodifiable(_methodChecksums);
 
-/// Run the real verifier against a caller-supplied table. Test-only, in the
-/// same spirit as [overrideDylib]: the shipped table matches by construction,
-/// so this is the only way to watch the check actually refuse something.
+/// ENFORCED test-only, not merely described as one. Every seam in this group
+/// said "test-only" in prose and nothing checked it: a production caller could
+/// reach into the worker's lifetime or the ABI check's own bookkeeping, and
+/// the analyzer had no opinion. `@visibleForTesting` makes a use outside a
+/// test a diagnostic in this package AND in the app that depends on it
+/// (report12 HV-L6).
+///
+/// Run the real verifier against a caller-supplied table, in the same spirit
+/// as [overrideDylib]: the shipped table matches by construction, so this is
+/// the only way to watch the check actually refuse something.
+@visibleForTesting
 void verifyChecksumsAgainst(Map<String, int> table) => _verifyChecksums(table);
 
-/// How many times [verifyAbiCompatibility] has run. Test-only.
+/// How many times [verifyAbiCompatibility] has run.
 ///
 /// "The check is wired into the call path" is otherwise unobservable, and an
 /// uncalled check is indistinguishable from no check at all — which is the
-/// state this whole mechanism was added to leave (audit HV-05).
+/// state this whole mechanism was added to leave (audit HV-05). See
+/// [verifyChecksumsAgainst] for why this group is annotated.
+@visibleForTesting
 int abiVerificationRuns = 0;
 
-/// Test-only: forget that the ABI was already verified, so the next FFI call
-/// verifies again.
+/// Forget that the ABI was already verified, so the next FFI call verifies
+/// again. See [verifyChecksumsAgainst] for why this group is annotated.
+@visibleForTesting
 void resetAbiVerificationForTest() {
   _abiChecked = false;
 }

@@ -598,6 +598,7 @@ class HvAsyncSpace {
   ///
   /// Not part of the supported API. Production builds its worker through
   /// [create] / [open].
+  @visibleForTesting
   static HvAsyncSpace debugOverWorker({
     required Isolate isolate,
     required SendPort toWorker,
@@ -622,6 +623,7 @@ class HvAsyncSpace {
   /// How long [close] waits for the worker before giving up on the wait.
   /// Settable for TESTS ONLY — the wait is what is under test, and five real
   /// seconds per case is not a thing to spend.
+  @visibleForTesting
   static Duration closeTimeout = const Duration(seconds: 5);
 
   final Isolate _isolate;
@@ -869,7 +871,7 @@ class HvAsyncSpace {
     if (_inFlightBytes + payloadBytes > _maxInFlightBytes) {
       throw StateError(
           'HvAsyncSpace has $_inFlightBytes payload bytes in flight and this '
-          'submission adds $payloadBytes, past the ${_maxInFlightBytes}-byte '
+          'submission adds $payloadBytes, past the $_maxInFlightBytes-byte '
           'ceiling; the worker serves one call at a time, so it is either '
           'wedged or being outrun');
     }
