@@ -637,6 +637,88 @@ mod format_doc_agreement_tests {
 #[cfg(test)]
 mod tests {
 
+    /// The claim that lets `open` swallow a self-heal failure, put to the file.
+    ///
+    /// `open_space_with_keys_inner_opts` ends with
+    /// `let _ = space.maybe_self_heal_checkpoint()`, on the grounds that the
+    /// checkpoint is an optimisation hint and the next open re-tries. The
+    /// failure it drops can leave a half-written chain behind, and nothing in
+    /// this crate reports it — there is no logging channel here at all, which
+    /// for a deniable store is a decision rather than an omission.
+    ///
+    /// So the guarantee has to be the reader's, and this is it: a chain whose
+    /// head is unreadable costs the fast path and nothing else. The data comes
+    /// back, through a full scan.
+    ///
+    /// The failure itself cannot be forced from a test — the paths that fail
+    /// are I/O and there is no fault injection under the file — so what is
+    /// pinned is the property that makes swallowing it defensible.
+    #[test]
+    fn an_unreadable_checkpoint_head_costs_the_fast_path_and_nothing_else() {
+        use crate::container::{Container, ContainerOptions};
+        use crate::crypto::kdf::Argon2Params;
+        use crate::padding::PaddingPolicy;
+        use crate::space::index::Namespace;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("checkpoint.hv");
+        // Past CHECKPOINT_MIN_TOTAL by construction rather than by writing
+        // sixteen megabytes of real records.
+        let opts = ContainerOptions {
+            argon2: Argon2Params::MIN,
+            initial_garbage_chunks: CHECKPOINT_MIN_TOTAL + 128,
+            padding_policy: PaddingPolicy::None,
+            superblock_replicas: 1,
+        };
+        {
+            let mut c = Container::create_with_options(&path, opts).unwrap();
+            let mut sp = c.create_space(b"pw").unwrap();
+            let mut tx = sp.begin_tx();
+            tx.put(Namespace::CONTACTS, b"k", b"the value that must survive")
+                .unwrap();
+            tx.commit().unwrap();
+        }
+
+        // The open that writes the checkpoint, and the slot it put it at.
+        let head = {
+            let mut c = Container::open(&path).unwrap();
+            let sp = c.open_space(b"pw").unwrap();
+            sp.state.superblock.checkpoint_slot
+        };
+        assert_ne!(
+            head, NO_RECORD,
+            "the fixture needs a checkpoint before it can break one",
+        );
+
+        // A head that will not decrypt: the shape a write interrupted part
+        // way through leaves, from the reader's side.
+        let before = std::fs::metadata(&path).unwrap().len();
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            let offset = (1 + head) * crate::CHUNK_SIZE as u64;
+            f.seek(SeekFrom::Start(offset)).unwrap();
+            f.write_all(&[0xA5u8; 256]).unwrap();
+            f.sync_all().unwrap();
+        }
+        // Vacuity guard: a seek past the end would have GROWN the file and
+        // scribbled on nothing, and the assertion below would then pass
+        // because the checkpoint was never touched.
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            before,
+            "the scribble landed outside the container",
+        );
+
+        let mut c = Container::open(&path).unwrap();
+        let mut sp = c.open_space(b"pw").unwrap();
+        assert_eq!(
+            sp.get(Namespace::CONTACTS, b"k").unwrap().as_deref(),
+            Some(&b"the value that must survive"[..]),
+            "a broken checkpoint must cost the fast path, not the data",
+        );
+    }
+
     /// A pool holding exactly these slots, sized past the largest of them.
     fn pool_of(slots: &[u64]) -> crate::space::pool::DecoyPool {
         let mut p = crate::space::pool::DecoyPool::default();
