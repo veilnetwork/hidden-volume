@@ -689,6 +689,19 @@ impl Container {
             // open (the checkpoint is an optimization hint, not
             // correctness-bearing; the next open re-tries). See
             // `crate::space::checkpoint`.
+            //
+            // What a dropped failure costs, since nothing here reports it and
+            // there is no logging channel in this crate at all — which for a
+            // deniable store is a decision rather than an omission. A failed
+            // self-heal can leave a half-written chain and chunks owned by
+            // nothing; the reader refuses such a chain and falls back to the
+            // full scan (pinned by
+            // `an_unreadable_checkpoint_head_costs_the_fast_path_and_nothing_else`),
+            // and `compact_known` reclaims the orphans. So the price of a
+            // failure that KEEPS happening is a slow open every time and space
+            // held until the next compaction — recoverable, invisible, and
+            // worth knowing before someone reads `let _ =` as "cannot fail"
+            // (report12 HV-L9).
             let _ = space.maybe_self_heal_checkpoint();
         }
         Ok(space)
