@@ -27,6 +27,8 @@ import 'dart:isolate';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:meta/meta.dart';
+
 import 'bindings.dart';
 import 'deferred_vacuum.dart';
 
@@ -567,7 +569,24 @@ void _requireLowerableIds(List<HvWriteOp> ops) {
 /// done — that frees the Rust-side handle AND terminates the worker.
 /// [close] can throw; read its doc before ignoring the result.
 class HvAsyncSpace {
-  HvAsyncSpace._(this._isolate, this._toWorker, this._death);
+  HvAsyncSpace._(this._isolate, this._toWorker, this._death) {
+    _reaper.attach(this, _AbandonedWorker(_isolate, _toWorker, _death),
+        detach: this);
+  }
+
+  /// Closes the worker of a space nobody holds any more.
+  ///
+  /// A Dart Future cannot be cancelled, so a caller that walks away from
+  /// `open` — a `.timeout(...)`, a widget disposed mid-flight — does not stop
+  /// the spawn. It completes, this object is built, and nobody ever receives
+  /// it. The worker's own `ReceivePort.listen` keeps its isolate rooted, and
+  /// with it the container's handle and its `flock`: for the LIFE OF THE
+  /// PROCESS, with every later open answering `Busy`.
+  ///
+  /// Best-effort by nature — the VM makes no promise a finalizer runs — but
+  /// the alternative is a lock that is certainly never released.
+  static final Finalizer<_AbandonedWorker> _reaper =
+      Finalizer<_AbandonedWorker>((worker) => worker.reap());
 
   /// Assemble a handle over a worker that is ALREADY up.
   ///
@@ -585,6 +604,20 @@ class HvAsyncSpace {
     required HvWorkerDeath watch,
   }) =>
       HvAsyncSpace._(isolate, toWorker, watch);
+
+  /// Run what the finalizer runs, on handles a test controls.
+  ///
+  /// TEST SEAM ONLY. A finalizer fires when the VM decides to, which is not
+  /// something a test can arrange — so what is worth pinning is what the
+  /// reaper DOES: ask the worker to close, and take the isolate down once the
+  /// answer lands or the grace runs out.
+  @visibleForTesting
+  static void debugReapAbandonedWorker({
+    required Isolate isolate,
+    required SendPort toWorker,
+    required HvWorkerDeath watch,
+  }) =>
+      _AbandonedWorker(isolate, toWorker, watch).reap();
 
   /// How long [close] waits for the worker before giving up on the wait.
   /// Settable for TESTS ONLY — the wait is what is under test, and five real
@@ -1065,6 +1098,9 @@ class HvAsyncSpace {
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
+    // This close IS the release; the reaper exists only for the case where no
+    // close ever comes.
+    _reaper.detach(this);
     // Before anything else: a timer that fires against a torn-down worker
     // would send into a dead port.
     _deferredVacuum.cancel();
@@ -1142,6 +1178,50 @@ class HvAsyncSpace {
         'hidden-volume worker did not close within '
             '${closeTimeout.inMilliseconds}ms; the container lock is still '
             'held');
+  }
+}
+
+/// The handles needed to let go of a worker whose [HvAsyncSpace] is gone.
+///
+/// Deliberately holds no reference to the space itself — one would keep it
+/// reachable and the finalizer would never fire.
+class _AbandonedWorker {
+  _AbandonedWorker(this.isolate, this.toWorker, this.death);
+
+  final Isolate isolate;
+  final SendPort toWorker;
+  final HvWorkerDeath death;
+
+  /// How long the abandoned worker is given to close on its own terms.
+  static const _grace = Duration(seconds: 5);
+
+  /// Ask first, kill after.
+  ///
+  /// Killing alone does not release anything: the container's handle and its
+  /// lock belong to the native side, and only a close hands them back. The
+  /// kill is what stops the isolate keeping itself alive once the close has
+  /// landed — or once it is clear none is coming.
+  ///
+  /// Nothing here throws or is awaited: a finalizer has no caller to report
+  /// to, and an error escaping one would be lost anyway.
+  void reap() {
+    final reply = ReceivePort();
+    unawaited(
+      Future.any<Object?>([reply.first, death.future])
+          .timeout(_grace, onTimeout: () => null)
+          .catchError((Object _) => null)
+          .whenComplete(() {
+        reply.close();
+        death.dispose();
+        isolate.kill(priority: Isolate.immediate);
+      }),
+    );
+    try {
+      toWorker.send(_CloseRequest(reply: reply.sendPort));
+    } catch (_) {
+      // A port already gone: the worker is past caring, and the drain above
+      // still runs its timeout and takes the isolate down.
+    }
   }
 }
 
