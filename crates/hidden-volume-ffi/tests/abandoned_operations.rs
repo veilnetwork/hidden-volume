@@ -44,15 +44,51 @@ async fn handle(path: &std::path::Path) -> std::sync::Arc<AsyncSpaceHandle> {
 /// admission permit and calls `spawn_blocking`, whose `JoinHandle` cannot be
 /// ready yet, so the future is always still in flight when it is dropped and
 /// the ledger always files a record. No sleeps, no scheduler hopes.
+/// Dispatch, poll once, then drop — the operation is abandoned in flight.
+///
+/// Returns whether it actually WAS in flight. A `spawn_blocking` future can be
+/// ready on its first poll: the pool thread may finish before the `JoinHandle`
+/// is polled, which is a race the scheduler is free to win. This asserted it
+/// could not ("a spawn_blocking future cannot be ready on its first poll") and
+/// so failed on a machine that merely had work to do — green 8/8 in isolation,
+/// red inside the full workspace run on a 6-core aarch64 box.
+///
+/// Nothing is abandoned in that case and nothing is filed, so the caller
+/// simply tries again; a completed call files no record, which the test below
+/// pins separately.
 macro_rules! dispatch_then_abandon {
     ($fut:expr) => {{
         let mut fut = Box::pin($fut);
-        tokio::select! {
+        let abandoned = tokio::select! {
             biased;
-            _ = &mut fut => panic!("a spawn_blocking future cannot be ready on its first poll"),
-            () = std::future::ready(()) => {},
-        }
+            _ = &mut fut => false,
+            () = std::future::ready(()) => true,
+        };
         drop(fut);
+        abandoned
+    }};
+}
+
+/// [`dispatch_then_abandon`] until it catches the operation in flight.
+///
+/// Bounded, and it says which call never got caught rather than looping: a
+/// platform where the pool ALWAYS beats the first poll would otherwise hang
+/// instead of reporting.
+macro_rules! abandon_in_flight {
+    ($label:expr, $fut:expr) => {{
+        let mut caught = false;
+        for _ in 0..64 {
+            if dispatch_then_abandon!($fut) {
+                caught = true;
+                break;
+            }
+        }
+        assert!(
+            caught,
+            "{} was never caught in flight in 64 attempts: this test needs an \
+             abandoned operation to have anything to file",
+            $label
+        );
     }};
 }
 
@@ -74,58 +110,79 @@ macro_rules! dispatch_then_abandon {
 /// offer.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_abandoned_commit_leaves_a_verdict_that_agrees_with_the_disk() {
-    let path = scratch_path();
-    let h = handle(&path).await;
+    // A FRESH container per attempt. `dispatch_then_abandon` can miss — the
+    // pool may finish before the first poll — and retrying on the same
+    // container would leave the data of the attempt that COMPLETED sitting on
+    // disk. The next abandoned attempt then reports `NeverStarted` against a
+    // log somebody else wrote, and the agreement this test is about would look
+    // broken when it is not. Observed exactly that way on a loaded aarch64
+    // box.
+    for attempt in 0..64u32 {
+        let path = scratch_path();
+        let h = handle(&path).await;
 
-    // Enough ops that the Tx-assembly loop — the one stretch of `commit`
-    // where the cancel token can still be honoured rather than merely
-    // reported — is genuinely running when the caller walks away.
-    let ops: Vec<WriteOp> = (0..64)
-        .map(|i| WriteOp::AppendLog {
-            namespace: 3,
-            log_id: i,
-            payload: vec![b'x'; 512],
-        })
-        .collect();
-    dispatch_then_abandon!(h.commit(ops));
+        // Enough ops that the Tx-assembly loop — the one stretch of `commit`
+        // where the cancel token can still be honoured rather than merely
+        // reported — is genuinely running when the caller walks away.
+        let ops: Vec<WriteOp> = (0..64)
+            .map(|i| WriteOp::AppendLog {
+                namespace: 3,
+                log_id: i,
+                payload: vec![b'x'; 512],
+            })
+            .collect();
 
-    let filed = h.abandoned_operations();
-    assert_eq!(
-        filed.len(),
-        1,
-        "the abandoned call must be filed: {filed:?}"
-    );
-
-    let mut record = filed[0];
-    for _ in 0..600 {
-        record = h.abandoned_operations()[0];
-        if record.settled {
-            break;
+        if !dispatch_then_abandon!(h.commit(ops)) {
+            drop(h);
+            let _ = std::fs::remove_file(&path);
+            assert!(
+                attempt < 63,
+                "commit was never caught in flight in 64 attempts: this test \
+                 needs an abandoned operation to have a verdict to check"
+            );
+            continue;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    assert!(record.settled, "outcome never settled: {record:?}");
 
-    let landed = h.read_log(3, 0).await.unwrap().is_some();
-    match record.outcome {
-        OperationOutcome::NeverStarted | OperationOutcome::Failed => assert!(
-            !landed,
-            "{:?} claims no durable effect, but the commit landed",
-            record.outcome
-        ),
-        OperationOutcome::Succeeded => assert!(
-            landed,
-            "Succeeded must mean the commit landed, not that it was cancelled"
-        ),
-        other => panic!("unexpected settled outcome {other:?}"),
-    }
-    assert_eq!(
-        record.may_have_mutated,
-        record.outcome != OperationOutcome::NeverStarted,
-        "only NeverStarted is backed by a proof of no effect"
-    );
+        let filed = h.abandoned_operations();
+        assert_eq!(
+            filed.len(),
+            1,
+            "the abandoned call must be filed: {filed:?}"
+        );
 
-    let _ = std::fs::remove_file(&path);
+        let mut record = filed[0];
+        for _ in 0..600 {
+            record = h.abandoned_operations()[0];
+            if record.settled {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(record.settled, "outcome never settled: {record:?}");
+
+        let landed = h.read_log(3, 0).await.unwrap().is_some();
+        match record.outcome {
+            OperationOutcome::NeverStarted | OperationOutcome::Failed => assert!(
+                !landed,
+                "{:?} claims no durable effect, but the commit landed",
+                record.outcome
+            ),
+            OperationOutcome::Succeeded => assert!(
+                landed,
+                "Succeeded must mean the commit landed, not that it was cancelled"
+            ),
+            other => panic!("unexpected settled outcome {other:?}"),
+        }
+        assert_eq!(
+            record.may_have_mutated,
+            record.outcome != OperationOutcome::NeverStarted,
+            "only NeverStarted is backed by a proof of no effect"
+        );
+
+        drop(h);
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
 }
 
 /// The ledger is the handle's, not one per call.
@@ -138,12 +195,18 @@ async fn the_ledger_belongs_to_the_handle_not_to_the_call() {
     let path = scratch_path();
     let h = handle(&path).await;
 
-    dispatch_then_abandon!(h.commit(vec![WriteOp::Put {
-        namespace: 1,
-        key: b"k1".to_vec(),
-        value: b"v1".to_vec(),
-    }]));
-    dispatch_then_abandon!(h.set_padding_policy(PaddingPreset::None));
+    abandon_in_flight!(
+        "commit",
+        h.commit(vec![WriteOp::Put {
+            namespace: 1,
+            key: b"k1".to_vec(),
+            value: b"v1".to_vec(),
+        }])
+    );
+    abandon_in_flight!(
+        "set_padding_policy",
+        h.set_padding_policy(PaddingPreset::None)
+    );
 
     let filed = h.abandoned_operations();
     assert_eq!(
@@ -171,11 +234,14 @@ async fn clearing_settled_records_leaves_the_unsettled_ones() {
     let path = scratch_path();
     let h = handle(&path).await;
 
-    dispatch_then_abandon!(h.commit(vec![WriteOp::Put {
-        namespace: 1,
-        key: b"k".to_vec(),
-        value: b"v".to_vec(),
-    }]));
+    abandon_in_flight!(
+        "commit",
+        h.commit(vec![WriteOp::Put {
+            namespace: 1,
+            key: b"k".to_vec(),
+            value: b"v".to_vec(),
+        }])
+    );
 
     for _ in 0..600 {
         if h.abandoned_operations()[0].settled {
@@ -206,11 +272,14 @@ async fn a_completed_call_after_an_abandoned_one_files_nothing() {
     let path = scratch_path();
     let h = handle(&path).await;
 
-    dispatch_then_abandon!(h.commit(vec![WriteOp::Put {
-        namespace: 1,
-        key: b"first".to_vec(),
-        value: b"1".to_vec(),
-    }]));
+    abandon_in_flight!(
+        "commit",
+        h.commit(vec![WriteOp::Put {
+            namespace: 1,
+            key: b"first".to_vec(),
+            value: b"1".to_vec(),
+        }])
+    );
 
     // Awaited to completion — the guard disarms, so nothing is filed.
     h.commit(vec![WriteOp::Put {
