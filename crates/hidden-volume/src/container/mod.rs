@@ -1602,9 +1602,12 @@ where
     }
 
     // Atomic rename — on POSIX this overwrites `path` atomically.
-    // On Windows, std's rename is also atomic since 1.43 (uses MoveFileEx
-    // with MOVEFILE_REPLACE_EXISTING).
-    if let Err(e) = std::fs::rename(&tmp, path) {
+    // On Windows, `rename_durable` is `MoveFileExW` with
+    // MOVEFILE_REPLACE_EXISTING, which is what makes it atomic, plus
+    // MOVEFILE_WRITE_THROUGH, which is what makes it DURABLE. std's rename
+    // passes only the first, and the parent fsync below is a no-op there — so
+    // that platform had no barrier at all. See `rename_durable`.
+    if let Err(e) = rename_durable(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         drop(tmp_handle);
         return Err(Error::Io(e));
@@ -1767,9 +1770,9 @@ fn unique_temp_path_in_parent(path: &std::path::Path, prefix: &str) -> Result<st
 }
 
 /// fsync the parent directory of `path` so a recent `rename(2)` becomes
-/// crash-durable on ext4/xfs/btrfs. On Windows there is no parent-dir
-/// fsync concept and `MoveFileEx` already provides metadata durability;
-/// we no-op there. Best-effort: any I/O error here is silently
+/// crash-durable on ext4/xfs/btrfs. On Windows there is no parent-dir fsync
+/// concept, and the barrier lives inside the rename instead — see
+/// [`rename_durable`]. Best-effort: any I/O error here is silently
 /// swallowed, since a successful rename is what we care about — failing
 /// the entire compaction because the parent dir couldn't be opened
 /// would be worse than the small loss-of-durability window.
@@ -1796,9 +1799,61 @@ fn fsync_parent_dir(path: &std::path::Path) -> std::io::Result<()> {
     }
     #[cfg(not(unix))]
     {
-        // Windows has no parent-dir fsync concept; `MoveFileEx` already gives
-        // metadata durability, so there is nothing here that can fail.
+        // Windows has no parent-dir fsync concept. The barrier it DOES have is
+        // MOVEFILE_WRITE_THROUGH, taken inside [`rename_durable`]; there is
+        // nothing left for this to do.
         let _ = path;
+        Ok(())
+    }
+}
+
+/// Rename `from` over `to` atomically AND durably.
+///
+/// On POSIX this is `fs::rename` unchanged — the caller's `fsync_parent_dir`
+/// is what makes it durable there, and taking a second barrier inside the call
+/// would be the same guarantee twice.
+///
+/// On Windows it is `MoveFileExW` with both flags. std's rename passes only
+/// `MOVEFILE_REPLACE_EXISTING`, which is about replacing the target, not about
+/// flushing it: the call may return before the change reaches the disk.
+/// `MOVEFILE_WRITE_THROUGH` is documented to delay the return until the move
+/// is flushed, and it is the only barrier Windows offers here.
+///
+/// Why this matters more than a lost compaction. `fsync_parent_dir` is
+/// `Ok(())` on Windows, so [`Error::RenameVisibleDurabilityUncertain`] — the
+/// outcome added by audit HV-03 precisely so that a caller who has just
+/// rotated a leaked password is never told the old one is dead without
+/// grounds — could not fire on that platform. It reported plain success while
+/// a crash in the window could still restore the old inode, and with it the
+/// old password.
+fn rename_durable(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(from, to)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt as _;
+        fn wide(p: &std::path::Path) -> Vec<u16> {
+            p.as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect()
+        }
+        let from_w = wide(from);
+        let to_w = wide(to);
+        // SAFETY: both buffers are NUL-terminated and outlive the call.
+        let ok = unsafe {
+            windows_sys::Win32::Storage::FileSystem::MoveFileExW(
+                from_w.as_ptr(),
+                to_w.as_ptr(),
+                windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING
+                    | windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
         Ok(())
     }
 }
@@ -1934,6 +1989,70 @@ mod hv06_tests {
     use super::*;
     use crate::padding::PaddingPolicy;
     use crate::space::index::Namespace;
+
+    /// The rewrite publishes through the DURABLE rename, on both platforms.
+    ///
+    /// A STRUCTURAL guard, because the half that matters cannot be observed
+    /// where these tests run: on POSIX `rename_durable` IS `fs::rename` and
+    /// the barrier is `fsync_parent_dir` beneath it, so nothing behavioural
+    /// here can tell the two apart — a green suite on this platform says
+    /// nothing about Windows either way.
+    ///
+    /// What was wrong: std's rename passes only MOVEFILE_REPLACE_EXISTING
+    /// (verified in `library/std/src/sys/fs/windows.rs`), which replaces the
+    /// target without flushing it, and `fsync_parent_dir` is `Ok(())` on
+    /// non-Unix. So the publish had no barrier at all there, and
+    /// `RenameVisibleDurabilityUncertain` — the outcome audit HV-03 added so a
+    /// caller who rotated a leaked password is never told the old one is dead
+    /// without grounds — could never fire on Windows.
+    ///
+    /// Still unproven ON Windows: that needs a power-fault run on a VM.
+    #[test]
+    fn the_rewrite_rename_is_the_durable_one() {
+        let src = include_str!("mod.rs");
+        let at = src
+            .find("fn atomic_rewrite_under_source_lock<F>(")
+            .expect("the rewrite moved — this guard no longer watches it");
+        let body = &src[at..];
+        let end = body
+            .find("\n/// After the rename, `path` must resolve")
+            .expect("could not bound the rewrite");
+        let body = &body[..end];
+        assert!(
+            body.contains("rename_durable(&tmp, path)"),
+            "the publish must go through the durable helper"
+        );
+        assert!(
+            !body.contains("std::fs::rename(&tmp, path)"),
+            "a bare rename leaves Windows with no barrier, and fsync_parent_dir \
+             is a no-op there"
+        );
+        // Vacuity guard: the helper must actually take the Windows barrier,
+        // or the assertion above only pins a rename that was renamed.
+        //
+        // Scoped to the helper's own body, and comments stripped. Two earlier
+        // versions of this assertion passed with the flag DELETED from the
+        // call: the first matched the flag name in `rename_durable`'s doc
+        // comment, the second matched the string literal in this very
+        // assertion. Both were satisfied by their own text.
+        let helper_at = src
+            .find("fn rename_durable(")
+            .expect("the helper moved — this guard no longer watches it");
+        let helper = &src[helper_at..];
+        let helper_end = helper
+            .find("\n#[cfg(test)]")
+            .expect("could not bound the helper");
+        let helper_code: String = helper[..helper_end]
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            helper_code.contains("MOVEFILE_WRITE_THROUGH"),
+            "the helper without the write-through flag is the old behaviour \
+             wearing a new name"
+        );
+    }
 
     fn options() -> ContainerOptions {
         ContainerOptions {
