@@ -147,6 +147,29 @@ mod reentrancy {
     }
 }
 
+/// Refuse a call that would wait for a permit this thread already holds.
+///
+/// BEFORE the permit is awaited, because waiting is the bug: the inner call
+/// blocks on a lock the outer one will not release until the inner returns,
+/// and no timeout unwinds it.
+///
+/// Every entry point that takes the permit has to ask. Only `run` did, so a
+/// closure that reached for `run_cancellable` — or drove one of the log
+/// streams — got the hang the guard exists to replace with an error
+/// (report14 HV14-M2).
+///
+/// ⚠️ Same-thread only. The mark is a thread-local, so a closure that hands
+/// the work to ANOTHER thread and waits for it is not seen here and still
+/// hangs. Identifying one logical call chain across threads needs something
+/// the permit itself carries; this refuses what can be refused today, and the
+/// rest is the documented "do the work in one closure".
+fn refuse_if_reentrant(ledger: usize) -> Result<()> {
+    if reentrancy::holds(ledger) {
+        return Err(Error::ReentrantRun);
+    }
+    Ok(())
+}
+
 impl std::fmt::Debug for AsyncContainer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AsyncContainer").finish_non_exhaustive()
@@ -273,10 +296,7 @@ impl AsyncContainer {
         R: Send + 'static,
     {
         let ledger = Arc::as_ptr(&self.ops) as usize;
-        // Refused BEFORE the permit is awaited — waiting is the bug.
-        if reentrancy::holds(ledger) {
-            return Err(Error::ReentrantRun);
-        }
+        refuse_if_reentrant(ledger)?;
         let inner = self.inner.clone();
         self.ops
             .run(
@@ -364,12 +384,15 @@ impl AsyncContainer {
             + 'static,
         R: Send + 'static,
     {
+        let ledger = Arc::as_ptr(&self.ops) as usize;
+        refuse_if_reentrant(ledger)?;
         let inner = self.inner.clone();
         let closure_token = token.clone();
         self.ops
             .run_cancellable(
                 token,
                 move || {
+                    let _held = reentrancy::enter(ledger);
                     let mut guard = inner.lock().map_err(|_| {
                         Error::Internal("AsyncContainer mutex poisoned by prior panicked task")
                     })?;
@@ -632,10 +655,7 @@ impl AsyncSpace {
         R: Send + 'static,
     {
         let ledger = Arc::as_ptr(&self.ops) as usize;
-        // Refused BEFORE the permit is awaited — waiting is the bug.
-        if reentrancy::holds(ledger) {
-            return Err(Error::ReentrantRun);
-        }
+        refuse_if_reentrant(ledger)?;
         let inner = self.inner.clone();
         self.ops
             .run(
@@ -697,11 +717,18 @@ impl AsyncSpace {
     ) -> impl futures_core::Stream<Item = Result<Vec<(u64, Vec<u8>)>>> + Send + 'static {
         let inner = self.inner.clone();
         let ops = self.ops.clone();
+        // A stream takes the permit once per PAGE, so it can deadlock exactly
+        // like a nested `run` — and it was the one entry point with no guard
+        // at all (report14 HV14-M2). Captured here, asked below: whoever polls
+        // the stream is the caller whose thread matters.
+        let ledger = Arc::as_ptr(&ops) as usize;
         let mut cursor = start_after;
         async_stream::try_stream! {
             loop {
                 let inner = inner.clone();
+                refuse_if_reentrant(ledger)?;
                 let page = ops.run(move || {
+                    let _held = reentrancy::enter(ledger);
                     let mut guard = inner
                         .lock()
                         .map_err(|_| Error::Internal("AsyncSpace mutex poisoned by prior panicked task"))?;
@@ -728,11 +755,18 @@ impl AsyncSpace {
     ) -> impl futures_core::Stream<Item = Result<Vec<(u64, Vec<u8>)>>> + Send + 'static {
         let inner = self.inner.clone();
         let ops = self.ops.clone();
+        // A stream takes the permit once per PAGE, so it can deadlock exactly
+        // like a nested `run` — and it was the one entry point with no guard
+        // at all (report14 HV14-M2). Captured here, asked below: whoever polls
+        // the stream is the caller whose thread matters.
+        let ledger = Arc::as_ptr(&ops) as usize;
         let mut cursor = start_before;
         async_stream::try_stream! {
             loop {
                 let inner = inner.clone();
+                refuse_if_reentrant(ledger)?;
                 let page = ops.run(move || {
+                    let _held = reentrancy::enter(ledger);
                     let mut guard = inner
                         .lock()
                         .map_err(|_| Error::Internal("AsyncSpace mutex poisoned by prior panicked task"))?;
@@ -761,6 +795,11 @@ impl AsyncSpace {
     ) -> impl futures_core::Stream<Item = Result<Vec<(u64, Vec<u8>)>>> + Send + 'static {
         let inner = self.inner.clone();
         let ops = self.ops.clone();
+        // A stream takes the permit once per PAGE, so it can deadlock exactly
+        // like a nested `run` — and it was the one entry point with no guard
+        // at all (report14 HV14-M2). Captured here, asked below: whoever polls
+        // the stream is the caller whose thread matters.
+        let ledger = Arc::as_ptr(&ops) as usize;
         // Use after-cursor walking, post-filtering for the upper bound.
         // `iter_log_range` already short-circuits on the upper bound
         // inside the walker, so this is efficient.
@@ -804,7 +843,9 @@ impl AsyncSpace {
                         None => break,
                     },
                 };
+                refuse_if_reentrant(ledger)?;
                 let page = ops.run(move || {
+                    let _held = reentrancy::enter(ledger);
                     let mut guard = inner
                         .lock()
                         .map_err(|_| Error::Internal("AsyncSpace mutex poisoned by prior panicked task"))?;
