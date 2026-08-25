@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-25T07:59:01Z
+# Captured: 2026-08-25T09:51:04Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -468,6 +468,10 @@ src/async_bindings.dart:   String toString() => 'HvOpPending()';
 src/async_bindings.dart: class HvOpSucceeded extends HvOpOutcome {
 src/async_bindings.dart:   final Object? value;
 src/async_bindings.dart:   String toString() => 'HvOpSucceeded($value)';
+src/async_bindings.dart: class HvOpPayload {
+src/async_bindings.dart:   final String type;
+src/async_bindings.dart:   final int? length;
+src/async_bindings.dart:   String toString() =>
 src/async_bindings.dart: class HvOpFailed extends HvOpOutcome {
 src/async_bindings.dart:   final HvException error;
 src/async_bindings.dart:   bool get mayHaveApplied => error.mayHaveApplied;
@@ -526,6 +530,7 @@ src/async_bindings.dart:   return headerInfo(path);
 src/async_bindings.dart: Future<HvHeaderInfo> headerInfoAsync(String path, {String? dylibPath}) {
 src/async_bindings.dart: Future<void> changePasswordsAsync(
 src/async_bindings.dart: Future<void> compactKnownAsync(String path, List<Uint8List> passwords,
+src/bindings.dart: const int maxKeyLen = 256;
 src/bindings.dart: int requireU64(int v, String name) {
 src/bindings.dart:   final overridePath = Platform.environment['XVEIL_HV_DYLIB'];
 src/bindings.dart:   final bundled = File(Platform.resolvedExecutable)

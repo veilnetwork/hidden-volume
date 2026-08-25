@@ -209,29 +209,22 @@ fn read_password(prompt: &str) -> Result<zeroize::Zeroizing<Vec<u8>>> {
     let echo_off = if interactive { EchoOff::engage() } else { None };
 
     let stdin = std::io::stdin();
-    let mut line = String::new();
-    let read = stdin.lock().read_line(&mut line);
+    // Bounded: `read_line` here grew a `String` until a newline arrived, so a
+    // pipe that never sent one allocated without limit — and left every
+    // intermediate buffer, password inside, on the heap (report14 HV14-M4).
+    // The repack path two functions down has always read this way.
+    let read = read_capped_line(&mut stdin.lock(), MAX_PASSWORD_LINE, "password from stdin");
     // Restore the terminal BEFORE anything can return early, so a read
     // error does not leave the user's shell with echo off.
     drop(echo_off);
-    read.map_err(|e| {
-        hidden_volume::Error::Io(std::io::Error::other(format!(
-            "read password from stdin: {e}"
-        )))
-    })?;
+    let line = read?;
     if interactive {
         // The Enter that ended the line was not echoed either, so
         // without this the next thing written lands on the prompt's
         // own line.
         eprintln!();
     }
-    if line.ends_with('\n') {
-        line.pop();
-    }
-    if line.ends_with('\r') {
-        line.pop();
-    }
-    Ok(zeroize::Zeroizing::new(line.into_bytes()))
+    Ok(line.unwrap_or_else(|| zeroize::Zeroizing::new(Vec::new())))
 }
 
 /// Terminal echo, off for as long as this value lives.
@@ -428,6 +421,52 @@ fn read_all_passwords() -> Result<Vec<zeroize::Zeroizing<Vec<u8>>>> {
 ///
 /// Split out so the caps below are testable without a terminal and
 /// without a subprocess.
+/// Read one line, refusing anything past `cap` bytes.
+///
+/// `take(cap + 1)` and then `read_until`, so a line that is too long is
+/// DETECTED rather than buffered. That is the difference from `read_line`,
+/// which grows its buffer until a newline arrives — a pipe that never sends
+/// one allocates without bound, and every growth step leaves the previous
+/// buffer, secret still in it, on the heap for the allocator to hand out
+/// whenever it likes (report14 HV14-M4).
+///
+/// `Ok(None)` is end of input with nothing read. The trailing newline (and a
+/// carriage return before it) is removed; the bytes come back in `Zeroizing`
+/// because they are secret from the first read, not from the moment they are
+/// accepted.
+///
+/// `what` names the input in the error, because "a line is too long" is not
+/// an answer anybody can act on.
+fn read_capped_line(
+    reader: &mut impl BufRead,
+    cap: usize,
+    what: &str,
+) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>> {
+    let mut buf = zeroize::Zeroizing::new(Vec::<u8>::with_capacity(cap + 1));
+    let n = reader
+        .take(cap as u64 + 1)
+        .read_until(b'\n', &mut buf)
+        .map_err(|e| {
+            hidden_volume::Error::Io(std::io::Error::other(format!("read {what}: {e}")))
+        })?;
+    if n == 0 {
+        return Ok(None);
+    }
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+    } else if buf.len() > cap {
+        // Filled the whole allowance without reaching a newline.
+        return Err(hidden_volume::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("hv: {what} exceeds {cap} bytes"),
+        )));
+    }
+    if buf.last() == Some(&b'\r') {
+        buf.pop();
+    }
+    Ok(Some(buf))
+}
+
 fn read_passwords_from(mut reader: impl BufRead) -> Result<Vec<zeroize::Zeroizing<Vec<u8>>>> {
     let mut out: Vec<zeroize::Zeroizing<Vec<u8>>> = Vec::new();
     loop {
@@ -618,18 +657,17 @@ fn cmd_put(
     // still scrub the in-process copy to avoid post-drop heap
     // residue.
     let value_bytes: zeroize::Zeroizing<Vec<u8>> = zeroize::Zeroizing::new(if value_stdin {
+        // Bounded by what the core will accept anyway: a value past
+        // `MAX_VALUE_LEN` is refused by `tx.put`, so reading gigabytes to
+        // find that out is pure loss — and it is the caller's secret being
+        // grown across the heap while it happens (report14 HV14-M4).
         let stdin = std::io::stdin();
-        let mut line = String::new();
-        stdin.lock().read_line(&mut line).map_err(|e| {
-            hidden_volume::Error::Io(std::io::Error::other(format!("read value from stdin: {e}")))
-        })?;
-        if line.ends_with('\n') {
-            line.pop();
-        }
-        if line.ends_with('\r') {
-            line.pop();
-        }
-        line.into_bytes()
+        let line = read_capped_line(
+            &mut stdin.lock(),
+            hidden_volume::space::index::MAX_VALUE_LEN,
+            "value from stdin",
+        )?;
+        line.map(|b| b.to_vec()).unwrap_or_default()
     } else {
         // clap's `required_unless_present` guarantees `value` is Some
         // when `--value-stdin` is absent. If it isn't, that's a clap
@@ -726,6 +764,75 @@ mod tests {
             .iter()
             .map(|p| String::from_utf8_lossy(p).into_owned())
             .collect())
+    }
+
+    /// A line that is too long is DETECTED, not buffered.
+    ///
+    /// `read_line` grows its buffer until a newline arrives, so a pipe that
+    /// never sends one allocates without bound — and every growth step leaves
+    /// the previous buffer, the caller's password or value still in it, on the
+    /// heap for the allocator to hand out whenever it likes. The repack path
+    /// had always read within a cap; the password prompt and `--value-stdin`
+    /// had not (report14 HV14-M4).
+    #[test]
+    fn a_capped_read_refuses_a_line_instead_of_growing_for_it() {
+        // Well under the cap: unchanged, newline stripped.
+        let mut small = std::io::Cursor::new(b"hunter2\n".to_vec());
+        let got = read_capped_line(&mut small, 16, "password")
+            .unwrap()
+            .unwrap();
+        assert_eq!(&got[..], b"hunter2");
+
+        // Exactly at the cap, no newline at all: accepted, because the whole
+        // line fits what the caller allows.
+        let mut exact = std::io::Cursor::new(vec![b'x'; 16]);
+        let got = read_capped_line(&mut exact, 16, "password")
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.len(), 16);
+
+        // One byte past it: refused, and the error says what and how much.
+        let mut over = std::io::Cursor::new(vec![b'x'; 17]);
+        let err = read_capped_line(&mut over, 16, "password").unwrap_err();
+        let text = format!("{err}");
+        assert!(
+            text.contains("password"),
+            "the error must name the input: {text}"
+        );
+        assert!(text.contains("16"), "and the limit: {text}");
+
+        // A pipe with no newline in sight is refused after the cap, not read
+        // to its end — the allocation is what this bounds.
+        let mut endless = std::io::Cursor::new(vec![b'x'; 4 * 1024 * 1024]);
+        assert!(read_capped_line(&mut endless, 1024, "password").is_err());
+        assert_eq!(
+            endless.position(),
+            1025,
+            "it must stop at the allowance; reading further is the unbounded \
+             allocation this exists to prevent"
+        );
+
+        // Nothing at all is end of input, not an empty password.
+        let mut empty = std::io::Cursor::new(Vec::<u8>::new());
+        assert!(
+            read_capped_line(&mut empty, 16, "password")
+                .unwrap()
+                .is_none()
+        );
+
+        // CRLF is tolerated, as everywhere else in this file.
+        let mut crlf = std::io::Cursor::new(b"pw\r\n".to_vec());
+        let got = read_capped_line(&mut crlf, 16, "password")
+            .unwrap()
+            .unwrap();
+        assert_eq!(&got[..], b"pw");
+    }
+
+    /// The value cap is the core's own, so the CLI refuses exactly what the
+    /// container would have refused — and refuses it before reading it.
+    #[test]
+    fn the_value_cap_is_the_one_the_core_enforces() {
+        assert_eq!(hidden_volume::space::index::MAX_VALUE_LEN, 2048);
     }
 
     #[test]
