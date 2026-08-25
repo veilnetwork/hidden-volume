@@ -1152,6 +1152,75 @@ fn recorded_checkpoint(s: &mut crate::space::Space<'_>) -> (Vec<u64>, Vec<u64>) 
     (recorded.owned.to_sorted_vec(), recorded.pool.sorted())
 }
 
+/// The two sequence numbers in a checkpoint have to agree with each other.
+///
+/// `Plaintext.seq` is inside the chunk's AEAD, so it is authenticated;
+/// `CheckpointChunk.cp_seq` is payload bytes. The writer sets both from the
+/// same value, so a hop where they differ is not a checkpoint this code
+/// produced — a faulty writer, or somebody holding the key and editing the
+/// payload alone. The chain only ever compared the INNER value across hops,
+/// which a payload edit controls entirely (report14 HV14-L3).
+#[test]
+fn a_checkpoint_whose_inner_sequence_disagrees_is_refused() {
+    use crate::chunk::ChunkKind;
+    use crate::space::checkpoint::CheckpointChunk;
+
+    let path = scratch();
+    let _cleanup = Cleanup(path.clone());
+    let mut c = Container::create_with_options(&path, options(0, PaddingPolicy::None)).unwrap();
+    let mut s = c.create_space(b"pw").unwrap();
+    {
+        let mut tx = s.begin_tx();
+        tx.put(Namespace::SETTINGS, b"k", b"v").unwrap();
+        tx.commit().unwrap();
+    }
+
+    let total = s.file.slot_count();
+    let keys = s.state.keys.clone();
+    let container_id = keys.container_id;
+
+    // An HONEST checkpoint first, so the refusal below is about the mismatch
+    // and not about the fixture failing to build a readable chain at all.
+    let honest = CheckpointChunk {
+        cp_seq: 41,
+        cp_high_water: total,
+        next_slot: crate::space::superblock::NO_RECORD,
+        owned: Vec::new(),
+        pool: Vec::new(),
+    };
+    let head = s
+        .place_chunk(ChunkKind::Checkpoint, 41, &honest.encode().unwrap())
+        .unwrap();
+    let total = s.file.slot_count();
+    assert!(
+        crate::open::read_checkpoint_chain(s.file, &keys, &container_id, head, total, None, false)
+            .unwrap()
+            .is_some(),
+        "the fixture cannot even write a chain this reader accepts"
+    );
+
+    // The same chunk, with the inner number moved. The outer one is what the
+    // AEAD covers, so this is the edit a payload-only tamper can make.
+    let lying = CheckpointChunk {
+        cp_seq: 99,
+        cp_high_water: total,
+        next_slot: crate::space::superblock::NO_RECORD,
+        owned: Vec::new(),
+        pool: Vec::new(),
+    };
+    let head = s
+        .place_chunk(ChunkKind::Checkpoint, 41, &lying.encode().unwrap())
+        .unwrap();
+    let total = s.file.slot_count();
+    assert!(
+        crate::open::read_checkpoint_chain(s.file, &keys, &container_id, head, total, None, false)
+            .unwrap()
+            .is_none(),
+        "a checkpoint whose authenticated sequence and payload disagree must \
+         send the open to a full scan, not be folded into the state"
+    );
+}
+
 /// A checkpoint refresh must not record an empty pool over the accumulated
 /// one (report9 HV-14).
 ///
