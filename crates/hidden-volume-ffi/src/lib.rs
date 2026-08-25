@@ -1758,6 +1758,40 @@ impl AsyncSpaceHandle {
         .await
     }
 
+    /// Keys of every KV entry in `namespace`, framed as in
+    /// [`SpaceHandle::kv_keys`]: `[count u32 LE] ( [len u32 LE][key bytes] )*`.
+    ///
+    /// The async surface claimed one-for-one parity with the sync one and was
+    /// missing exactly these two methods, so a caller on this side had no way
+    /// to enumerate a namespace at all — and the claim said otherwise
+    /// (report14 HV14-L4). The returned buffer is O(total key bytes): use
+    /// [`Self::kv_keys_page`] on anything that might be large.
+    pub async fn kv_keys(&self, namespace: u8) -> HvResult<Vec<u8>> {
+        check_namespace(namespace)?;
+        self.run_op(move |s, _cancel| -> HvResult<Vec<u8>> {
+            let keys = s.list_keys(Namespace(namespace))?;
+            Ok(frame_kv_keys(&keys))
+        })
+        .await
+    }
+
+    /// One page of [`Self::kv_keys`]: up to `limit` keys strictly greater than
+    /// `after`, ascending. Same cursor contract as
+    /// [`SpaceHandle::kv_keys_page`].
+    pub async fn kv_keys_page(
+        &self,
+        namespace: u8,
+        after: Option<Vec<u8>>,
+        limit: u32,
+    ) -> HvResult<Vec<u8>> {
+        check_namespace(namespace)?;
+        self.run_op(move |s, _cancel| -> HvResult<Vec<u8>> {
+            let keys = s.list_keys_after(Namespace(namespace), after.as_deref(), limit as usize)?;
+            Ok(frame_kv_keys(&keys))
+        })
+        .await
+    }
+
     /// Read one KV value.
     pub async fn get(&self, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
         check_namespace(namespace)?;
@@ -2214,6 +2248,63 @@ impl MultiSpaceHandle {
 
 #[cfg(test)]
 mod tests {
+
+    /// The async surface says it mirrors the sync one. This is what makes that
+    /// a fact rather than a sentence.
+    ///
+    /// It was not one: `kv_keys` and `kv_keys_page` existed on `SpaceHandle`
+    /// and on `MultiSpaceHandle` and nowhere else, so an async caller had no
+    /// way to enumerate a namespace at all while the doc promised parity
+    /// (report14 HV14-L4).
+    ///
+    /// Read from the source rather than from a hand-kept list: a list is a
+    /// third place to forget.
+    #[test]
+    fn the_async_handle_mirrors_the_sync_one() {
+        fn methods(src: &str, impl_header: &str, is_async: bool) -> Vec<String> {
+            let mut out = Vec::new();
+            let mut rest = src;
+            let needle = if is_async { "pub async fn " } else { "pub fn " };
+            while let Some(at) = rest.find(impl_header) {
+                rest = &rest[at + impl_header.len()..];
+                // Up to the next top-level `impl`, which is where this block
+                // ends for our purposes.
+                let end = rest.find("\nimpl ").unwrap_or(rest.len());
+                for line in rest[..end].lines() {
+                    let line = line.trim_start();
+                    if let Some(tail) = line.strip_prefix(needle) {
+                        let name: String = tail
+                            .chars()
+                            .take_while(|c| c.is_alphanumeric() || *c == '_')
+                            .collect();
+                        if !name.is_empty() {
+                            out.push(name);
+                        }
+                    }
+                }
+                rest = &rest[end..];
+            }
+            out.sort();
+            out.dedup();
+            out
+        }
+
+        let src = include_str!("lib.rs");
+        let sync = methods(src, "impl SpaceHandle {", false);
+        let asyncs = methods(src, "impl AsyncSpaceHandle {", true);
+        assert!(
+            sync.len() > 10,
+            "the reader found almost nothing — it is broken, not the parity"
+        );
+
+        // Constructors differ by design (`create` takes different arguments on
+        // the two sides), so what is compared is everything else.
+        let missing: Vec<&String> = sync.iter().filter(|name| !asyncs.contains(name)).collect();
+        assert!(
+            missing.is_empty(),
+            "the async handle is missing {missing:?}, and the docs claim parity"
+        );
+    }
     use super::*;
 
     fn scratch_path() -> PathBuf {
