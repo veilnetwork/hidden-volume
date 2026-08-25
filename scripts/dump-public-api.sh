@@ -36,7 +36,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="$ROOT/docs/en/reference/api-surface.txt"
+OUT="${HV_API_OUT:-$ROOT/docs/en/reference/api-surface.txt}"
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
 
@@ -149,7 +149,9 @@ done
 # actually compiles against: xVeil imports this package directly. A rename
 # here breaks that build, and until now the API gate could not see it — the
 # snapshot described four Rust crates and called itself the public API.
-DART_LIB="$ROOT/experimental/flutter_plugin/hidden_volume/lib"
+# Overridable so the self-test can point the SAME extractor at fixtures —
+# a check on a copy of the rules is a check on a copy of the rules.
+DART_LIB="${HV_API_DART_LIB:-$ROOT/experimental/flutter_plugin/hidden_volume/lib}"
 echo "==========================================" >>"$TMP"
 echo "dart: hidden_volume (flutter plugin)" >>"$TMP"
 echo "==========================================" >>"$TMP"
@@ -170,6 +172,16 @@ if [[ -d "$DART_LIB" ]]; then
         # depth 0, its members at depth 1, anything inside a body at 2 or
         # more. Members of a private type are skipped whole.
         awk -v fname="$rel" '
+            # COMMENTS FIRST, before the braces are counted.
+            #
+            # They used to be skipped after, so every `{` in a doc comment —
+            # and this package documents with code examples — pushed the depth
+            # up and never brought it down. Whole classes then sat at an
+            # apparent depth of 2 or more and were dropped as "inside a body":
+            # 28 public methods of `HvSpace` and friends were simply not in the
+            # snapshot, so renaming one passed the gate with exit 0. Reproduced
+            # against this script before it was touched (report14 HV14-M6).
+            /^[[:space:]]*\/\// { next }
             {
                 start_depth = depth
                 t = $0; ob = gsub(/\{/, "{", t)
@@ -177,7 +189,6 @@ if [[ -d "$DART_LIB" ]]; then
                 depth += ob - cb
                 if (depth <= 0) { depth = 0; private_type = 0 }
             }
-            /^[[:space:]]*\/\// { next }
             start_depth == 0 && /^[[:space:]]*(abstract |final |sealed |base )*(class|enum|mixin|extension|typedef) [A-Za-z_]/ {
                 match($0, /(class|enum|mixin|extension|typedef)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/)
                 decl = substr($0, RSTART, RLENGTH)
@@ -191,8 +202,35 @@ if [[ -d "$DART_LIB" ]]; then
             start_depth > 1 || private_type { next }
             # Methods and top-level functions: a return type, a public name,
             # then a parameter list or type arguments.
-            /^[[:space:]]*(static |external )*[A-Za-z_<>?, ]+ [a-z][A-Za-z0-9_]*[(<]/ {
-                if ($0 ~ /[[:space:]]_[a-zA-Z]/) next
+            /^[[:space:]]*(static |external )*[A-Za-z0-9_<>?, ]+ [a-z][A-Za-z0-9_]*[(<]/ {
+                # Judge the DECLARED NAME, not the whole line.
+                #
+                # The guard here used to skip any line carrying a space
+                # followed by an underscore ANYWHERE on it. An
+                # expression-bodied member that delegates to a private one —
+                # `Uint8List? get(int ns, Uint8List k) => _inner.get(ns, k);`
+                # — matches that, so `HvSpace.get` was never in the snapshot at
+                # all and renaming it passed the gate with exit 0. Reproduced
+                # against this script before it was touched (report14 HV14-M6).
+                #
+                # The class above carries DIGITS. Without them `Uint8List`
+                # was unmatchable, so every method returning one — `get`,
+                # `kvKeys`, `kvKeysPage`, the whole read surface — was absent
+                # from a snapshot that called itself the public API.
+                #
+                # An `=` BEFORE the first `(` means the line is an assignment,
+                # not a declaration: `final bytes = _bufferToBytes(out);` is a
+                # local, and the old heuristic was catching those by accident.
+                # Declarations put their `=` after the parameter list, if at
+                # all.
+                paren = index($0, "(")
+                eq = index($0, "=")
+                if (eq > 0 && eq < paren) next
+                if (match($0, /[a-z][A-Za-z0-9_]*\(/)) {
+                    if (substr($0, RSTART, 1) == "_") next
+                } else if ($0 ~ /[[:space:]]_[a-zA-Z]/) {
+                    next
+                }
                 sub(/^[[:space:]]+/, "  ")
                 print fname ": " $0
                 next
@@ -201,7 +239,7 @@ if [[ -d "$DART_LIB" ]]; then
             # rule above walked straight past it — and a getter is API in
             # exactly the way a method is. Found by checking the extractor
             # against three members added the same day: it saw one of them.
-            /^[[:space:]]*(static |external )*[A-Za-z_<>?, ]+ get [a-z][A-Za-z0-9_]*/ {
+            /^[[:space:]]*(static |external )*[A-Za-z0-9_<>?, ]+ get [a-z][A-Za-z0-9_]*/ {
                 sub(/^[[:space:]]+/, "  ")
                 print fname ": " $0
                 next

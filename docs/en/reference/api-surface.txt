@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-25T10:47:54Z
+# Captured: 2026-08-25T11:27:05Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -454,14 +454,42 @@ dart: hidden_volume (flutter plugin)
 ==========================================
 
 hidden_volume.dart: class HvSpace {
+hidden_volume.dart:   int commit(List<ffi.HvWriteOp> ops) => _inner.commit(ops);
+hidden_volume.dart:   Uint8List? get(int namespace, Uint8List key) => _inner.get(namespace, key);
+hidden_volume.dart:   int commitSeq() => _inner.commitSeq();
+hidden_volume.dart:   List<int> commitHistory() => _inner.commitHistory();
+hidden_volume.dart:   int count(int namespace) => _inner.count(namespace);
+hidden_volume.dart:   List<Uint8List> kvKeys(int namespace) => _inner.kvKeys(namespace);
+hidden_volume.dart:   List<Uint8List> kvKeysPage(int namespace, Uint8List? after, int limit) =>
+hidden_volume.dart:   int eraseNamespace(int namespace) => _inner.eraseNamespace(namespace);
+hidden_volume.dart:   Uint8List? readLog(int namespace, int logId) =>
+hidden_volume.dart:   Uint8List listNamespaces() => _inner.listNamespaces();
 hidden_volume.dart:   void setPaddingPolicy(ffi.PaddingPreset preset) =>
+hidden_volume.dart:   void acknowledgeHardeningError() => _inner.acknowledgeHardeningError();
+hidden_volume.dart:   int vacuumDataBatches() => _inner.vacuumDataBatches();
+hidden_volume.dart:   int vacuumAfterOpen() => _inner.vacuumAfterOpen();
 hidden_volume.dart:   Duration scheduleDeferredVacuum({
 hidden_volume.dart:   Duration? get pendingVacuumDelay => _deferredVacuum.pendingDelay;
+hidden_volume.dart:   void cancelDeferredVacuum() => _deferredVacuum.cancel();
+hidden_volume.dart:   Uint8List spaceKeys() => _inner.spaceKeys();
 hidden_volume.dart:   void close() {
 hidden_volume.dart: void changePasswords(String path, List<ffi.HvPasswordRotation> rotations) =>
 hidden_volume.dart: void compactKnown(String path, List<Uint8List> passwords) =>
 hidden_volume.dart: class HvMultiSpace {
+hidden_volume.dart:   int openSpace(Uint8List keys) => _inner.openSpace(keys);
+hidden_volume.dart:   int spaceCount() => _inner.spaceCount();
 hidden_volume.dart:   void setPaddingPolicy(ffi.PaddingPreset preset) =>
+hidden_volume.dart:   Uint8List spaceKeys(int id) => _inner.spaceKeys(id);
+hidden_volume.dart:   int commit(int id, List<ffi.HvWriteOp> ops) => _inner.commit(id, ops);
+hidden_volume.dart:   Uint8List? get(int id, int namespace, Uint8List key) =>
+hidden_volume.dart:   Uint8List? readLog(int id, int namespace, int logId) =>
+hidden_volume.dart:   int count(int id, int namespace) => _inner.count(id, namespace);
+hidden_volume.dart:   List<Uint8List> kvKeys(int id, int namespace) => _inner.kvKeys(id, namespace);
+hidden_volume.dart:   List<Uint8List> kvKeysPage(
+hidden_volume.dart:   int commitSeq(int id) => _inner.commitSeq(id);
+hidden_volume.dart:   int vacuumDataBatches(int id) => _inner.vacuumDataBatches(id);
+hidden_volume.dart:   void vacuumSpace(int id) => _inner.vacuumSpace(id);
+hidden_volume.dart:   void close() => _inner.close();
 src/async_bindings.dart: sealed class HvOpOutcome {
 src/async_bindings.dart: class HvOpPending extends HvOpOutcome {
 src/async_bindings.dart:   String toString() => 'HvOpPending()';
@@ -472,6 +500,7 @@ src/async_bindings.dart: class HvOpPayload {
 src/async_bindings.dart:   final String type;
 src/async_bindings.dart:   final int? length;
 src/async_bindings.dart:   String toString() =>
+src/async_bindings.dart: Object? rememberableForTest(Object? value) => _rememberable(value);
 src/async_bindings.dart: class HvOpFailed extends HvOpOutcome {
 src/async_bindings.dart:   final HvException error;
 src/async_bindings.dart:   bool get mayHaveApplied => error.mayHaveApplied;
@@ -507,12 +536,16 @@ src/async_bindings.dart:   static Object? debugSpawnFailure;
 src/async_bindings.dart:   static HvSpawnStartHook? debugOnSpawnStart;
 src/async_bindings.dart:   Future<int> commit(List<HvWriteOp> ops) async => commitOperation(ops).result;
 src/async_bindings.dart:   HvOperation<int> commitOperation(List<HvWriteOp> ops) {
+src/async_bindings.dart:   Future<Uint8List?> get(int namespace, Uint8List key) {
 src/async_bindings.dart:   Future<List<HvLogEntry>> iterLogRange({
 src/async_bindings.dart:   Future<int> commitSeq() =>
 src/async_bindings.dart:   Future<List<int>> commitHistory() =>
 src/async_bindings.dart:   Future<int> count(int namespace) =>
 src/async_bindings.dart:   Future<int> eraseNamespace(int namespace) async =>
 src/async_bindings.dart:   eraseNamespaceOperation(namespace).result;
+src/async_bindings.dart:   HvOperation<int> eraseNamespaceOperation(int namespace) => _submit<int>(
+src/async_bindings.dart:   Future<Uint8List?> readLog(int namespace, int logId) {
+src/async_bindings.dart:   Future<Uint8List> listNamespaces() =>
 src/async_bindings.dart:   Future<void> setPaddingPolicy(PaddingPreset preset) async =>
 src/async_bindings.dart:   setPaddingPolicyOperation(preset).result;
 src/async_bindings.dart:   HvOperation<void> setPaddingPolicyOperation(PaddingPreset preset) =>
@@ -524,13 +557,18 @@ src/async_bindings.dart:   Future<int> vacuumAfterOpen() async => vacuumAfterOpe
 src/async_bindings.dart:   HvOperation<int> vacuumAfterOpenOperation() =>
 src/async_bindings.dart:   Duration scheduleDeferredVacuum({
 src/async_bindings.dart:   Duration? get pendingVacuumDelay => _deferredVacuum.pendingDelay;
+src/async_bindings.dart:   void cancelDeferredVacuum() => _deferredVacuum.cancel();
+src/async_bindings.dart:   Future<HvIntegrityResult> verifyIntegrity() => _call<HvIntegrityResult>(
+src/async_bindings.dart:   static Object debugCloseOk() => const _OkReply(null);
 src/async_bindings.dart:   static Object debugCloseError(String kind, String message) =>
+src/async_bindings.dart:   void debugKillWorker() => _isolate.kill(priority: Isolate.immediate);
 src/async_bindings.dart:   Future<void> close() async {
 src/async_bindings.dart:   return headerInfo(path);
 src/async_bindings.dart: Future<HvHeaderInfo> headerInfoAsync(String path, {String? dylibPath}) {
 src/async_bindings.dart: Future<void> changePasswordsAsync(
 src/async_bindings.dart: Future<void> compactKnownAsync(String path, List<Uint8List> passwords,
 src/bindings.dart: const int maxKeyLen = 256;
+src/bindings.dart: Uint8List requireKvKey(Uint8List key, String name) {
 src/bindings.dart: int requireU64(int v, String name) {
 src/bindings.dart:   final overridePath = Platform.environment['XVEIL_HV_DYLIB'];
 src/bindings.dart:   final bundled = File(Platform.resolvedExecutable)
@@ -544,11 +582,13 @@ src/bindings.dart:   external int len;
 src/bindings.dart: final class RustCallStatus extends ffi.Struct {
 src/bindings.dart:   external int code;
 src/bindings.dart:   external RustBuffer errorBuf;
+src/bindings.dart: int contractVersion() => _contractVersion();
 src/bindings.dart:   final missing = <String>[];
 src/bindings.dart:   final mismatched = <String>[];
 src/bindings.dart:   final report = StringBuffer(
 src/bindings.dart: void verifyAbiCompatibility() {
 src/bindings.dart: Map<String, int> get expectedMethodChecksums =>
+src/bindings.dart: void verifyChecksumsAgainst(Map<String, int> table) => _verifyChecksums(table);
 src/bindings.dart: int abiVerificationRuns = 0;
 src/bindings.dart: void resetAbiVerificationForTest() {
 src/bindings.dart: T rustCall<T>(T Function(ffi.Pointer<RustCallStatus>) body) {
@@ -637,6 +677,7 @@ src/bindings.dart:   final n = r.readI32();
 src/bindings.dart:   final counts = <HvNamespaceCount>[
 src/bindings.dart:   final tag = r.readU8();
 src/bindings.dart:   HvHardeningFailure? hardening;
+src/bindings.dart: HvStatsInfo debugReadStats(Uint8List bytes) => _readStats(bytes);
 src/bindings.dart: class HvPasswordRotation {
 src/bindings.dart:   final Uint8List oldPwd;
 src/bindings.dart:   final Uint8List newPwd;
@@ -646,6 +687,8 @@ src/bindings.dart:   final String kind;
 src/bindings.dart:   final String message;
 src/bindings.dart:   bool get mayHaveApplied => _kindsThatMayHaveApplied.contains(kind);
 src/bindings.dart:   String toString() => 'HvException.$kind: $message';
+src/bindings.dart: Set<String> debugKnownErrorKinds() => _hvErrorKinds.skip(1).toSet();
+src/bindings.dart: Set<String> debugKindsThatMayHaveApplied() => _kindsThatMayHaveApplied;
 src/bindings.dart:   final bytes = buf.len == 0 || buf.data == ffi.nullptr
 src/bindings.dart:   final variant = r.readI32();
 src/bindings.dart:   final msg = r.remaining > 0 ? r.readString() : '';
@@ -661,16 +704,22 @@ src/bindings.dart:   static SpaceHandleBindings open({
 src/bindings.dart:   static SpaceHandleBindings addSpace({
 src/bindings.dart:   static SpaceHandleBindings openWithKeys({
 src/bindings.dart:   int commit(List<HvWriteOp> ops) {
+src/bindings.dart:   Uint8List? get(int namespace, Uint8List key) {
 src/bindings.dart:   List<HvLogEntry> iterLogRange({
 src/bindings.dart:   int commitSeq() {
 src/bindings.dart:   List<int> commitHistory() {
 src/bindings.dart:   int count(int namespace) {
+src/bindings.dart:   List<Uint8List> kvKeys(int namespace) {
+src/bindings.dart:   List<Uint8List> kvKeysPage(int namespace, Uint8List? after, int limit) {
 src/bindings.dart:   int eraseNamespace(int namespace) {
+src/bindings.dart:   Uint8List? readLog(int namespace, int logId) {
+src/bindings.dart:   Uint8List listNamespaces() {
 src/bindings.dart:   void setPaddingPolicy(PaddingPreset preset) {
 src/bindings.dart:   HvStatsInfo stats() {
 src/bindings.dart:   void acknowledgeHardeningError() {
 src/bindings.dart:   int vacuumDataBatches() {
 src/bindings.dart:   int vacuumAfterOpen() {
+src/bindings.dart:   Uint8List spaceKeys() {
 src/bindings.dart:   HvIntegrityResult verifyIntegrity() {
 src/bindings.dart:   void close() {
 src/bindings.dart: class MultiSpaceHandleBindings {
@@ -679,9 +728,14 @@ src/bindings.dart:   int openSpace(Uint8List keys) {
 src/bindings.dart:   void vacuumSpace(int spaceId) {
 src/bindings.dart:   int spaceCount() {
 src/bindings.dart:   void setPaddingPolicy(PaddingPreset preset) {
+src/bindings.dart:   Uint8List spaceKeys(int id) {
 src/bindings.dart:   int commit(int id, List<HvWriteOp> ops) {
+src/bindings.dart:   Uint8List? get(int id, int namespace, Uint8List key) {
+src/bindings.dart:   Uint8List? readLog(int id, int namespace, int logId) {
 src/bindings.dart:   List<HvLogEntry> iterLogRange({
 src/bindings.dart:   int count(int id, int namespace) {
+src/bindings.dart:   List<Uint8List> kvKeys(int id, int namespace) {
+src/bindings.dart:   List<Uint8List> kvKeysPage(
 src/bindings.dart:   int commitSeq(int id) {
 src/bindings.dart:   int vacuumDataBatches(int id) {
 src/bindings.dart:   void close() {
