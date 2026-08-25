@@ -892,6 +892,20 @@ pub(crate) fn read_checkpoint_chain(
             Ok(c) => c,
             Err(_) => return Ok(None),
         };
+        // The two sequence numbers have to agree with each other, hop by hop.
+        //
+        // `pt.seq` is inside the chunk's AEAD, so it is AUTHENTICATED; `cc.cp_seq`
+        // is payload bytes. The writer sets both from the same value, so a hop
+        // where they differ is not a checkpoint this code produced — a faulty
+        // writer, or somebody holding the key and editing the payload alone. The
+        // chain only ever compared the INNER value across hops, which a payload
+        // edit controls entirely (report14 HV14-L3).
+        //
+        // Same answer as a mismatched high-water: stop, and let the caller fall
+        // back to a full scan rather than fold two eras into one state.
+        if pt.seq != cc.cp_seq {
+            return Ok(None);
+        }
         match seq {
             None => seq = Some(cc.cp_seq),
             Some(first) if first == cc.cp_seq => {},
