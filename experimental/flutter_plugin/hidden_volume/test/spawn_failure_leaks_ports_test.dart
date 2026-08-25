@@ -60,4 +60,44 @@ void main() {
       reason: "the watcher's ports were left open and it is still listening",
     );
   });
+
+  /// The seam itself is a call out of `_spawn`, and it used to be made BEFORE
+  /// the guarded region — so a hook that threw escaped past the cleanup and
+  /// left exactly the three ports this file is about (report14 HV14-L2).
+  test('a hook that throws does not leak what the cleanup would have closed',
+      () async {
+    HvWorkerDeath? death;
+    ReceivePort? bootReply;
+    HvAsyncSpace.debugOnSpawnStart = (d, b) {
+      death = d;
+      bootReply = b;
+      throw StateError('the hook itself failed');
+    };
+
+    await expectLater(
+      HvAsyncSpace.open(
+        path: '/definitely/not/used',
+        password: Uint8List.fromList('pw'.codeUnits),
+      ),
+      throwsA(isA<StateError>()),
+      reason: 'the hook\'s failure must still reach the caller',
+    );
+
+    expect(death, isNotNull, reason: 'the seam never fired');
+
+    final bootClosed = await bootReply!.isEmpty
+        .timeout(const Duration(seconds: 1), onTimeout: () => false);
+    expect(bootClosed, isTrue, reason: 'the bootstrap port was left open');
+
+    death!.exitPort.sendPort.send('a late exit notice');
+    final stillWatching = await death!.future
+        .then<bool>((_) => true)
+        .catchError((Object _) => true)
+        .timeout(const Duration(seconds: 1), onTimeout: () => false);
+    expect(
+      stillWatching,
+      isFalse,
+      reason: "the watcher's ports were left open and it is still listening",
+    );
+  });
 }

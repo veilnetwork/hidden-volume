@@ -17,54 +17,19 @@
 # missed: it is not a workspace member. `cargo metadata` on the workspace does
 # not see it, so a check written against the workspace would have agreed that
 # everything was fine. This walks Cargo.toml files on disk instead.
+#
+# The work itself moved to `check_intra_repo_versions.py`, which PARSES the
+# manifests. This shell version matched one line of one shape, and Cargo
+# accepts several others that mean the same thing — a dependency table, a
+# per-target section, a renamed dependency, a bare version string. A wrong
+# version in any of those passed the gate, which is the failure the check
+# exists to prevent (report14 HV14-L5). The self-test carries one fixture per
+# shape and runs first, so a check that has stopped seeing them says so before
+# it reports a clean tree.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-# The version the workspace publishes, taken from the core crate rather than
-# passed in: a gate whose expected value is supplied by its caller checks that
-# the caller can type.
-want="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/hidden-volume/Cargo.toml | head -1)"
-[ -n "$want" ] || { echo "error: no version in crates/hidden-volume/Cargo.toml" >&2; exit 2; }
-echo "==> workspace version = $want"
-
-manifests=()
-while IFS= read -r m; do manifests+=("$m"); done < <(
-  find crates -name Cargo.toml -not -path '*/target/*' | sort
-)
-# A floor, not a non-empty test: a find that stops matching would otherwise
-# report a clean sweep of nothing at all.
-if [ "${#manifests[@]}" -lt 4 ]; then
-  echo "error: found only ${#manifests[@]} manifests — discovery is broken, not the tree" >&2
-  exit 2
-fi
-echo "==> scanning ${#manifests[@]} manifest(s)"
-
-bad=0
-checked=0
-for m in "${manifests[@]}"; do
-  # Lines of the shape `<our-crate> = { ... version = "X" ... }`.
-  while IFS= read -r line; do
-    dep="${line%% *}"
-    got="$(printf '%s' "$line" | sed -n 's/.*version *= *"\([^"]*\)".*/\1/p')"
-    [ -n "$got" ] || continue
-    checked=$((checked + 1))
-    if [ "$got" != "$want" ]; then
-      echo "::error::$m: $dep is pinned at $got, workspace is at $want" >&2
-      bad=$((bad + 1))
-    fi
-  done < <(grep -E '^(hidden-volume(-[a-z]+)?) *= *\{.*version *= *"' "$m" || true)
-done
-
-if [ "$checked" -eq 0 ]; then
-  echo "error: no in-repo version constraints found — the pattern stopped matching" >&2
-  exit 2
-fi
-echo "==> $checked in-repo constraint(s) checked"
-
-if [ "$bad" -gt 0 ]; then
-  echo "$bad constraint(s) name a version this workspace does not publish" >&2
-  exit 1
-fi
-echo "==> every in-repo constraint names $want"
+python3 scripts/check_intra_repo_versions.py --self-test
+python3 scripts/check_intra_repo_versions.py
