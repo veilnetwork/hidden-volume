@@ -13,6 +13,39 @@ public Rust + FFI + Dart APIs. The format generation did not move with it
 and no migration tool was required; the 2.0.0 entry says why, and names the
 one direction of container compatibility the release does not keep.
 
+## [Unreleased]
+
+### Fixed
+
+- **The atomic rewrite had no durability barrier on Windows.** `compact` and
+  `rotate_password` publish through `atomic_rewrite_under_source_lock`, which
+  renamed with `std::fs::rename` and then called `fsync_parent_dir`. That
+  helper is `Ok(())` on non-Unix, and std's rename passes only
+  `MOVEFILE_REPLACE_EXISTING` — a flag about replacing the target, not about
+  flushing it. So on Windows the publish took no barrier at all, and the
+  comment claiming `MoveFileEx` "already provides metadata durability" was
+  simply wrong.
+
+  What that cost is not a lost compaction. `Error::RenameVisibleDurabilityUncertain`
+  exists because of audit HV-03: a caller who has just rotated a leaked
+  password must never be told the old one is dead without grounds. Since the
+  parent fsync cannot fail on Windows, that outcome could never be returned
+  there — the call reported plain success while a crash in the window could
+  still restore the old inode, and with it the old password.
+
+  The rename now goes through a `rename_durable` helper: `fs::rename`
+  unchanged on POSIX, where the parent fsync is the barrier, and `MoveFileExW`
+  with `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH` on Windows, which
+  is documented to delay the return until the move reaches the disk. This adds
+  the `Win32_Storage_FileSystem` feature to the `windows-sys` dependency that
+  was already in the tree; no new dependency, no format change, no public API
+  change.
+
+  Guarded structurally, because on POSIX `rename_durable` *is* `fs::rename` and
+  nothing behavioural on that platform can distinguish the two. **Not yet
+  proven on Windows** — that needs a power-fault run on a VM, which is how this
+  project has settled its other Windows questions.
+
 ## [2.0.2] — 2026-08-19
 
 A patch over [2.0.1](#201--2026-08-19), cut the same day. No shipped binary
