@@ -55,6 +55,7 @@ gate "rustdoc (all features)" \
 gate "rustdoc (no default features)" \
   env RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-default-features --no-deps
 gate "tests (all features)" cargo test --workspace --all-features --no-fail-fast
+gate "API extractor blind spots" ./scripts/check-api-extractor.sh
 gate "public API surface" ./scripts/dump-public-api.sh --check
 gate "docs version drift" ./scripts/check-docs-version-drift.sh
 
