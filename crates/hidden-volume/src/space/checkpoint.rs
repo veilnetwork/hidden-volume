@@ -1240,4 +1240,107 @@ mod tests {
         drop(c);
         let _ = std::fs::remove_file(&path);
     }
+
+    /// Links from two DIFFERENT checkpoints are refused, not folded into one
+    /// recorded state.
+    ///
+    /// `CheckpointChunk` promises "same value in every chunk of one chain" for
+    /// both `cp_seq` and `cp_high_water`; only the second was ever enforced,
+    /// and the fix that added the first shipped saying it had no test, because
+    /// reaching the reader "needs a real container with a multi-chunk chain and
+    /// then a forged link, which nothing in the suite builds".
+    ///
+    /// It does not need the writer. `place_chunk` takes the authenticated seq
+    /// and `CheckpointChunk` carries `next_slot`, so a chain can be laid down
+    /// link by link with whatever seq each one claims — which is exactly the
+    /// faulty-or-key-holding writer this guard is aimed at. AEAD keeps everyone
+    /// else out.
+    #[test]
+    fn a_chain_whose_links_disagree_about_their_checkpoint_is_refused() {
+        const SEQ_A: u64 = 41;
+        const SEQ_B: u64 = 42;
+
+        // Two links laid down by hand, differing ONLY in the checkpoint they
+        // claim; `head` points at `tail`, so a reader that does not compare
+        // the field walks both and folds two eras together.
+        fn lay_chain(s: &mut crate::space::Space<'_>, head_seq: u64, tail_seq: u64) -> (u64, u64) {
+            let hw = s.file.slot_count();
+            let tail = CheckpointChunk {
+                cp_seq: tail_seq,
+                cp_high_water: hw,
+                next_slot: NO_RECORD,
+                owned: vec![1],
+                pool: Vec::new(),
+            };
+            let tail_slot = s
+                .place_chunk(ChunkKind::Checkpoint, tail_seq, &tail.encode().unwrap())
+                .unwrap();
+            let head = CheckpointChunk {
+                cp_seq: head_seq,
+                cp_high_water: hw,
+                next_slot: tail_slot,
+                owned: vec![2],
+                pool: Vec::new(),
+            };
+            let head_slot = s
+                .place_chunk(ChunkKind::Checkpoint, head_seq, &head.encode().unwrap())
+                .unwrap();
+            // AFTER placing: the reader refuses any hop at or past `total`, and
+            // these chunks were appended beyond the count taken above.
+            (head_slot, s.file.slot_count())
+        }
+
+        let path = scratch_path();
+        let mut c = Container::create(&path, Argon2Params::MIN).unwrap();
+        let mut s = c.create_space(b"pw").unwrap();
+        for i in 0..8u32 {
+            let mut tx = s.begin_tx();
+            tx.put(Namespace::SETTINGS, format!("k{i}").as_bytes(), b"v")
+                .unwrap();
+            tx.commit().unwrap();
+        }
+
+        let keys = s.state.keys.clone();
+        let container_id = s.state.keys.container_id;
+
+        // Vacuity guard FIRST: the same shape with ONE checkpoint must be
+        // accepted, or the refusal below is about the fixture rather than the
+        // disagreement.
+        let (agreeing_head, total) = lay_chain(&mut s, SEQ_A, SEQ_A);
+        let agreed = crate::open::read_checkpoint_chain(
+            s.file,
+            &keys,
+            &container_id,
+            agreeing_head,
+            total,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(
+            agreed.is_some(),
+            "a two-link chain that agrees about its checkpoint must be read, \
+             or this test proves nothing about the disagreement"
+        );
+
+        let (forged_head, total) = lay_chain(&mut s, SEQ_A, SEQ_B);
+        let forged = crate::open::read_checkpoint_chain(
+            s.file,
+            &keys,
+            &container_id,
+            forged_head,
+            total,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(
+            forged.is_none(),
+            "links from two different checkpoints were folded into one state"
+        );
+
+        drop(s);
+        drop(c);
+        let _ = std::fs::remove_file(&path);
+    }
 }
