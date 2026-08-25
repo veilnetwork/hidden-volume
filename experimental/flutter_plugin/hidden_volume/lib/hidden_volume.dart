@@ -75,6 +75,8 @@ export 'src/async_bindings.dart'
         HvOpOutcome,
         HvOpPending,
         HvOpSucceeded,
+        HvOpPayload,
+        rememberableForTest,
         HvOpFailed,
         HvOpIndeterminate,
         HvOpUnknown,

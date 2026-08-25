@@ -245,14 +245,70 @@ class HvOpPending extends HvOpOutcome {
   String toString() => 'HvOpPending()';
 }
 
-/// The worker completed the operation. [value] is what the matching
-/// method would have returned.
+/// The worker completed the operation.
+///
+/// [value] is what the matching method returned WHEN that is something safe
+/// to keep, and a stand-in otherwise. The distinction matters because this
+/// outcome is remembered: the ledger holds the last 128 of them, so whatever
+/// is in here stays reachable for 128 more operations.
+///
+/// A commit answers a sequence number, an existence check a bool, a rename
+/// nothing — small, not secret, and exactly the answers `outcomeOf` exists to
+/// give back to a caller who lost their reply. A READ answers the plaintext,
+/// and remembering 128 plaintexts is not a bound on secret lifetime, it is a
+/// second copy of the data with a longer life than the call that asked for it
+/// (report14 HV14-M1). A payload is therefore replaced by [HvOpPayload],
+/// which says what it was and how big, and nothing else.
 class HvOpSucceeded extends HvOpOutcome {
   const HvOpSucceeded(this.value);
   final Object? value;
 
   @override
   String toString() => 'HvOpSucceeded($value)';
+}
+
+/// Stands in for a result that was not kept.
+///
+/// Carries the shape of the answer — its type and, for bytes, its length —
+/// because that is what a caller reconstructing what happened can use, and it
+/// is not the data. `toString` names no content for the same reason: a
+/// diagnostic dump that prints a ledger must not print what was read.
+class HvOpPayload {
+  const HvOpPayload(this.type, this.length);
+
+  /// What the answer was, as a type name.
+  final String type;
+
+  /// How many bytes or elements it held, when that is known.
+  final int? length;
+
+  @override
+  String toString() =>
+      length == null ? 'HvOpPayload($type)' : 'HvOpPayload($type, $length)';
+}
+
+/// Reduce a worker's answer to what may be remembered.
+///
+/// Small scalars pass through: they ARE the answer for the operations whose
+/// outcome anyone asks about later. Everything else is described rather than
+/// held — see [HvOpSucceeded].
+@visibleForTesting
+Object? rememberableForTest(Object? value) => _rememberable(value);
+
+Object? _rememberable(Object? value) {
+  if (value == null || value is int || value is bool || value is double) {
+    return value;
+  }
+  if (value is List<int>) {
+    return HvOpPayload('${value.runtimeType}', value.length);
+  }
+  if (value is List) {
+    return HvOpPayload('${value.runtimeType}', value.length);
+  }
+  if (value is String) {
+    return HvOpPayload('String', value.length);
+  }
+  return HvOpPayload('${value.runtimeType}', null);
 }
 
 /// The worker answered, and the answer was a refusal by the core.
@@ -1020,7 +1076,8 @@ class HvAsyncSpace {
       throw e;
     }
     final value = (r as _OkReply).value;
-    _record(opId, HvOpSucceeded(value));
+    // The LEDGER gets a description, the caller gets the answer.
+    _record(opId, HvOpSucceeded(_rememberable(value)));
     return value as T;
   }
 
@@ -1055,8 +1112,15 @@ class HvAsyncSpace {
   }
 
   /// Read a KV value, or null if absent.
-  Future<Uint8List?> get(int namespace, Uint8List key) => _call<Uint8List?>(
-      (reply) => _GetRequest(namespace: namespace, key: key, reply: reply));
+  Future<Uint8List?> get(int namespace, Uint8List key) {
+    // Checked HERE, before the `SendPort` copies it into the worker: a key the
+    // core will refuse costs nothing to refuse now, and a lot to refuse there
+    // (report14 HV14-M3).
+    requireKvKey(key, 'key');
+    return _call<Uint8List?>(
+      (reply) => _GetRequest(namespace: namespace, key: key, reply: reply),
+    );
+  }
 
   /// Read a contiguous range of log entries.
   Future<List<HvLogEntry>> iterLogRange({

@@ -112,6 +112,35 @@ int _u32(int v, String name) {
 /// caught only inside the worker isolate, and comes back as a generic
 /// `HvException('Internal', ...)` instead of an `ArgumentError` naming the
 /// parameter.
+/// Longest KV key the core will accept (`MAX_KEY_LEN` in
+/// `space/index.rs`). Mirrored here rather than asked over FFI because it is
+/// what decides whether a request is worth SENDING.
+const int maxKeyLen = 256;
+
+/// Refuse a key the core would refuse, before it crosses the isolate boundary.
+///
+/// The worker takes requests through a `SendPort`, which COPIES what it is
+/// given. A key was never checked on this side, so a caller could hand over
+/// megabytes per request and have as many of them copied into the worker as
+/// the in-flight ceiling allows — the byte budget does not see them, because
+/// it weighs commit payloads and a `get` carries none. Every one of those
+/// copies is then refused by the core for being too long, which is the one
+/// thing that could have been said before spending the memory
+/// (report14 HV14-M3).
+///
+/// Empty is refused for the same reason the core refuses it: there is no such
+/// record, and asking is a request that cannot succeed.
+Uint8List requireKvKey(Uint8List key, String name) {
+  if (key.isEmpty || key.length > maxKeyLen) {
+    throw ArgumentError.value(
+      key.length,
+      name,
+      'key length must be 1..$maxKeyLen bytes (the core refuses the rest)',
+    );
+  }
+  return key;
+}
+
 int requireU64(int v, String name) {
   if (v < 0) {
     throw ArgumentError.value(
