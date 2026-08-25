@@ -132,14 +132,33 @@ impl OwnedSet {
         })
     }
 
-    /// The set as an ascending `Vec`, which is the form the checkpoint record
-    /// is encoded from. Allocates the eight-bytes-per-slot this type exists to
-    /// avoid holding, so it is for the writer that needs it and not for
-    /// convenience at a call site that could iterate.
+    /// The set as an ascending `Vec`.
+    ///
+    /// TESTS ONLY. Production goes through
+    /// [`try_to_sorted_vec`](Self::try_to_sorted_vec): this one allocates
+    /// eight bytes per slot without asking, and under `panic = "abort"` an
+    /// allocator that says no ends the process (report14 HV14-M5).
+    #[cfg(test)]
     pub(crate) fn to_sorted_vec(&self) -> Vec<u64> {
         let mut v = Vec::with_capacity(self.len);
         v.extend(self.iter());
         v
+    }
+
+    /// [`to_sorted_vec`](Self::to_sorted_vec), refusing instead of aborting.
+    ///
+    /// Eight bytes per slot is 128 MiB at the supported ceiling, and this
+    /// crate builds with `panic = "abort"` — so an allocation this size that
+    /// the allocator cannot serve does not unwind, it ENDS THE PROCESS. The
+    /// checkpoint writer is the one caller that asks for it, and a checkpoint
+    /// is an optimisation hint: refusing to write one costs the next open a
+    /// full scan, while dying costs whatever the process was in the middle of
+    /// (report14 HV14-M5).
+    pub(crate) fn try_to_sorted_vec(&self) -> Result<Vec<u64>, std::collections::TryReserveError> {
+        let mut v: Vec<u64> = Vec::new();
+        v.try_reserve_exact(self.len)?;
+        v.extend(self.iter());
+        Ok(v)
     }
 
     /// Absorb `other`. Used by the parallel scan's reduce, where the two

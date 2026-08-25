@@ -215,8 +215,11 @@ impl DecoyPool {
         }
     }
 
-    /// The pool's slots, sorted ascending — the form the checkpoint
-    /// records. O(capacity); called once per checkpoint write.
+    /// The pool as an ascending `Vec`.
+    ///
+    /// TESTS ONLY — see [`try_sorted`](Self::try_sorted) for why production
+    /// asks first (report14 HV14-M5).
+    #[cfg(test)]
     pub(crate) fn sorted(&self) -> Vec<u64> {
         let mut out = Vec::with_capacity(self.len);
         for (w, &word) in self.words.iter().enumerate() {
@@ -228,6 +231,25 @@ impl DecoyPool {
             }
         }
         out
+    }
+
+    /// [`sorted`](Self::sorted), refusing instead of aborting.
+    ///
+    /// Same reason as `OwnedSet::try_to_sorted_vec`: eight bytes per slot is
+    /// 128 MiB at the ceiling, and `panic = "abort"` turns an allocation the
+    /// allocator cannot serve into process death (report14 HV14-M5).
+    pub(crate) fn try_sorted(&self) -> Result<Vec<u64>, std::collections::TryReserveError> {
+        let mut out: Vec<u64> = Vec::new();
+        out.try_reserve_exact(self.len)?;
+        for (w, &word) in self.words.iter().enumerate() {
+            let mut word = word;
+            while word != 0 {
+                let bit = word.trailing_zeros() as u64;
+                out.push(w as u64 * 64 + bit);
+                word &= word - 1;
+            }
+        }
+        Ok(out)
     }
 
     /// Remove and return a uniformly-drawn slot, or `None` when empty.

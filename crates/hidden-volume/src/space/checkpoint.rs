@@ -182,15 +182,19 @@ fn merge_carried_pool(
     mut carried: crate::space::pool::DecoyPool,
     owned: &crate::space::slots::OwnedSet,
     high_water: u64,
-) -> Vec<u64> {
+) -> Result<Vec<u64>> {
+    // Fallible for the reason `owned` is: this is the other 128-MiB-at-the-
+    // ceiling allocation on the checkpoint path, and `panic = "abort"` makes
+    // a refusal from the allocator process death (report14 HV14-M5).
+    let too_big = |_| Error::Internal("checkpoint pool does not fit in memory");
     if carried.is_empty() {
-        return live.sorted();
+        return live.try_sorted().map_err(too_big);
     }
     for slot in live.iter() {
         carried.record(slot);
     }
     carried.retain_below_and_unowned(high_water, owned);
-    carried.sorted()
+    carried.try_sorted().map_err(too_big)
 }
 
 impl CheckpointChunk {
@@ -405,7 +409,17 @@ impl<'f> Space<'f> {
         // record is encoded from it. Already ascending and duplicate-free by
         // the set's construction, which is what the sort and dedup here used
         // to guarantee.
-        let owned: Vec<u64> = self.state.owned_slots.to_sorted_vec();
+        // Fallibly: eight bytes per slot is 128 MiB at the supported ceiling,
+        // and this crate builds with `panic = "abort"`, so an allocation the
+        // allocator cannot serve ENDS THE PROCESS rather than unwinding. A
+        // checkpoint is an optimisation hint — refusing to write one costs the
+        // next open a full scan, and that is a trade worth making against
+        // taking the caller down with it (report14 HV14-M5).
+        let owned: Vec<u64> = self
+            .state
+            .owned_slots
+            .try_to_sorted_vec()
+            .map_err(|_| Error::Internal("checkpoint owned set does not fit in memory"))?;
         debug_assert!(
             owned.last().map(|&s| s < cp_high_water).unwrap_or(true),
             "owned slots must be below the checkpoint high-water"
@@ -419,7 +433,7 @@ impl<'f> Space<'f> {
             carried_pool,
             &self.state.owned_slots,
             cp_high_water,
-        );
+        )?;
         debug_assert!(
             pool.last().map(|&s| s < cp_high_water).unwrap_or(true),
             "pool slots must be below the checkpoint high-water"
@@ -637,6 +651,41 @@ mod format_doc_agreement_tests {
 #[cfg(test)]
 mod tests {
 
+    /// A checkpoint that does not fit in memory is REFUSED, not fatal.
+    ///
+    /// Eight bytes per slot is 128 MiB at the supported ceiling, and this
+    /// crate builds with `panic = "abort"` — so an allocation the allocator
+    /// cannot serve does not unwind, it ends the process. A checkpoint is an
+    /// optimisation hint: refusing to write one costs the next open a full
+    /// scan, and that is the trade (report14 HV14-M5).
+    ///
+    /// The refusal is exercised through the same fallible path the writer
+    /// takes, with a length no allocator will serve.
+    #[test]
+    fn a_slot_list_too_large_to_hold_is_refused_rather_than_fatal() {
+        use crate::space::slots::OwnedSet;
+
+        // An honest set first, or the refusal below is about nothing.
+        let mut small = OwnedSet::default();
+        for slot in [1u64, 5, 9] {
+            small.insert(slot);
+        }
+        assert_eq!(small.try_to_sorted_vec().unwrap(), vec![1, 5, 9]);
+
+        // `try_reserve_exact` refuses a request past what the allocator can
+        // serve — `isize::MAX` bytes is the hard ceiling for any allocation,
+        // so this is refused on every platform rather than attempted.
+        let mut v: Vec<u64> = Vec::new();
+        assert!(
+            v.try_reserve_exact(usize::MAX / 8).is_err(),
+            "the fixture's premise is that an over-large reserve FAILS"
+        );
+
+        // And the pool half answers the same way.
+        let pool = crate::space::pool::DecoyPool::default();
+        assert!(pool.try_sorted().is_ok());
+    }
+
     /// The claim that lets `open` swallow a self-heal failure, put to the file.
     ///
     /// `open_space_with_keys_inner_opts` ends with
@@ -738,7 +787,8 @@ mod tests {
     #[test]
     fn a_carried_slot_this_era_owns_is_not_recorded_as_reusable() {
         let owned = [5u64, 9].into_iter().collect();
-        let pool = super::merge_carried_pool(&pool_of(&[2]), pool_of(&[5, 7, 9]), &owned, 100);
+        let pool =
+            super::merge_carried_pool(&pool_of(&[2]), pool_of(&[5, 7, 9]), &owned, 100).unwrap();
         assert_eq!(pool, vec![2, 7], "a live slot was recorded as reusable");
     }
 
@@ -746,7 +796,8 @@ mod tests {
     #[test]
     fn a_carried_slot_above_the_high_water_is_not_recorded() {
         let pool =
-            super::merge_carried_pool(&pool_of(&[1]), pool_of(&[3, 42]), &Default::default(), 10);
+            super::merge_carried_pool(&pool_of(&[1]), pool_of(&[3, 42]), &Default::default(), 10)
+                .unwrap();
         assert_eq!(pool, vec![1, 3]);
     }
 
@@ -754,7 +805,8 @@ mod tests {
     #[test]
     fn the_live_pool_and_the_carried_one_are_both_kept() {
         let pool =
-            super::merge_carried_pool(&pool_of(&[4, 1]), pool_of(&[1, 6]), &Default::default(), 10);
+            super::merge_carried_pool(&pool_of(&[4, 1]), pool_of(&[1, 6]), &Default::default(), 10)
+                .unwrap();
         assert_eq!(pool, vec![1, 4, 6]);
     }
     use super::*;
