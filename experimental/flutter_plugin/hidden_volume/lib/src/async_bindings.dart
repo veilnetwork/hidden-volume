@@ -387,11 +387,85 @@ class HvWorkerDeath {
   final errorPort = ReceivePort();
   final _completer = Completer<Never>();
 
+  /// Operations still waiting on an answer, each holding the gate that will
+  /// carry the death to its caller. Entries are removed as their operations
+  /// answer, so this is the count in flight and not a tally of everything that
+  /// ever ran.
+  final _waiting = <Completer<Object?>>{};
+
   Future<Never> get future => _completer.future;
+
+  /// Wait for [operation], but give up if this worker dies first.
+  ///
+  /// NOT the obvious race of the two futures against each other, which is what
+  /// this replaced and which leaks (report14 HV14-H1). That helper attaches a
+  /// listener to every future it is given and cancels none of them, so each
+  /// call left a listener on the shared, never-completed death future — and
+  /// that listener holds the closure over the completer that already carries
+  /// the ANSWER. For a read, the answer is the plaintext. `dispose`
+  /// deliberately leaves the death future uncompleted, so the whole pile was
+  /// released only when a worker genuinely exited; until then every byte ever
+  /// read stayed reachable. Measured at roughly +46 MiB of RSS over 16k reads
+  /// of 8 KiB.
+  ///
+  /// Here the registration is on THIS side and is removed the moment the
+  /// operation answers, so nothing outlives the call that made it.
+  ///
+  /// One case does linger by construction: a caller that puts a timeout on the
+  /// returned future and walks away leaves its gate registered, because the
+  /// operation it is waiting on may still answer. That is bounded by the
+  /// callers who do it — close and reap, once per worker — rather than by
+  /// throughput.
+  Future<Object?> race(Future<Object?> operation) {
+    if (_completer.isCompleted) {
+      // Already dead: the answer is the death, and it is the death the caller
+      // gets. [operation] is not abandoned though — it can still complete, and
+      // it usually completes with an ERROR, because the caller's next move on
+      // a dead worker is to close the reply port and `Stream.first` on a
+      // closed port throws. Nobody reads that, but an error future with no
+      // handler is reported as an uncaught async error. Handled here, which is
+      // what the previous racing helper did as a side effect of listening on
+      // both.
+      operation.ignore();
+      return _completer.future;
+    }
+    final gate = Completer<Object?>();
+    _waiting.add(gate);
+    operation.then(
+      (Object? value) {
+        if (_waiting.remove(gate)) gate.complete(value);
+      },
+      onError: (Object error, StackTrace stack) {
+        if (_waiting.remove(gate)) gate.completeError(error, stack);
+      },
+    );
+    return gate.future;
+  }
+
+  /// In flight right now — for tests that assert this does not grow.
+  @visibleForTesting
+  int get debugWaitingCount => _waiting.length;
 
   void _die(String why) {
     if (_completer.isCompleted) return;
-    _completer.completeError(HvException('Internal', why), StackTrace.current);
+    final error = HvException('Internal', why);
+    final stack = StackTrace.current;
+    _completer.completeError(error, stack);
+    // The death is now delivered through the registry below, so this future
+    // can have no listener at all — and an error future without one is
+    // reported as unhandled when it is collected. It was always handled
+    // before only as a side effect of every in-flight call listening on it,
+    // which is precisely the listening that leaked. Marked handled here; a
+    // caller that holds it still receives the error.
+    _completer.future.ignore();
+    // Everything still waiting gets the same answer the future carries. Taken
+    // out of the set first: a listener downstream could otherwise reach back
+    // in while this is iterating.
+    final waiting = _waiting.toList();
+    _waiting.clear();
+    for (final gate in waiting) {
+      gate.completeError(error, stack);
+    }
   }
 
   /// Stop watching. The future is left as it is: a caller already holding it
@@ -858,7 +932,7 @@ class HvAsyncSpace {
     }
     Object? firstReply;
     try {
-      firstReply = await Future.any<Object?>([bootReply.first, death.future]);
+      firstReply = await death.race(bootReply.first);
     } catch (e) {
       bootReply.close();
       death.dispose();
@@ -921,7 +995,7 @@ class HvAsyncSpace {
     // Raced against the worker's death, not awaited alone (audit HV-09).
     final Object? r;
     try {
-      r = await Future.any<Object?>([reply.first, _death.future]);
+      r = await _death.race(reply.first);
     } on HvException catch (e) {
       // The worker died under this call, and that is an answer worth
       // filing rather than dropping. It is NOT the answer "nothing was
@@ -1200,7 +1274,8 @@ class HvAsyncSpace {
       // has already died will never answer, and `errorsAreFatal` makes it die
       // QUIETLY, so watching the reply alone burns the whole timeout and then
       // queues a drain for an answer that cannot come.
-      raw = await Future.any<Object?>([done, _death.future])
+      raw = await _death
+          .race(done)
           .timeout(closeTimeout, onTimeout: () => const _CloseTimedOut());
     } catch (e) {
       // The worker died mid-close. Nothing is left to wait for, and whether
@@ -1292,7 +1367,8 @@ class _AbandonedWorker {
   void reap() {
     final reply = ReceivePort();
     unawaited(
-      Future.any<Object?>([reply.first, death.future])
+      death
+          .race(reply.first)
           .timeout(_grace, onTimeout: () => null)
           .catchError((Object _) => null)
           .whenComplete(() {
