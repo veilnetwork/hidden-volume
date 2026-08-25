@@ -13,9 +13,27 @@ public Rust + FFI + Dart APIs. The format generation did not move with it
 and no migration tool was required; the 2.0.0 entry says why, and names the
 one direction of container compatibility the release does not keep.
 
-## [Unreleased]
+## [2.0.3] — 2026-08-25
 
 ### Fixed
+
+- **`compact` and `rotate_password` failed on Windows.** The durable rename
+  above called `MoveFileExW` directly and returned its error. `std::fs::rename`
+  does not stop there — on `ERROR_ACCESS_DENIED` it falls back to
+  `SetFileInformationByHandle` with POSIX semantics, which replaces a file
+  other handles still hold. `atomic_rewrite_under_source_lock` holds the source
+  locked while it publishes, so it meets exactly that error, and dropping the
+  fallback broke both entry points outright. Found by running the suite on a
+  Windows machine; the cross-compile was green. The write-through barrier is
+  lost on that fallback path, which beats a rename that does not happen.
+
+- **A test asserted that a `spawn_blocking` future cannot answer on its first
+  poll.** It can: the pool thread may finish before the `JoinHandle` is polled.
+  The abandon helper reports whether the operation was really caught in flight
+  now, and its callers retry until it is. The verdict-versus-disk test takes a
+  fresh container per attempt, because retrying on the same one leaves the data
+  of an attempt that completed and the next abandoned attempt then reports
+  `NeverStarted` against a log it did not write.
 
 - **The atomic rewrite had no durability barrier on Windows.** `compact` and
   `rotate_password` publish through `atomic_rewrite_under_source_lock`, which
