@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-25T11:27:05Z
+# Captured: 2026-08-25T11:55:54Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -419,6 +419,8 @@ lib.rs:   pub async fn commit_history(&self) -> HvResult<Vec<u64>> {
 lib.rs:   pub async fn set_padding_policy(&self, preset: PaddingPreset) -> HvResult<()> {
 lib.rs:   pub async fn list_namespaces(&self) -> HvResult<Vec<u8>> {
 lib.rs:   pub async fn count(&self, namespace: u8) -> HvResult<u64> {
+lib.rs:   pub async fn kv_keys(&self, namespace: u8) -> HvResult<Vec<u8>> {
+lib.rs:   pub async fn kv_keys_page(
 lib.rs:   pub async fn get(&self, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
 lib.rs:   pub async fn read_log(&self, namespace: u8, log_id: u64) -> HvResult<Option<Vec<u8>>> {
 lib.rs:   pub async fn iter_log_range(
