@@ -1852,7 +1852,26 @@ fn rename_durable(from: &std::path::Path, to: &std::path::Path) -> std::io::Resu
             )
         };
         if ok == 0 {
-            return Err(std::io::Error::last_os_error());
+            let err = std::io::Error::last_os_error();
+            // ERROR_ACCESS_DENIED (5) is not "you may not do this". On Windows
+            // it is what `MoveFileEx` returns when the destination is open
+            // elsewhere or carries the readonly attribute — and this rewrite
+            // holds the source locked while it publishes, so it meets it.
+            //
+            // `std::fs::rename` survives that by falling back to
+            // `SetFileInformationByHandle` with POSIX semantics, which
+            // replaces a file other handles still hold. Calling `MoveFileExW`
+            // directly dropped that fallback, and compaction on Windows began
+            // failing with `PermissionDenied` — caught by running the suite on
+            // a Windows machine, which is the only thing that could have
+            // caught it: the cross-compile was green.
+            //
+            // The barrier is lost on this path. A rename that happens without
+            // it beats one that does not happen.
+            if err.raw_os_error() == Some(5) {
+                return std::fs::rename(from, to);
+            }
+            return Err(err);
         }
         Ok(())
     }
