@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-25T09:51:04Z
+# Captured: 2026-08-25T10:47:54Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -654,6 +654,7 @@ src/bindings.dart: void changePasswords(String path, List<HvPasswordRotation> ro
 src/bindings.dart:   rustCall<void>((s) {
 src/bindings.dart: void compactKnown(String path, List<Uint8List> passwords) {
 src/bindings.dart:   rustCall<void>((s) {
+src/bindings.dart: void requireOptU64PairForTest(int? a, String an, int? b, String bn) {
 src/bindings.dart: class SpaceHandleBindings {
 src/bindings.dart:   static SpaceHandleBindings create({
 src/bindings.dart:   static SpaceHandleBindings open({

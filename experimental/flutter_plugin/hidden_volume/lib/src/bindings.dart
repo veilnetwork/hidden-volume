@@ -1581,6 +1581,34 @@ RustBuffer _optU64(int? v, String name) {
   return _bufferFromBytes(w.toBytes());
 }
 
+/// Turn a PAIR of optional bounds into buffers, judging both first.
+///
+/// `_optU64` ALLOCATES: the `RustBuffer` it returns is native memory, and
+/// native frees it only by consuming it in the call it was made for. Two
+/// bounds in a row therefore meant the first buffer existed while the second
+/// was still being validated — and a refusal there threw past the call, with
+/// nobody left to free what had already been allocated (report14 HV14-L1).
+///
+/// Both at once rather than a check the caller has to remember: the order is
+/// then a property of this function instead of something two call sites (and
+/// the next one) each have to get right.
+@visibleForTesting
+void requireOptU64PairForTest(int? a, String an, int? b, String bn) {
+  if (a != null) requireU64(a, an);
+  if (b != null) requireU64(b, bn);
+}
+
+(RustBuffer, RustBuffer) _optU64Pair(
+  int? first,
+  String firstName,
+  int? second,
+  String secondName,
+) {
+  if (first != null) requireU64(first, firstName);
+  if (second != null) requireU64(second, secondName);
+  return (_optU64(first, firstName), _optU64(second, secondName));
+}
+
 /// Low-level wrapper over the uniffi-exported `SpaceHandle` symbols.
 /// The typed facade in [`../hidden_volume.dart`] adds resource-management
 /// (close-on-finalize) and idiomatic naming on top.
@@ -1709,8 +1737,9 @@ class SpaceHandleBindings {
     _ensureOpen();
     final ns = _ns(namespace);
     final lim = _u32(limit, 'limit');
-    final startBuf = _optU64(start, 'start');
-    final endBuf = _optU64(end, 'end');
+    // Both bounds judged before either becomes native memory — see
+    // `_optU64Pair`.
+    final (startBuf, endBuf) = _optU64Pair(start, 'start', end, 'end');
     final h = _cloneHandle();
     final out = rustCall<RustBuffer>(
         (s) => _spIterLogRange(h, ns, startBuf, endBuf, lim, s));
@@ -2141,8 +2170,9 @@ class MultiSpaceHandleBindings {
     final sid = _sid(id);
     final ns = _ns(namespace);
     final lim = _u32(limit, 'limit');
-    final startBuf = _optU64(start, 'start');
-    final endBuf = _optU64(end, 'end');
+    // Both bounds judged before either becomes native memory — see
+    // `_optU64Pair`.
+    final (startBuf, endBuf) = _optU64Pair(start, 'start', end, 'end');
     final h = _clone();
     final out = rustCall<RustBuffer>(
         (s) => _msIterLogRange(h, sid, ns, startBuf, endBuf, lim, s));

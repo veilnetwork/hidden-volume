@@ -964,9 +964,14 @@ class HvAsyncSpace {
     // opening the container fails FAST — usually on its very first FFI call —
     // and a watcher attached afterwards would miss exactly that case.
     final death = HvWorkerDeath();
-    debugOnSpawnStart?.call(death, bootReply);
     final Isolate isolate;
     try {
+      // INSIDE the guarded region, not before it. The hook is test-only, but
+      // it is a call out of this function like any other, and a throw from it
+      // used to escape past the cleanup below — leaving the bootstrap port and
+      // the watcher's two ports open for the life of the process, which is the
+      // very leak the cleanup exists to prevent (report14 HV14-L2).
+      debugOnSpawnStart?.call(death, bootReply);
       final forced = debugSpawnFailure;
       if (forced != null) throw forced;
       isolate = await Isolate.spawn<_SpawnConfig>(
