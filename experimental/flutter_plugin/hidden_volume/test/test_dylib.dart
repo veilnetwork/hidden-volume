@@ -93,4 +93,31 @@ String resolveDylibPath() {
 }
 
 /// Convenience wrapper: resolve, open, return the [DynamicLibrary].
+///
+/// **This reaches the CALLING isolate only.** Every test here that spawns a
+/// worker — `worker_death_test`, and anything else going through
+/// `HvAsyncSpace._spawn` — runs its FFI in a fresh isolate that inherits no
+/// Dart memory, so the library this opened is invisible there. The worker
+/// re-runs the resolver in `lib/src/bindings.dart`, which falls back to the
+/// bare `libhidden_volume_ffi.so` / `.dylib` and finds it only if the loader
+/// already can.
+///
+/// On macOS it can, so those tests pass and the requirement stays invisible.
+/// On Linux it cannot, and they fail with a raw `Failed to load dynamic
+/// library` from inside the worker rather than anything that names the cause.
+/// Measured on aarch64 Linux: 107 of 109 passed, and the two that did not were
+/// this and nothing else.
+///
+/// The plugin already has the answer, and it is process-wide rather than
+/// per-isolate — `bindings.dart` reads `XVEIL_HV_DYLIB` before anything else:
+///
+/// ```sh
+/// cargo build -p hidden-volume-ffi --release
+/// XVEIL_HV_DYLIB=$PWD/../../../target/release/libhidden_volume_ffi.so \
+///   flutter test          # or set LD_LIBRARY_PATH to that directory
+/// ```
+///
+/// With it set the whole suite is green on Linux. Nothing else in this
+/// repository mentions that variable — it appears exactly once, where it is
+/// read — which is why this note is here rather than in a wiki nobody opens.
 DynamicLibrary openTestDylib() => DynamicLibrary.open(resolveDylibPath());
