@@ -1650,11 +1650,14 @@ where
     // MOVEFILE_WRITE_THROUGH, which is what makes it DURABLE. std's rename
     // passes only the first, and the parent fsync below is a no-op there — so
     // that platform had no barrier at all. See `rename_durable`.
-    if let Err(e) = rename_durable(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        drop(tmp_handle);
-        return Err(Error::Io(e));
-    }
+    let barrier = match rename_durable(&tmp, path) {
+        Ok(barrier) => barrier,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            drop(tmp_handle);
+            return Err(Error::Io(e));
+        },
+    };
 
     // M2: fsync parent directory so the rename is durable. On Unix
     // ext4/xfs/etc. without this, a crash after rename can revert the
@@ -1683,6 +1686,15 @@ where
     // reachable elsewhere", which beats "this might not survive a crash".
     if source_links > 1 {
         return Err(Error::RenameVisibleAliasesNotRevoked(source_links - 1));
+    }
+
+    // Two ways to reach the same outcome, and they are named apart because an
+    // operator reading the message wants to know which platform failed them.
+    if barrier == RenameBarrier::Skipped {
+        return Err(Error::RenameVisibleDurabilityUncertain(
+            "the rename fell back to a path that carries no write-through \
+             barrier (destination held open elsewhere)",
+        ));
     }
 
     if durability.is_err() {
@@ -1876,6 +1888,28 @@ fn fsync_parent_dir(path: &std::path::Path) -> std::io::Result<()> {
     }
 }
 
+/// What a rename achieved, beyond being visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenameBarrier {
+    /// Everything this platform owes for the rename ITSELF was done.
+    ///
+    /// On Unix that is nothing: the barrier there is the parent-directory
+    /// fsync the caller takes afterwards, so Unix always answers this and the
+    /// fsync's own result carries the durability.
+    Taken,
+    /// The rename is visible and its barrier was NOT taken.
+    ///
+    /// Windows only, and it is a real path rather than a theoretical one: the
+    /// `MoveFileExW` write-through call fails with ERROR_ACCESS_DENIED when
+    /// the destination is open elsewhere, and the fallback that rescues it is
+    /// `std::fs::rename`, which carries no barrier. Since `fsync_parent_dir`
+    /// is a no-op on Windows, nothing else could notice — so the rewrite
+    /// reported plain success, and a caller who had just rotated a leaked
+    /// password was told the old one was dead with no grounds (report16
+    /// HV16-H1).
+    Skipped,
+}
+
 /// Rename `from` over `to` atomically AND durably.
 ///
 /// On POSIX this is `fs::rename` unchanged — the caller's `fsync_parent_dir`
@@ -1895,10 +1929,21 @@ fn fsync_parent_dir(path: &std::path::Path) -> std::io::Result<()> {
 /// grounds — could not fire on that platform. It reported plain success while
 /// a crash in the window could still restore the old inode, and with it the
 /// old password.
-fn rename_durable(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+///
+/// Which is why the answer says WHICH of the two happened. Taking the barrier
+/// and giving it up both used to return `Ok(())`, and the give-up path is not
+/// hypothetical: it is the ERROR_ACCESS_DENIED fallback below, whose own
+/// comment already said the barrier was lost. Nothing read it, and on Windows
+/// nothing else could have (report16 HV16-H1).
+fn rename_durable(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<RenameBarrier> {
     #[cfg(not(windows))]
     {
-        std::fs::rename(from, to)
+        #[cfg(test)]
+        if rename_barrier_should_be_skipped() {
+            std::fs::rename(from, to)?;
+            return Ok(RenameBarrier::Skipped);
+        }
+        std::fs::rename(from, to).map(|()| RenameBarrier::Taken)
     }
     #[cfg(windows)]
     {
@@ -1936,13 +1981,16 @@ fn rename_durable(from: &std::path::Path, to: &std::path::Path) -> std::io::Resu
             // caught it: the cross-compile was green.
             //
             // The barrier is lost on this path. A rename that happens without
-            // it beats one that does not happen.
+            // it beats one that does not happen — but it is REPORTED, because
+            // this function's whole job on Windows is the barrier, and
+            // returning the same answer with and without it is what let a
+            // rotation promise durability it had not achieved.
             if err.raw_os_error() == Some(5) {
-                return std::fs::rename(from, to);
+                return std::fs::rename(from, to).map(|()| RenameBarrier::Skipped);
             }
             return Err(err);
         }
-        Ok(())
+        Ok(RenameBarrier::Taken)
     }
 }
 
@@ -1965,6 +2013,25 @@ thread_local! {
 #[cfg(all(test, unix))]
 fn fsync_parent_dir_should_fail() -> bool {
     FSYNC_PARENT_DIR_FAILS.with(std::cell::Cell::get)
+}
+
+#[cfg(all(test, not(windows)))]
+thread_local! {
+    /// Test-only switch that makes [`rename_durable`] report
+    /// [`RenameBarrier::Skipped`].
+    ///
+    /// The condition it stands in for is Windows-only — `MoveFileExW` refusing
+    /// with ERROR_ACCESS_DENIED and the fallback rescuing the rename without a
+    /// barrier — and it cannot be provoked on this platform at all. What IS
+    /// the same on every platform is what the caller does with the answer, and
+    /// that is what used to be missing: the fallback existed, said so in its
+    /// own comment, and nothing read it.
+    static RENAME_BARRIER_SKIPPED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(all(test, not(windows)))]
+fn rename_barrier_should_be_skipped() -> bool {
+    RENAME_BARRIER_SKIPPED.with(std::cell::Cell::get)
 }
 
 fn compact_in_place_impl(
@@ -2139,6 +2206,25 @@ mod hv06_tests {
             helper_code.contains("MOVEFILE_WRITE_THROUGH"),
             "the helper without the write-through flag is the old behaviour \
              wearing a new name"
+        );
+        // And the path that gives the barrier UP must say so. The fallback
+        // rescues a rename Windows refused, and it carries no barrier — while
+        // `fsync_parent_dir` is a no-op there, so nothing else could notice.
+        // Answering the same thing with and without the barrier is what let a
+        // rotation promise durability it had not achieved (report16 HV16-H1).
+        //
+        // Scoped to the WINDOWS branch. Written against the whole helper
+        // first, where it matched the `#[cfg(test)]` switch a few lines above
+        // — which reports `Skipped` by construction — and stayed green with
+        // the fallback changed back to `Taken`.
+        let windows_at = helper_code
+            .find("#[cfg(windows)]")
+            .expect("the helper has no Windows branch to check");
+        let windows_branch = &helper_code[windows_at..];
+        assert!(
+            windows_branch.contains("RenameBarrier::Skipped"),
+            "the ERROR_ACCESS_DENIED fallback reports the same success as the \
+             barrier path"
         );
     }
 
@@ -2487,6 +2573,81 @@ mod hv03_tests {
         drop(c);
 
         let mut c = Container::open(&path).unwrap();
+        assert!(
+            c.open_space(b"old").is_err(),
+            "the old password must be dead — that is what the caller rotated for"
+        );
+    }
+
+    /// Restores the barrier switch even if the test panics.
+    struct ForcedBarrierSkip;
+
+    impl ForcedBarrierSkip {
+        fn arm() -> Self {
+            RENAME_BARRIER_SKIPPED.with(|c| c.set(true));
+            Self
+        }
+    }
+
+    impl Drop for ForcedBarrierSkip {
+        fn drop(&mut self) {
+            RENAME_BARRIER_SKIPPED.with(|c| c.set(false));
+        }
+    }
+
+    /// The OTHER way durability can be missed, and the one nothing watched.
+    ///
+    /// On Windows `MoveFileExW` with write-through fails with
+    /// ERROR_ACCESS_DENIED when the destination is open elsewhere — which this
+    /// rewrite meets, since it holds the source while it publishes — and the
+    /// fallback that rescues it is a plain `std::fs::rename`, with no barrier.
+    /// `fsync_parent_dir` is a no-op on Windows, so the test above could not
+    /// fire there and nothing else looked: the rewrite reported plain success
+    /// on a path whose own comment said the barrier was lost (report16
+    /// HV16-H1).
+    ///
+    /// The Windows branch cannot run here; what is pinned is what the caller
+    /// does with the answer, which is where the gap was. The branch itself is
+    /// type-checked by building for a Windows target.
+    #[test]
+    fn a_rename_that_lost_its_barrier_is_reported_the_same_way() {
+        let dir = std::env::temp_dir().join(format!("hv16h1-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("c.bin");
+        let _cleanup = scopeguard(&dir);
+
+        {
+            let mut c = Container::create_with_options(&path, fast_options()).unwrap();
+            let mut s = c.create_space(b"old").unwrap();
+            let mut tx = s.begin_tx();
+            tx.put(crate::space::index::Namespace::SETTINGS, b"k", b"v")
+                .unwrap();
+            tx.commit().unwrap();
+        }
+
+        let err = {
+            let _armed = ForcedBarrierSkip::arm();
+            Container::change_passwords(&path, &[(b"old", b"new")], RepackOptions::default())
+                .expect_err("a rename without its barrier must not be reported as success")
+        };
+        assert!(
+            matches!(err, Error::RenameVisibleDurabilityUncertain(_)),
+            "expected the durability-specific outcome, got {err:?}"
+        );
+        // Named apart from the fsync case: an operator reading this wants to
+        // know which of the two happened.
+        let Error::RenameVisibleDurabilityUncertain(detail) = &err else {
+            unreachable!()
+        };
+        assert!(
+            detail.contains("write-through"),
+            "the two durability paths report the same text: {detail}"
+        );
+
+        // And it APPLIED, exactly like the fsync case.
+        let mut c = Container::open(&path).unwrap();
+        c.open_space(b"new")
+            .expect("the new password must open the container");
         assert!(
             c.open_space(b"old").is_err(),
             "the old password must be dead — that is what the caller rotated for"
