@@ -93,6 +93,39 @@ impl Drop for ForcedChurnFailure {
     }
 }
 
+/// A seam for making a post-commit hardening step FAIL.
+///
+/// The three steps fail on conditions no test can arrange: a full disk for
+/// padding, an I/O error for churn, a refusing device for the fsync. Without a
+/// seam the only thing a test outside the core could assert was that a HEALTHY
+/// space reports nothing — which is satisfied by a surface that reports
+/// nothing whatever happens, and that is precisely the defect the record
+/// exists to prevent (report16 XV-08).
+///
+/// Thread-local, like the container's own fsync seam, so arming it in one test
+/// does not arm every parallel test in the binary. Compiled always, because
+/// `#[cfg(test)]` would make it invisible to the crates that consume this one;
+/// the ARMING is gated behind the `test-hooks` feature, and with that feature
+/// off the switch can never be set and the branch is a load of a `false` this
+/// crate never writes.
+pub mod hardening_hooks {
+    use std::cell::Cell;
+
+    thread_local! {
+        static SYNC_FAILS: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Make the next post-commit fsync report failure on THIS thread.
+    #[cfg(feature = "test-hooks")]
+    pub fn set_sync_fails(v: bool) {
+        SYNC_FAILS.with(|c| c.set(v));
+    }
+
+    pub(crate) fn sync_should_fail() -> bool {
+        SYNC_FAILS.with(Cell::get)
+    }
+}
+
 /// Which post-commit hardening step failed, and why.
 ///
 /// The three run after the superblock is already durable, and each protects a

@@ -2137,6 +2137,63 @@ impl MultiSpaceHandle {
         Ok(g.vacuum_hosted(id as usize)?)
     }
 
+    /// Aggregated stats for hosted space `id` — the same shape
+    /// [`SpaceHandle::stats`] returns, including the sticky
+    /// [`StatsInfo::hardening_failure`].
+    ///
+    /// This surface had no stats at all, and a host running several identities
+    /// over one container is exactly the configuration that gets no other
+    /// answer. Its storage layer answered `null` for both the utilization and
+    /// the hardening record — and `null` is indistinguishable from "nothing is
+    /// wrong". So a masking, churn or sync step that failed after a commit was
+    /// never shown to anybody, on the container where it was least visible
+    /// (report16 XV-08).
+    pub fn stats(&self, id: u32) -> HvResult<StatsInfo> {
+        let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
+        let (s, hardening) = g.with_space(id as usize, |sp| {
+            let s = sp.stats()?;
+            // Read inside the same lock hold as the stats walk and AFTER it,
+            // for the reason spelled out on `SpaceHandle::stats`: the pair a
+            // host acts on has to describe one moment.
+            let h = sp.last_hardening_error().map(hardening_failure_info);
+            Ok::<_, hidden_volume::Error>((s, h))
+        })??;
+        let total: usize = s.namespace_counts.iter().map(|(_, n)| *n).sum();
+        Ok(StatsInfo {
+            commit_seq: s.commit_seq,
+            commit_history_len: s.commit_history_len as u64,
+            owned_chunk_count: s.owned_chunk_count as u64,
+            total_slot_count: s.total_slot_count,
+            reusable_slot_count: s.reusable_slot_count,
+            total_entries: total as u64,
+            namespace_counts: s
+                .namespace_counts
+                .into_iter()
+                .map(|(ns, c)| NamespaceCount {
+                    namespace: ns.as_u8(),
+                    count: c as u64,
+                })
+                .collect(),
+            hardening_failure: hardening,
+        })
+    }
+
+    /// Acknowledge the sticky hardening record of hosted space `id` — "I have
+    /// shown this to the person". See
+    /// [`SpaceHandle::acknowledge_hardening_error`].
+    ///
+    /// Without it the host had nothing to call, and its storage layer either
+    /// did nothing and reported success — clearing its own copy of a warning
+    /// with nothing agreeing — or refused every acknowledgement on a
+    /// multi-space container (report16 XV-08).
+    pub fn acknowledge_hardening_error(&self, id: u32) -> HvResult<()> {
+        let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
+        g.with_space(id as usize, |sp| {
+            sp.acknowledge_hardening_error();
+        })?;
+        Ok(())
+    }
+
     /// Number of hosted spaces.
     pub fn space_count(&self) -> HvResult<u32> {
         let g = self.inner.lock().map_err(|_| poisoned_mutex())?;
