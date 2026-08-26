@@ -1338,18 +1338,33 @@ fn scan_and_recover_parallel_inner(
 /// semantics; matching cfg with `parallel-scan` keeps the supported
 /// platforms uniform.
 ///
-/// **Safety.**
-/// `Mmap::map(&File)` is `unsafe` because concurrent mutation of the
-/// file by another process would expose torn reads / aliasing
-/// violations to safe Rust. We rely on the
-/// [`LOCK_EX`](crate::container::ContainerFile)
-/// (writer) and `LOCK_SH` (this read path) flock guarantees acquired
-/// at `Container::open`/`open_readonly` time to exclude concurrent
-/// writers. On filesystems that don't honour `flock(2)` (some NFS,
-/// SMB without proper setup, FUSE), this guarantee is weaker — the
-/// existing `mmap` documentation in `docs/en/contributing/benchmarks.md` and
-/// `docs/en/guide/multi-device.md` already calls out that hidden-volume
-/// containers MUST live on `flock`-honouring storage.
+/// **Safety, and what it actually rests on.**
+///
+/// `Mmap::map(&File)` is `unsafe` because mutation of the file under the
+/// mapping exposes torn reads and aliasing violations to safe Rust — and a
+/// `ftruncate` under it is worse than either: touching a page that is no
+/// longer backed raises SIGBUS, which ends the PROCESS. It is not an `Err`
+/// this or any caller can handle.
+///
+/// What excludes that is `flock(LOCK_EX)` on the writer side and `LOCK_SH`
+/// here. **`flock(2)` is ADVISORY**: it excludes writers that ASK for the
+/// lock. A process running as the same user that simply opens the file and
+/// truncates it is not excluded by anything, on any filesystem, however
+/// well that filesystem honours locks. The earlier version of this note named
+/// only NFS/SMB/FUSE, which is a narrower and different problem — a
+/// non-cooperating local writer needs no exotic filesystem (report16
+/// HV16-M1).
+///
+/// So the precondition for this path is not "storage that honours `flock`"
+/// but "a directory no hostile process of this user can write". That is a
+/// property of where the host puts its containers, and the library cannot
+/// check it.
+///
+/// A host that cannot assert it must use the default path, which reads
+/// through `pread` and is unaffected: a truncate there is a short read, not a
+/// signal. This is why `mmap` is an off-by-default feature reached only
+/// through its own entry points, and why nothing shipped by this workspace
+/// turns it on — pinned by `mmap_is_not_on_by_default`.
 #[cfg(all(feature = "mmap", unix))]
 pub(crate) fn scan_and_recover_mmap(
     container: &ContainerFile,

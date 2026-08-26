@@ -752,10 +752,17 @@ impl Container {
     /// minimum-trust profiles.
     ///
     /// **Concurrency.** The flock acquired by `Container::open`
-    /// (LOCK_EX) excludes concurrent writers; the mmap stays
-    /// consistent for the lifetime of the call. On filesystems that
-    /// don't honour `flock(2)` (some NFS, FUSE), the safety
-    /// assumption is weaker — see `docs/en/guide/multi-device.md`.
+    /// (LOCK_EX) excludes concurrent writers that ASK for the lock, and the
+    /// mmap stays consistent for the lifetime of the call against those.
+    ///
+    /// **It excludes nobody else.** `flock(2)` is advisory: a process of the
+    /// same user that opens the file without taking the lock and truncates it
+    /// raises SIGBUS in THIS process when the scan touches a page that is no
+    /// longer backed — a process abort, not an `Err`. That needs no unusual
+    /// filesystem. Use this only where the container's directory is not
+    /// writable by a hostile local process; otherwise use
+    /// [`Self::open_space`], which reads through `pread` and turns the same
+    /// truncate into a short read (report16 HV16-M1).
     #[cfg(all(feature = "mmap", unix))]
     pub fn open_space_mmap(&mut self, password: &[u8]) -> Result<Space<'_>> {
         let keys = self.derive_keys(password)?;
