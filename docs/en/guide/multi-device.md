@@ -43,6 +43,15 @@ wins.
   Rust 1.89+ `File::try_lock`). NFS and other distributed filesystems
   may relax this — do not run the container on a network filesystem
   that does not honour `flock`.
+- **`flock` is ADVISORY, and that is a separate limit from the one above.**
+  It coordinates processes that ASK for the lock. A process running as the
+  same user that opens the container and writes to it without taking the lock
+  is excluded by nothing, on any filesystem. Put containers in a directory no
+  other program of that user writes to; file permissions, not locks, are what
+  enforce that.
+- This matters most for the optional `mmap` scan feature, which is off by
+  default: a truncate under a mapping raises SIGBUS and ends the process,
+  while the default `pread` path turns the same truncate into a short read.
 
 ### Per-space monotonic seq
 

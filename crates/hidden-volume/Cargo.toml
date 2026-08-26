@@ -23,11 +23,16 @@ cli = ["dep:clap"]
 # concurrent positional reads from a shared `&File` handle.
 parallel-scan = ["dep:rayon"]
 # Zero-copy memory-mapped read path for the open-time discovery scan.
-# Optional because: (a) it adds an unsafe surface (memmap2's Mmap is
-# `unsafe` to construct — concurrent file mutation by another process
-# would violate Rust aliasing rules; we rely on the LOCK_EX / LOCK_SH
-# flock to exclude that case), (b) on small containers there is no
-# measurable win over the streaming `pread` path. cfg(unix) only.
+#
+# OFF BY DEFAULT, and it should stay off unless the host owns the directory
+# its containers live in. `Mmap::map` is `unsafe` because mutation under the
+# mapping breaks Rust's aliasing rules, and a truncate under it raises SIGBUS
+# — a process abort, not an error. The flock this path relies on is ADVISORY:
+# it excludes writers that ask for the lock, not a same-user process that
+# does not, and that needs no unusual filesystem (report16 HV16-M1).
+#
+# The default `pread` path turns the same truncate into a short read.
+# On small containers there is no measurable win here anyway. cfg(unix) only.
 mmap = ["dep:memmap2"]
 # Exposes `open::test_hooks` — the open-scan fast-path counter and its
 # disable switch — to code OUTSIDE this crate.
