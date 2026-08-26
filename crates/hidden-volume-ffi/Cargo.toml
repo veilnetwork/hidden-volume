@@ -30,6 +30,10 @@ required-features = ["bindgen-cli"]
 # Pulls uniffi's bindgen CLI helpers. Off by default so production
 # builds of the cdylib don't include the bindgen code.
 bindgen-cli = ["uniffi/cli"]
+# Exposes the core's fault-injection seams to THIS crate's tests. Off for
+# production builds; a boundary test that can only ever see a healthy space
+# cannot tell a reported record from a surface that reports nothing.
+test-hooks = ["hidden-volume/test-hooks"]
 
 [dependencies]
 # Path + version: cargo-deny requires a version constraint on path

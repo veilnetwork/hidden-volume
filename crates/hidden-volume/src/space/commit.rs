@@ -475,7 +475,13 @@ impl<'f> Space<'f> {
             .map(|_| ());
         // One fsync for whatever landed, so both still share a single snapshot
         // interval — the property that made them one chain in the first place.
-        let sync_result = self.file.fsync();
+        let sync_result = if crate::space::hardening_hooks::sync_should_fail() {
+            Err(crate::Error::Io(std::io::Error::other(
+                "test hook: forced post-commit fsync failure",
+            )))
+        } else {
+            self.file.fsync()
+        };
         // First failure reported WITH THE STEP IT CAME FROM, all three
         // attempted. A bare error told the host that hardening failed and not
         // which of three unrelated things is no longer true (report9 HV-06).
