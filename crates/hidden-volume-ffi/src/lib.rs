@@ -264,6 +264,35 @@ pub enum HvError {
     /// reached the host at all. Committing is not blocked.
     #[error("a previous publish may have reached the disk; reopen before {0}")]
     PublishUncertain(String),
+    /// The path names something other than a plain file — a symlink, a
+    /// device node, a directory.
+    ///
+    /// **Nothing was touched.** An in-place rewrite ends in a rename over
+    /// the path, and a rename replaces the NAME: through a symlink it
+    /// replaces the LINK and leaves the container it points at unchanged,
+    /// old password and all. Refused rather than reported as success.
+    ///
+    /// Remedy: pass the path the link resolves to, if that is what was
+    /// meant.
+    #[error("path is not a regular file this library can rewrite in place: {0}")]
+    SourceIsNotARegularFile(String),
+    /// An atomic rewrite **applied at the path it was given**, and the
+    /// previous file is still reachable under this many OTHER names.
+    ///
+    /// **The operation applied.** After a password change the new password
+    /// is in force at the path that was named. What is qualified is the
+    /// REVOCATION: a hard link is a second name for the same file, so
+    /// every other name still opens the pre-rotation container with the
+    /// old password and the spaces this rewrite removed.
+    ///
+    /// Not a failure to retry — retrying rewrites the same name again.
+    /// Remedy: find and remove the other names, or accept knowingly that a
+    /// copy of the pre-rotation container exists.
+    #[error("rewrite is visible but the old file is still reachable under {others} other name(s)")]
+    RenameVisibleAliasesNotRevoked {
+        /// How many OTHER names still resolve to the pre-rewrite file.
+        others: u64,
+    },
 }
 
 impl From<hidden_volume::Error> for HvError {
@@ -297,6 +326,10 @@ impl From<hidden_volume::Error> for HvError {
             },
             E::RenameVisibleContentUnverified(s) => {
                 HvError::RenameVisibleContentUnverified(s.into())
+            },
+            E::SourceIsNotARegularFile(s) => HvError::SourceIsNotARegularFile(s.into()),
+            E::RenameVisibleAliasesNotRevoked(others) => {
+                HvError::RenameVisibleAliasesNotRevoked { others }
             },
             E::PublishUncertain(s) => HvError::PublishUncertain(s.into()),
             // `hidden_volume::Error` is `#[non_exhaustive]`, so this
@@ -3117,6 +3150,8 @@ mod tests {
             hidden_volume::Error::ReadOnly,
             hidden_volume::Error::RenameVisibleDurabilityUncertain("d"),
             hidden_volume::Error::RenameVisibleContentUnverified("c"),
+            hidden_volume::Error::SourceIsNotARegularFile("s"),
+            hidden_volume::Error::RenameVisibleAliasesNotRevoked(1),
             hidden_volume::Error::PublishUncertain("p"),
             hidden_volume::Error::Malformed("m"),
             hidden_volume::Error::Kdf("k"),

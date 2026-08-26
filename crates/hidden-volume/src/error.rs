@@ -108,6 +108,46 @@ pub enum Error {
     #[error("rename is visible but the file at that path is not the one written: {0}")]
     RenameVisibleContentUnverified(&'static str),
 
+    /// The path names something other than a plain file this library can
+    /// rewrite in place — a symlink, a FIFO, a device node.
+    ///
+    /// **Refused BEFORE anything is touched.** A rewrite writes a sibling temp
+    /// and renames it over the path, and a rename replaces the LEXICAL name:
+    /// given a symlink it replaces the LINK with a new regular file and leaves
+    /// the container the link pointed at exactly as it was. So a password
+    /// rotation through an alias returned `Ok` while the real container — and
+    /// the password someone rotated because it leaked — stayed reachable at the
+    /// target path (report16 HV16-H2).
+    ///
+    /// Resolving the link instead would revoke the right object, but it would
+    /// also write into a directory the caller never named and reopen the race
+    /// the link itself is. Refusing says what happened; the caller can pass the
+    /// resolved path if that is what they meant.
+    #[error("path is not a regular file this library can rewrite in place: {0}")]
+    SourceIsNotARegularFile(&'static str),
+
+    /// The rewrite landed, and the previous inode is still reachable under
+    /// another name.
+    ///
+    /// A hard link is a second NAME for the same file, not a copy. The rewrite
+    /// replaces the name it was given; every other name goes on resolving to
+    /// the OLD inode, which still opens with the OLD password and still holds
+    /// the spaces this rewrite removed.
+    ///
+    /// **Not a failure to retry** — the same shape as
+    /// [`Self::RenameVisibleDurabilityUncertain`]: the operation is visible at
+    /// the path that was named, and what is qualified is how far the revocation
+    /// reached. Retrying rewrites the same name again and changes nothing.
+    ///
+    /// The caller's remedy is to find and remove the other names, or to accept
+    /// knowingly that a copy of the pre-rotation container exists. Whoever can
+    /// create a link can usually also copy the file, so this is the boundary of
+    /// what a path-local rewrite can promise rather than a hole in it — but
+    /// promising revocation and delivering it for one name only is what this
+    /// variant exists to stop (report16 HV16-M3).
+    #[error("rewrite is visible but the old file is still reachable under {0} other name(s)")]
+    RenameVisibleAliasesNotRevoked(u64),
+
     /// A publish got at least one Superblock replica onto the disk and then
     /// failed, so this handle's view of the tree may be one era behind what a
     /// reopen would select.

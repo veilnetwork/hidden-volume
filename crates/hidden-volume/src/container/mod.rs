@@ -1314,14 +1314,23 @@ impl Container {
     /// nothing behind to show it was attempted (audit HV-06).
     ///
     /// The qualifier is not decoration. `rename(2)` is the point of no
-    /// return, and two outcomes are reported after it, both meaning the
-    /// old file is already gone:
+    /// return, and three outcomes are reported after it, all meaning the
+    /// old file is already gone from THIS path:
     /// [`Error::RenameVisibleDurabilityUncertain`] (the rewrite is in
-    /// place; whether the directory entry survives a crash is unknown)
-    /// and [`Error::RenameVisibleContentUnverified`] (the path resolves
-    /// to a file this call did not write). Neither is a failure to
-    /// retry against the old container, because there is no old
-    /// container left to retry against.
+    /// place; whether the directory entry survives a crash is unknown),
+    /// [`Error::RenameVisibleContentUnverified`] (the path resolves
+    /// to a file this call did not write) and
+    /// [`Error::RenameVisibleAliasesNotRevoked`] (the rewrite applied, and
+    /// the previous file is still reachable under another name). None is a
+    /// failure to retry against the old container, because there is no old
+    /// container left at this path to retry against.
+    ///
+    /// **What a rename replaces is a NAME.** So the path must name a plain
+    /// file: given a symlink the rename would replace the LINK and leave the
+    /// container it points at untouched, which is a revocation that revokes
+    /// nothing. That is refused up front with
+    /// [`Error::SourceIsNotARegularFile`], before anything is opened
+    /// (report16 HV16-H2).
     pub fn compact_known(
         path: &std::path::Path,
         passwords: &[&[u8]],
@@ -1485,6 +1494,40 @@ where
     // The exclusive lock is unchanged — it is the write PERMISSION that is
     // dropped, and only until the rename, which is a directory operation
     // and needs nothing from this descriptor.
+    // WHAT THE PATH NAMES, before anything is opened.
+    //
+    // The rewrite ends in a rename over `path`, and a rename replaces the
+    // LEXICAL name. Given a symlink it replaces the LINK with a new regular
+    // file and leaves the container the link pointed at untouched — so a
+    // password rotation through an alias returned `Ok` while the real
+    // container, and the password someone rotated because it leaked, stayed
+    // reachable at the target path. Every check downstream passed: the source
+    // was opened by following the link, and the post-rename inode pin compared
+    // the new file against itself (report16 HV16-H2).
+    //
+    // `symlink_metadata` is the one call that does not follow. A missing path
+    // is left to the open below to report, so the error a caller gets for
+    // "no such container" does not change.
+    let source_links = match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(Error::SourceIsNotARegularFile(
+                "path is a symbolic link; a rewrite would replace the link and \
+                 leave the container it points at unchanged",
+            ));
+        },
+        Ok(meta) if !meta.file_type().is_file() => {
+            return Err(Error::SourceIsNotARegularFile("path is not a regular file"));
+        },
+        // How many NAMES the source has. A hard link is a second name for the
+        // same inode, and the rewrite replaces only the one it was given; read
+        // here because after the rename this inode is unlinked from `path` and
+        // the count no longer answers the question.
+        Ok(meta) => source_link_count(&meta),
+        // Unknown is not wrong. Let the open below decide whether there is a
+        // container here at all.
+        Err(_) => 1,
+    };
+
     let mut src = Container::open_exclusive_readonly(path)?;
 
     let tmp = unique_temp_path_in_parent(path, prefix)?;
@@ -1635,12 +1678,38 @@ where
     #[cfg(unix)]
     verify_renamed_inode(path, pre_rename_inode)?;
 
+    // Reported before durability and after the inode pin, in order of how bad
+    // the news is: "this is not the file we wrote" beats "the old file is still
+    // reachable elsewhere", which beats "this might not survive a crash".
+    if source_links > 1 {
+        return Err(Error::RenameVisibleAliasesNotRevoked(source_links - 1));
+    }
+
     if durability.is_err() {
         return Err(Error::RenameVisibleDurabilityUncertain(
             "parent-directory fsync failed after a successful rename",
         ));
     }
     Ok(())
+}
+
+/// How many names the file behind `meta` has.
+///
+/// Unix answers exactly; everywhere else the answer is "one", which is what
+/// the code assumed everywhere before it started asking. Windows hard links
+/// exist and are not visible through `std`'s metadata, so this is a limit of
+/// the check rather than a claim about the platform.
+fn source_link_count(meta: &std::fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        meta.nlink()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        1
+    }
 }
 
 /// After the rename, `path` must resolve to the very inode the rewrite

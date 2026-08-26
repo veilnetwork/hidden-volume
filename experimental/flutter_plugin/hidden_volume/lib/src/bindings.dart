@@ -1231,7 +1231,9 @@ Uint8List? _readOptByteVec(Uint8List bytes) {
 /// "Compression", "Cancelled", "WrongNamespaceKind", "TooManyNamespaces",
 /// "IntegrityFailure", "ContainerTooLarge", "UnreadableNewerState",
 /// "RenameVisibleDurabilityUncertain", "RenameVisibleContentUnverified",
-/// "PublishUncertain", or "InternalPanic" for an unexpected Rust panic).
+/// "PublishUncertain", "SourceIsNotARegularFile",
+/// "RenameVisibleAliasesNotRevoked", or "InternalPanic" for an unexpected
+/// Rust panic).
 ///
 /// "ContainerTooLarge" now also covers OPENING a container past the
 /// open-scan budget; it used to arrive as "Malformed", which said the
@@ -1258,8 +1260,14 @@ class HvException implements Exception {
   ///  * `PublishUncertain` — the commit burnt its `seq` and a Superblock
   ///    replica may already be on the disk, so the file may hold an era
   ///    this handle does not know about;
-  ///  * the two `RenameVisible*` kinds — the rewrite **applied**; the old
-  ///    container is gone and the new passwords are already in effect.
+  ///  * the three `RenameVisible*` kinds — the rewrite **applied**; the old
+  ///    container is gone at the path that was named and the new passwords
+  ///    are already in effect there. `RenameVisibleAliasesNotRevoked` adds
+  ///    that some OTHER name still resolves to the pre-rewrite file, which is
+  ///    a revocation to finish rather than a rotation to redo.
+  ///
+  /// `SourceIsNotARegularFile` is deliberately NOT here: it is refused before
+  /// anything is opened.
   ///
   /// For all three the remedy is to reopen and look. Retrying is what a
   /// caller does when it believes nothing happened, and on a deniable
@@ -1284,6 +1292,10 @@ const _kindsThatMayHaveApplied = <String>{
   'PublishUncertain',
   'RenameVisibleDurabilityUncertain',
   'RenameVisibleContentUnverified',
+  // The rewrite APPLIED at the path that was named; what is qualified is how
+  // far the revocation reached. A caller that reads this as "nothing happened"
+  // and retries with the old password is wrong twice over.
+  'RenameVisibleAliasesNotRevoked',
 };
 
 /// The names an [HvException.kind] can carry, for the drift check above.
@@ -1327,6 +1339,15 @@ const _hvErrorKinds = <String>[
   'RenameVisibleDurabilityUncertain',
   'RenameVisibleContentUnverified',
   'PublishUncertain',
+  // report16 HV16-H2 / HV16-M3 — the two answers a path-local rewrite owes
+  // when the path is not the whole story. `SourceIsNotARegularFile` is a
+  // refusal before anything is touched: through a symlink the rewrite would
+  // have replaced the LINK and left the container it points at with the old
+  // password. `RenameVisibleAliasesNotRevoked` is not a refusal — the rewrite
+  // applied at the name it was given, and the old file is still reachable
+  // under another one.
+  'SourceIsNotARegularFile',
+  'RenameVisibleAliasesNotRevoked',
 ];
 
 HvException _liftHvException(RustBuffer buf) {

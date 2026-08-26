@@ -218,6 +218,11 @@ void main() {
     for (final kind in const [
       'RenameVisibleDurabilityUncertain',
       'RenameVisibleContentUnverified',
+      // report16 HV16-M3. The rewrite applied at the name it was given; what
+      // is qualified is that another name still resolves to the old file. A
+      // caller reading it as "nothing happened" retries with the old
+      // password, which no longer opens the name it just rotated.
+      'RenameVisibleAliasesNotRevoked',
     ]) {
       expect(HvOpFailed(HvException(kind, '')).mayHaveApplied, isTrue,
           reason: '$kind means the rewrite applied');
@@ -232,6 +237,10 @@ void main() {
       'ReadOnly',
       'PayloadTooLarge',
       'UnreadableNewerState',
+      // report16 HV16-H2. The one kind that looks like its neighbours and is
+      // not: the path is a symlink or otherwise not a plain file, and the
+      // rewrite is refused before anything is opened.
+      'SourceIsNotARegularFile',
     ]) {
       expect(HvOpFailed(HvException(kind, '')).mayHaveApplied, isFalse,
           reason: '$kind is refused before a byte is written');
@@ -340,8 +349,7 @@ void main() {
             'completions must have aged out');
   });
 
-  test('an outcome is filed before the worker answers, as pending',
-      () async {
+  test('an outcome is filed before the worker answers, as pending', () async {
     final space = await makeSpace();
     addTearDown(space.close);
 
