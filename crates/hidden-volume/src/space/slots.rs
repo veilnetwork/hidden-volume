@@ -118,6 +118,48 @@ impl OwnedSet {
     }
 
     /// Ascending iteration over the slots in the set.
+    /// A copy of the set that reports failure instead of aborting.
+    ///
+    /// The checkpoint writer needs a SNAPSHOT: placing each chunk of the chain
+    /// adds the slot it landed in to this very set, so walking the live one
+    /// while writing would encode slots the record is not about. A bitmap copy
+    /// is one bit per slot — 16 MiB at the supported ceiling against the 64
+    /// MiB the eight-bytes-per-slot list cost (report17 HV17-M4).
+    pub(crate) fn try_clone(&self) -> Result<Self, std::collections::TryReserveError> {
+        let mut words: Vec<u64> = Vec::new();
+        words.try_reserve_exact(self.words.len())?;
+        words.extend_from_slice(&self.words);
+        Ok(Self {
+            words,
+            len: self.len,
+        })
+    }
+
+    /// The same slots, DESCENDING.
+    ///
+    /// The checkpoint chain is written tail-first — each chunk needs its
+    /// successor's slot before it can be sealed — and it used to get there by
+    /// materialising the whole set as eight bytes per slot and indexing
+    /// backwards. That is 64 MiB at the supported ceiling, and the pool is
+    /// another one beside it, in a crate that builds with `panic = "abort"`
+    /// (report17 HV17-M4). Walking the bitmap backwards costs one word at a
+    /// time and lets the writer hold one chunk's worth instead.
+    pub(crate) fn iter_rev(&self) -> impl Iterator<Item = u64> + '_ {
+        self.words.iter().enumerate().rev().flat_map(|(w, word)| {
+            let mut bits = *word;
+            std::iter::from_fn(move || {
+                if bits == 0 {
+                    return None;
+                }
+                // Highest set bit first, which is what makes the whole walk
+                // descending rather than only the words.
+                let b = 63 - bits.leading_zeros() as u64;
+                bits &= !(1u64 << b);
+                Some((w as u64) * 64 + b)
+            })
+        })
+    }
+
     pub(crate) fn iter(&self) -> impl Iterator<Item = u64> + '_ {
         self.words.iter().enumerate().flat_map(|(w, word)| {
             let mut bits = *word;
@@ -154,6 +196,10 @@ impl OwnedSet {
     /// is an optimisation hint: refusing to write one costs the next open a
     /// full scan, while dying costs whatever the process was in the middle of
     /// (report14 HV14-M5).
+    /// TESTS ONLY, since the checkpoint writer stopped materialising the owned
+    /// set (report17 HV17-M4). Kept because the fallible-copy property it
+    /// stands for is still worth asserting.
+    #[cfg(test)]
     pub(crate) fn try_to_sorted_vec(&self) -> Result<Vec<u64>, std::collections::TryReserveError> {
         let mut v: Vec<u64> = Vec::new();
         v.try_reserve_exact(self.len)?;
@@ -423,5 +469,48 @@ mod tests {
         assert!(!shown.contains("17"), "{shown}");
         assert!(!shown.contains("4242"), "{shown}");
         assert!(shown.contains('2'), "{shown} should still carry the count");
+    }
+}
+#[cfg(test)]
+mod rev_tests {
+    use super::OwnedSet;
+
+    /// Descending, exactly, and over the same slots the ascending walk sees.
+    ///
+    /// The checkpoint writer walks both halves backwards so it never has to
+    /// hold either as eight bytes per slot; if this order is wrong the record
+    /// is written with its groups reversed, and the reader sees a set that is
+    /// not the one that was checkpointed (report17 HV17-M4).
+    #[test]
+    fn iter_rev_is_iter_reversed() {
+        // Spanning several words, and both ends of a word: bit 0 and bit 63
+        // are where an off-by-one in the bit arithmetic shows up.
+        let slots = [0u64, 1, 63, 64, 65, 127, 128, 4095, 4096];
+        let set: OwnedSet = slots.into_iter().collect();
+
+        let up: Vec<u64> = set.iter().collect();
+        let mut down: Vec<u64> = set.iter_rev().collect();
+        assert_eq!(down.len(), up.len(), "the two walks see different sets");
+        down.reverse();
+        assert_eq!(down, up, "iter_rev is not iter reversed");
+        assert_eq!(up, slots.to_vec(), "the fixture is not what it claims");
+    }
+
+    #[test]
+    fn iter_rev_of_an_empty_set_is_empty() {
+        let set = OwnedSet::default();
+        assert_eq!(set.iter_rev().count(), 0);
+    }
+
+    /// A copy is a copy: same members, and independent of the original.
+    #[test]
+    fn try_clone_is_a_snapshot() {
+        let mut set: OwnedSet = [1u64, 70].into_iter().collect();
+        let snapshot = set.try_clone().expect("a small set fits");
+        set.insert(200);
+
+        assert_eq!(snapshot.iter().collect::<Vec<_>>(), vec![1, 70]);
+        assert_eq!(snapshot.len(), 2, "the copy tracked the original's length");
+        assert_eq!(set.iter().collect::<Vec<_>>(), vec![1, 70, 200]);
     }
 }
