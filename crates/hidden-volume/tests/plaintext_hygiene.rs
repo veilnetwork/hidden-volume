@@ -79,9 +79,9 @@ fn zeroizing_array_derefs_to_array_slice() {
 fn decoded_log_payloads_are_zeroizing() {
     use hidden_volume::space::log::{LogPayload, decode_batch, encode_batch};
 
-    let records: Vec<(u64, Vec<u8>)> = vec![
-        (1, b"the first log record".to_vec()),
-        (2, b"the second".to_vec()),
+    let records: Vec<(u64, LogPayload)> = vec![
+        (1, zeroize::Zeroizing::new(b"the first log record".to_vec())),
+        (2, zeroize::Zeroizing::new(b"the second".to_vec())),
     ];
     let bytes = encode_batch(&records).expect("a small batch encodes");
 
@@ -101,4 +101,34 @@ fn decoded_log_payloads_are_zeroizing() {
     let found: &LogPayload =
         hidden_volume::space::log::find_in_batch(&decoded, 2).expect("id 2 is in the batch");
     assert_eq!(&found[..], b"the second");
+}
+
+/// report17 HV17-M7 — the compressed batch is a lossless copy of the
+/// plaintext, and it outlived every scrub around it.
+///
+/// zstd output decodes back to the caller's records exactly. `raw` inside the
+/// encoder has been `Zeroizing` since it was written; the compressed bytes —
+/// the thing that survives the call — were an ordinary `Vec<u8>`, dropped
+/// without scrubbing on the oversize refusal, after a successful admission
+/// probe, after the AEAD seal that borrowed them, and for every batch already
+/// built when a later split failed.
+#[test]
+fn encoded_batches_are_zeroizing() {
+    use hidden_volume::space::log::{EncodedBatch, LogPayload, encode_batch, encode_batches_split};
+    use zeroize::Zeroizing;
+
+    let records: Vec<(u64, LogPayload)> =
+        vec![(7, Zeroizing::new(b"a log record worth scrubbing".to_vec()))];
+
+    // The annotations are the test: a regression to plain `Vec<u8>` stops this
+    // compiling.
+    let one: Zeroizing<Vec<u8>> = encode_batch(&records).expect("a small batch encodes");
+    assert!(!one.is_empty());
+
+    let split: Vec<EncodedBatch> = encode_batches_split(&records).expect("it splits");
+    assert_eq!(split.len(), 1, "one small record is one batch");
+    assert_eq!(split[0].0, vec![7], "the ids did not survive the split");
+
+    fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+    assert_zeroize_on_drop::<Zeroizing<Vec<u8>>>();
 }

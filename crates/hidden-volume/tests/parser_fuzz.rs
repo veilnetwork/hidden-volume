@@ -253,17 +253,24 @@ proptest! {
         for (id, p) in raw_records {
             by_id.insert(id, p);
         }
-        let records: Vec<(u64, Vec<u8>)> = by_id.into_iter().collect();
+        let records: Vec<(u64, zeroize::Zeroizing<Vec<u8>>)> = by_id
+            .into_iter()
+            .map(|(id, payload)| (id, zeroize::Zeroizing::new(payload)))
+            .collect();
         let bytes = match encode_batch(&records) {
             Ok(b) => b,
             Err(_) => return Ok(()), // payload too large after compression
         };
+        let expected: Vec<(u64, Vec<u8>)> = records
+            .iter()
+            .map(|(id, payload)| (*id, payload.to_vec()))
+            .collect();
         let records2: Vec<(u64, Vec<u8>)> = decode_batch(&bytes)
             .unwrap()
             .into_iter()
             .map(|(id, payload)| (id, payload.to_vec()))
             .collect();
-        prop_assert_eq!(records, records2);
+        prop_assert_eq!(expected, records2);
     }
 }
 
