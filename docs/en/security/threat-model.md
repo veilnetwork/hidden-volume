@@ -2,8 +2,10 @@
 
 🇬🇧 **English** · [🇷🇺 Русский](../../ru/security/threat-model.md)
 
-**Status.** Pre-release working document. The shape will not change
-between now and v1.0 — only specific findings will be filled in. No
+**Status.** Working document, current as of crate v2.0.x. The shape
+does not change between releases — only specific findings are filled in.
+This line described the project as pre-release long after v2 shipped,
+which reads as a document nobody has revisited (report16 HV16-L1). No
 external paid review (Trail of Bits / Cure53 / NCC class) is planned
 for this project; the rationale (anonymity + no-budget) and the
 substitute process (in-tree audit passes, this threat model, the

@@ -790,10 +790,15 @@ documented under threat-model "out of scope".
    "unknown", not "fork"). Anchor ONLY for spaces whose
    existence is not deniability-sensitive.
 
-3. **Maximum slot count.** With `u64` seq and 4 KiB chunks the file goes
-   up to 64 EiB. The real limit is memory at scan time. Practical
-   guidance lives in `docs/en/guide/operations.md` ("recommended container
-   size"); the library does not enforce a hard cap.
+3. **Maximum slot count.** ✅ Resolved. With `u64` seq and 4 KiB chunks the
+   file goes up to 64 EiB, and the real limit was memory at scan time —
+   so `MAX_OPEN_SCAN_CHUNKS` (§10) is enforced on BOTH sides: the write
+   path refuses to grow past it and every open-scan path refuses to scan
+   past it. This entry said the library did not enforce a hard cap while
+   §10 of the same document described one, which is the kind of drift a
+   reader resolves in whichever direction costs them more (report16
+   HV16-L1). Practical guidance still lives in
+   `docs/en/guide/operations.md` ("recommended container size").
 
 4. **Compression boundary.** ✅ Resolved by the `DataBatch` chunk kind
    (0x06). The messenger's high-volume namespace (`MESSAGE_LOG`) writes

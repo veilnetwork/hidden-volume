@@ -471,8 +471,24 @@ Each mapping entry is `(open_with, write_as)`:
 
 Mechanics: writes a fresh container at a sibling temp file named
 `.{stem}.hv-rotate.{16hex}.tmp`, then atomic-renames over `path`
-under the source `LOCK_EX` with a parent-dir `fsync`. On any
-failure the temp is removed and the original `path` is untouched.
+under the source `LOCK_EX` with a parent-dir `fsync`. On any failure
+BEFORE the rename, the temp is removed and the original `path` is
+untouched.
+
+The qualifier is not decoration, and this page used to omit it. The
+`rename(2)` is the point of no return, and four outcomes are reported
+AFTER it — the old container is already gone from that path in every
+one of them, so none is a failure to retry against it:
+
+| Outcome | What is true |
+|---|---|
+| `RenameVisibleDurabilityUncertain` | The rewrite applied; whether the directory entry survives a crash is unknown. |
+| `RenameVisibleContentUnverified` | The path resolves to a file this call did not write. |
+| `RenameVisibleAliasesNotRevoked(n)` | The rewrite applied at this name; the previous file is still reachable under `n` other hard links. |
+| `SourceIsNotARegularFile` | Refused BEFORE anything was opened — a symlink or other non-file, where a rename would replace the NAME and leave the container it points at unchanged. |
+
+After a password change the first three mean the NEW password is in
+force at that path. Retrying with the old one is wrong.
 The cancellable variant (`change_passwords_cancellable`) honours a
 `CancelToken` at every namespace / Tx boundary; on cancel the temp
 is removed and `Error::Cancelled` is returned.
