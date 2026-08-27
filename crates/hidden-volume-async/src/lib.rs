@@ -159,10 +159,29 @@ mod reentrancy {
 /// (report14 HV14-M2).
 ///
 /// ⚠️ Same-thread only. The mark is a thread-local, so a closure that hands
-/// the work to ANOTHER thread and waits for it is not seen here and still
-/// hangs. Identifying one logical call chain across threads needs something
-/// the permit itself carries; this refuses what can be refused today, and the
-/// rest is the documented "do the work in one closure".
+/// the work to ANOTHER thread and waits for it is not seen here. Identifying
+/// one logical call chain across threads needs something the permit itself
+/// carries; this refuses what can be refused today, and the rest is the
+/// documented "do the work in one closure".
+///
+/// What the cross-thread case is NOT is unescapable. That was assumed from the
+/// same-thread case, where the deadlock parks the runtime's workers and a timer
+/// never gets a thread to fire on — measured, and recorded in
+/// `tests/reentrant_run.rs`. Across threads the parked thread is a BLOCKING
+/// one and the child is queued on an ordinary `.await` for the permit, so a
+/// deadline on the inner call does fire: the child's future is dropped while
+/// still queued, the ledger files it as never started, and the outer join
+/// returns. Measured too, and pinned by
+/// `a_deadline_on_the_inner_call_escapes_the_cross_thread_hang`.
+///
+/// So an embedder that must hand work across threads can bound it:
+///
+/// ```ignore
+/// tokio::time::timeout(limit, clone.run(|c| ...)).await
+/// ```
+///
+/// The hang is permanent only for a caller who never does (report15
+/// HV15-M1).
 fn refuse_if_reentrant(ledger: usize) -> Result<()> {
     if reentrancy::holds(ledger) {
         return Err(Error::ReentrantRun);
