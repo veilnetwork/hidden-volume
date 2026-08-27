@@ -684,6 +684,44 @@ pub enum WriteOp {
     },
 }
 
+/// A batch of write ops that erases its plaintext when it goes
+/// (report17 HV17-M1).
+///
+/// The ops carry the host's own data — message keys, values and log payloads —
+/// across the FFI boundary, and an ordinary `Vec` drop frees those blocks with
+/// the bytes still in them. Everything else on this boundary that carries a
+/// secret is wrapped on the way in; a batch of writes was the one shape that
+/// was not, and it is the one that carries the most.
+///
+/// A wrapper rather than a `Drop` on [`WriteOp`] itself, and not by taste:
+/// uniffi's generated code moves the fields out of the enum, which a type
+/// with `Drop` forbids. So the guard lives one level up, where it is ours.
+///
+/// What it does NOT reach: the RustBuffer uniffi allocates to receive the
+/// foreign bytes, and the copy the foreign runtime keeps. The first belongs to
+/// generated code that runs before any of these functions is entered, the
+/// second to a garbage-collected heap. Wiping what is ours is not the whole of
+/// the invariant — it is the part that was missing.
+struct ScrubbedOps(Vec<WriteOp>);
+
+impl Drop for ScrubbedOps {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        for op in &mut self.0 {
+            match op {
+                WriteOp::Put { key, value, .. } => {
+                    key.zeroize();
+                    value.zeroize();
+                },
+                WriteOp::Delete { key, .. } => key.zeroize(),
+                WriteOp::AppendLog { payload, .. } => payload.zeroize(),
+                // A logical id is not the entry. Nothing here to erase.
+                WriteOp::DeleteLog { .. } => {},
+            }
+        }
+    }
+}
+
 impl core::fmt::Debug for WriteOp {
     /// REDACTED (audit HV-09). The derive printed KEYS, VALUES and log
     /// PAYLOADS — everything the host is storing — across an FFI boundary
@@ -1369,32 +1407,37 @@ impl SpaceHandle {
     /// emitted; returns the current `commit_seq` unchanged.
     pub fn commit(&self, ops: Vec<WriteOp>) -> HvResult<u64> {
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
+        let ops = ScrubbedOps(ops);
         g.with_space_mut(|s| -> HvResult<u64> {
-            if ops.is_empty() {
+            if ops.0.is_empty() {
                 return Ok(s.commit_seq());
             }
             let mut tx = s.begin_tx();
-            for op in ops {
+            // BORROWED, not destructured. Moving the fields out would leave
+            // the enum with nothing to drop, and its drop is what erases the
+            // plaintext (report17 HV17-M1). The compiler enforces this: a
+            // type with `Drop` cannot be moved out of.
+            for op in &ops.0 {
                 match op {
                     WriteOp::Put {
                         namespace,
                         key,
                         value,
                     } => {
-                        tx.put(Namespace(namespace), &key, &value)?;
+                        tx.put(Namespace(*namespace), key, value)?;
                     },
                     WriteOp::Delete { namespace, key } => {
-                        tx.delete(Namespace(namespace), &key)?;
+                        tx.delete(Namespace(*namespace), key)?;
                     },
                     WriteOp::AppendLog {
                         namespace,
                         log_id,
                         payload,
                     } => {
-                        tx.append_log(Namespace(namespace), log_id, &payload)?;
+                        tx.append_log(Namespace(*namespace), *log_id, payload)?;
                     },
                     WriteOp::DeleteLog { namespace, log_id } => {
-                        tx.delete_log(Namespace(namespace), log_id)?;
+                        tx.delete_log(Namespace(*namespace), *log_id)?;
                     },
                 }
             }
@@ -1891,12 +1934,14 @@ impl AsyncSpaceHandle {
     /// Apply a batch of write ops as one Tx + commit. Returns the new
     /// `commit_seq`. Empty `ops` → no commit chunk emitted.
     pub async fn commit(&self, ops: Vec<WriteOp>) -> HvResult<u64> {
+        let ops = ScrubbedOps(ops);
         self.run_op(move |s, cancel| -> HvResult<u64> {
-            if ops.is_empty() {
+            if ops.0.is_empty() {
                 return Ok(s.commit_seq());
             }
             let mut tx = s.begin_tx();
-            for op in ops {
+            // Borrowed: see the note in `SpaceHandle::commit`.
+            for op in &ops.0 {
                 // The Tx is pure in-memory accumulation until `commit`,
                 // so a caller who walked away mid-assembly can still be
                 // honoured here with a provable no-effect abort — the one
@@ -1916,20 +1961,20 @@ impl AsyncSpaceHandle {
                         key,
                         value,
                     } => {
-                        tx.put(Namespace(namespace), &key, &value)?;
+                        tx.put(Namespace(*namespace), key, value)?;
                     },
                     WriteOp::Delete { namespace, key } => {
-                        tx.delete(Namespace(namespace), &key)?;
+                        tx.delete(Namespace(*namespace), key)?;
                     },
                     WriteOp::AppendLog {
                         namespace,
                         log_id,
                         payload,
                     } => {
-                        tx.append_log(Namespace(namespace), log_id, &payload)?;
+                        tx.append_log(Namespace(*namespace), *log_id, payload)?;
                     },
                     WriteOp::DeleteLog { namespace, log_id } => {
-                        tx.delete_log(Namespace(namespace), log_id)?;
+                        tx.delete_log(Namespace(*namespace), *log_id)?;
                     },
                 }
             }
@@ -2249,26 +2294,28 @@ impl MultiSpaceHandle {
     /// `commit_seq`. Empty `ops` returns the current seq unchanged.
     pub fn commit(&self, id: u32, ops: Vec<WriteOp>) -> HvResult<u64> {
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
+        let ops = ScrubbedOps(ops);
         g.with_space(id as usize, |s| -> HvResult<u64> {
-            if ops.is_empty() {
+            if ops.0.is_empty() {
                 return Ok(s.commit_seq());
             }
             let mut tx = s.begin_tx();
-            for op in ops {
+            // Borrowed: see the note in `SpaceHandle::commit`.
+            for op in &ops.0 {
                 match op {
                     WriteOp::Put {
                         namespace,
                         key,
                         value,
-                    } => tx.put(Namespace(namespace), &key, &value)?,
-                    WriteOp::Delete { namespace, key } => tx.delete(Namespace(namespace), &key)?,
+                    } => tx.put(Namespace(*namespace), key, value)?,
+                    WriteOp::Delete { namespace, key } => tx.delete(Namespace(*namespace), key)?,
                     WriteOp::AppendLog {
                         namespace,
                         log_id,
                         payload,
-                    } => tx.append_log(Namespace(namespace), log_id, &payload)?,
+                    } => tx.append_log(Namespace(*namespace), *log_id, payload)?,
                     WriteOp::DeleteLog { namespace, log_id } => {
-                        tx.delete_log(Namespace(namespace), log_id)?
+                        tx.delete_log(Namespace(*namespace), *log_id)?
                     },
                 }
             }
@@ -2363,6 +2410,68 @@ impl MultiSpaceHandle {
     }
 }
 
+/// An allocator that looks at what is being handed back (report17 HV17-M1).
+///
+/// The claim under test is about memory AFTER a free, and the honest place to
+/// check it is the moment before the block leaves: inside `dealloc` the
+/// allocation is still valid, so reading it is ordinary — unlike the
+/// use-after-free peek the same assertion is usually written as.
+///
+/// Armed only around the few lines a test cares about, because while it is
+/// armed every free in the process is scanned.
+#[cfg(test)]
+mod sentinel {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// What the tests fill their plaintext with. Long and arbitrary so that
+    /// nothing else in the process happens to contain it.
+    pub const NEEDLE: [u8; 16] = [
+        0xC7, 0x3A, 0x91, 0x5E, 0x08, 0xBD, 0x46, 0xF2, 0x1C, 0xA9, 0x77, 0x30, 0xE4, 0x6B, 0xD5,
+        0x82,
+    ];
+
+    pub static ARMED: AtomicBool = AtomicBool::new(false);
+    pub static DIRTY: AtomicUsize = AtomicUsize::new(0);
+
+    /// Serialises the armed window: two tests arming at once would each see
+    /// the other's frees.
+    pub static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    pub struct Sentinel;
+
+    unsafe impl GlobalAlloc for Sentinel {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            if ARMED.load(Ordering::Relaxed) && layout.size() >= NEEDLE.len() {
+                let block = unsafe { std::slice::from_raw_parts(ptr, layout.size()) };
+                if block.windows(NEEDLE.len()).any(|w| w == NEEDLE) {
+                    DIRTY.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            unsafe { System.dealloc(ptr, layout) }
+        }
+    }
+
+    /// Run `body` with the sentinel watching, and answer how many blocks went
+    /// back to the allocator still holding [`NEEDLE`].
+    pub fn dirty_frees_during(body: impl FnOnce()) -> usize {
+        let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        DIRTY.store(0, Ordering::Relaxed);
+        ARMED.store(true, Ordering::Relaxed);
+        body();
+        ARMED.store(false, Ordering::Relaxed);
+        DIRTY.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+#[global_allocator]
+static SENTINEL: sentinel::Sentinel = sentinel::Sentinel;
+
 #[cfg(test)]
 mod tests {
 
@@ -2437,6 +2546,59 @@ mod tests {
     /// size leak, a broken deniability and a missing fsync are three different
     /// pieces of news, and a host told the wrong one acts on the wrong thing —
     /// worse than being told nothing. A `From` impl is exactly where that gets
+    /// What a batch of writes leaves in the allocator (report17 HV17-M1).
+    ///
+    /// The ops carry the host's own plaintext — message keys, values, log
+    /// payloads — and an ordinary `Vec` drop frees those blocks with the bytes
+    /// still in them. Read back by an in-process memory disclosure, a
+    /// diagnostic allocator or a core dump, that is the message the user just
+    /// wrote.
+    #[test]
+    fn a_committed_batch_hands_no_plaintext_back_to_the_allocator() {
+        let dirty = super::sentinel::dirty_frees_during(|| {
+            let ops = super::ScrubbedOps(vec![
+                WriteOp::Put {
+                    namespace: 1,
+                    key: super::sentinel::NEEDLE.to_vec(),
+                    value: super::sentinel::NEEDLE.to_vec(),
+                },
+                WriteOp::Delete {
+                    namespace: 1,
+                    key: super::sentinel::NEEDLE.to_vec(),
+                },
+                WriteOp::AppendLog {
+                    namespace: 3,
+                    log_id: 7,
+                    payload: super::sentinel::NEEDLE.to_vec(),
+                },
+            ]);
+            drop(ops);
+        });
+
+        assert_eq!(
+            dirty, 0,
+            "{dirty} block(s) went back to the allocator still holding the \
+             host's plaintext"
+        );
+    }
+
+    /// CONTROL: the sentinel can see. Without this the assertion above is
+    /// satisfied by an allocator hook that never fires — which is exactly how
+    /// a memory-hygiene test ships green over a defect.
+    #[test]
+    fn the_sentinel_sees_an_ordinary_drop() {
+        let dirty = super::sentinel::dirty_frees_during(|| {
+            let plain = super::sentinel::NEEDLE.to_vec();
+            drop(plain);
+        });
+
+        assert!(
+            dirty >= 1,
+            "the sentinel saw nothing when a plain Vec was freed unwiped, so \
+             it proves nothing about the wiped one"
+        );
+    }
+
     /// transposed silently, because every arm typechecks against every variant.
     ///
     /// Driven off an exhaustive `match` so a fourth step added upstream fails
