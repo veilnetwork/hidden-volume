@@ -167,6 +167,36 @@ pub enum Error {
     )]
     RenameVisibleAliasesUnknown,
 
+    /// The rewrite landed, and BOTH of the remaining qualifications hold: the
+    /// old inode may still be reachable under another name AND nothing
+    /// confirmed the change reached the disk.
+    ///
+    /// The two used to be reported one at a time, in a fixed order, so a
+    /// rewrite with a hard-link alias returned the alias variant and said
+    /// nothing about durability — the worse-sounding fact hid the other one
+    /// entirely (report17 HV17-L1). A caller deciding what to tell a person
+    /// needs both: the remedies are different, and doing only the one that was
+    /// reported leaves the other in place.
+    ///
+    /// `other_names` is `None` when the platform could not count them — the
+    /// same distinction [`Self::RenameVisibleAliasesUnknown`] draws, carried
+    /// here so this variant does not have to be split in two.
+    ///
+    /// **Not a failure to retry**, for the same reason as its two halves.
+    #[error(
+        "rewrite is visible; the old file may still be reachable ({}) and the change \
+         may not have reached the disk",
+        match .other_names {
+            Some(n) => format!("{n} other name(s)"),
+            None => "count unavailable on this platform".to_owned(),
+        }
+    )]
+    RenameVisibleAliasesAndDurabilityUncertain {
+        /// How many OTHER names still resolve to the pre-rewrite file, or
+        /// `None` when this platform cannot say.
+        other_names: Option<u64>,
+    },
+
     /// A publish got at least one Superblock replica onto the disk and then
     /// failed, so this handle's view of the tree may be one era behind what a
     /// reopen would select.

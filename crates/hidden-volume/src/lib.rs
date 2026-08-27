@@ -260,3 +260,65 @@ const _: () = assert!(CHUNK_SIZE > NONCE_LEN + TAG_LEN);
 const _: () = assert!(HEADER_LEN <= CHUNK_SIZE);
 const _: () = assert!(HEADER_SALT_OFFSET + HEADER_SALT_LEN == HEADER_PARAMS_OFFSET);
 const _: () = assert!(HEADER_PARAMS_OFFSET + HEADER_PARAMS_LEN == HEADER_LEN);
+
+/// An allocator that looks at what is being handed back (report17 HV17-L5).
+///
+/// Claims about memory AFTER a free are checked at the moment before the block
+/// leaves: inside `dealloc` the allocation is still valid, so reading it is
+/// ordinary — unlike the use-after-free peek the same assertion is usually
+/// written as. The FFI crate carries the same thing for its own boundary.
+///
+/// Armed only around the few lines a test cares about, because while it is
+/// armed every free in the process is scanned.
+#[cfg(test)]
+pub(crate) mod alloc_sentinel {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// What a test fills its secret with. Long and arbitrary so nothing else
+    /// in the process happens to contain it.
+    pub const NEEDLE: [u8; 16] = [
+        0x5B, 0xE1, 0x24, 0xAF, 0x93, 0x70, 0xC8, 0x16, 0x4D, 0xF2, 0x0B, 0xA5, 0x69, 0x3E, 0xD7,
+        0x81,
+    ];
+
+    pub static ARMED: AtomicBool = AtomicBool::new(false);
+    pub static DIRTY: AtomicUsize = AtomicUsize::new(0);
+
+    /// Serialises the armed window: two tests arming at once would each see
+    /// the other's frees.
+    pub static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    pub struct Sentinel;
+
+    unsafe impl GlobalAlloc for Sentinel {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            if ARMED.load(Ordering::Relaxed) && layout.size() >= NEEDLE.len() {
+                let block = unsafe { std::slice::from_raw_parts(ptr, layout.size()) };
+                if block.windows(NEEDLE.len()).any(|w| w == NEEDLE) {
+                    DIRTY.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            unsafe { System.dealloc(ptr, layout) }
+        }
+    }
+
+    /// Run `body` with the sentinel watching, and answer how many blocks went
+    /// back to the allocator still holding [`NEEDLE`].
+    pub fn dirty_frees_during(body: impl FnOnce()) -> usize {
+        let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        DIRTY.store(0, Ordering::Relaxed);
+        ARMED.store(true, Ordering::Relaxed);
+        body();
+        ARMED.store(false, Ordering::Relaxed);
+        DIRTY.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+#[global_allocator]
+static ALLOC_SENTINEL: alloc_sentinel::Sentinel = alloc_sentinel::Sentinel;

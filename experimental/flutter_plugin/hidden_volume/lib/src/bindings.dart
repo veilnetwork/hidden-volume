@@ -1302,6 +1302,10 @@ const _kindsThatMayHaveApplied = <String>{
   // Same, one step less certain: the rewrite applied and whether another name
   // survives is unknown rather than known-yes (report17 HV17-M3).
   'RenameVisibleAliasesUnknown',
+  // Both qualifications at once. It applied; what is uncertain is how far the
+  // revocation reached AND whether the change is on the disk (report17
+  // HV17-L1).
+  'RenameVisibleAliasesAndDurabilityUncertain',
 };
 
 /// The names an [HvException.kind] can carry, for the drift check above.
@@ -1361,6 +1365,10 @@ const _hvErrorKinds = <String>[
   // whether another name for the old file remains. Appended, because this list
   // is positional: inserting anywhere above renames every kind after it.
   'RenameVisibleAliasesUnknown',
+  // report17 HV17-L1 — the rewrite applied and BOTH remaining qualifications
+  // hold at once: another name may survive AND the change may not have reached
+  // the disk. Appended for the same positional reason as the line above.
+  'RenameVisibleAliasesAndDurabilityUncertain',
 ];
 
 HvException _liftHvException(RustBuffer buf) {

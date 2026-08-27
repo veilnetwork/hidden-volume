@@ -1688,37 +1688,54 @@ where
     #[cfg(unix)]
     verify_renamed_inode(path, pre_rename_inode)?;
 
-    // Reported before durability and after the inode pin, in order of how bad
-    // the news is: "this is not the file we wrote" beats "the old file is still
-    // reachable elsewhere", which beats "this might not survive a crash".
-    match source_links {
-        Some(n) if n > 1 => {
-            return Err(Error::RenameVisibleAliasesNotRevoked(n - 1));
-        },
-        // The platform could not say. Reported rather than assumed away: a
-        // silent `1` is a claim that there are no other names, and on NTFS
-        // that claim was simply wrong (report17 HV17-M3).
-        None => return Err(Error::RenameVisibleAliasesUnknown),
-        Some(_) => {},
-    }
-
-    // EITHER barrier is enough, and only if BOTH are missing is the durability
-    // unknown.
+    // BOTH FACTS, NOT THE FIRST ONE (report17 HV17-L1).
     //
-    // The rename carries one on Windows when `MoveFileExW` accepts
+    // These two qualifications are independent — the old inode may still have
+    // other names, and the change may not have reached the disk — and they
+    // used to be reported one at a time in a fixed order. A rewrite with a
+    // hard-link alias therefore returned the alias variant and said nothing
+    // about durability: the worse-sounding fact hid the other one, and a
+    // caller acting on what it was told fixed half the problem.
+    //
+    // EITHER barrier is enough for durability, and only if BOTH are missing is
+    // it unknown. The rename carries one on Windows when `MoveFileExW` accepts
     // write-through; the directory flush carries one on both platforms. This
     // used to report uncertainty whenever the rename's own barrier was
     // skipped — which on Windows is EVERY compaction and every rotation, since
     // the destination is held open by this very rewrite — so the qualified
     // outcome became the ordinary one there and stopped meaning anything
     // (report16 HV16-H1, measured on a Windows VM).
-    if barrier == RenameBarrier::Skipped && durability.is_err() {
-        return Err(Error::RenameVisibleDurabilityUncertain(
+    let durability_uncertain = barrier == RenameBarrier::Skipped && durability.is_err();
+    rewrite_outcome(source_links, durability_uncertain)
+}
+
+/// What a completed rewrite has to say for itself.
+///
+/// Split out so all four combinations can be driven directly: the two facts
+/// are independent, and the version that reported them one at a time — in a
+/// fixed order — let the alias fact hide the durability one entirely
+/// (report17 HV17-L1).
+///
+/// `source_links` is the number of NAMES the pre-rewrite file had, or `None`
+/// when the platform could not count. `None` is not "there are no other
+/// names": a silent `1` was that claim, and on NTFS it was simply wrong
+/// (report17 HV17-M3).
+fn rewrite_outcome(source_links: Option<u64>, durability_uncertain: bool) -> Result<()> {
+    let aliases_qualified = !matches!(source_links, Some(1));
+    match (aliases_qualified, durability_uncertain) {
+        (true, true) => Err(Error::RenameVisibleAliasesAndDurabilityUncertain {
+            other_names: source_links.map(|n| n - 1),
+        }),
+        (true, false) => match source_links {
+            Some(n) => Err(Error::RenameVisibleAliasesNotRevoked(n - 1)),
+            None => Err(Error::RenameVisibleAliasesUnknown),
+        },
+        (false, true) => Err(Error::RenameVisibleDurabilityUncertain(
             "neither the rename nor the directory flush confirmed the change \
              reached the disk",
-        ));
+        )),
+        (false, false) => Ok(()),
     }
-    Ok(())
 }
 
 /// How many names the file at `path` has, or `None` when this platform cannot
@@ -2695,5 +2712,70 @@ mod hv03_tests {
             }
         }
         G(dir.to_path_buf())
+    }
+}
+
+#[cfg(test)]
+mod rewrite_outcome_tests {
+    use super::rewrite_outcome;
+    use crate::Error;
+
+    /// Both qualifications travel together (report17 HV17-L1).
+    ///
+    /// They are independent facts about a rewrite that DID land: the old inode
+    /// may still be reachable under another name, and the change may not have
+    /// reached the disk. They used to be reported one at a time in a fixed
+    /// order, so a rewrite with a hard-link alias returned the alias variant
+    /// and said nothing about durability — and a caller acting on what it was
+    /// told fixed half the problem, because the remedies are different.
+    #[test]
+    fn an_alias_does_not_hide_an_uncertain_durability() {
+        match rewrite_outcome(Some(3), true) {
+            Err(Error::RenameVisibleAliasesAndDurabilityUncertain { other_names }) => {
+                assert_eq!(other_names, Some(2), "three names means two others");
+            },
+            other => panic!("the durability fact was dropped: {other:?}"),
+        }
+    }
+
+    /// And the same when the platform could not count the names.
+    ///
+    /// Unknown is not "there are no other names"; carrying it here is what
+    /// keeps this from needing a fourth variant.
+    #[test]
+    fn an_uncountable_alias_does_not_hide_it_either() {
+        match rewrite_outcome(None, true) {
+            Err(Error::RenameVisibleAliasesAndDurabilityUncertain { other_names }) => {
+                assert_eq!(other_names, None);
+            },
+            other => panic!("the durability fact was dropped: {other:?}"),
+        }
+    }
+
+    /// Each fact on its own still reports as itself, so the existing callers
+    /// and their remedies are unchanged.
+    #[test]
+    fn a_single_qualification_is_reported_as_before() {
+        assert!(matches!(
+            rewrite_outcome(Some(2), false),
+            Err(Error::RenameVisibleAliasesNotRevoked(1))
+        ));
+        assert!(matches!(
+            rewrite_outcome(None, false),
+            Err(Error::RenameVisibleAliasesUnknown)
+        ));
+        assert!(matches!(
+            rewrite_outcome(Some(1), true),
+            Err(Error::RenameVisibleDurabilityUncertain(_))
+        ));
+    }
+
+    /// CONTROL: a clean rewrite says nothing at all.
+    ///
+    /// Vacuity guard — an outcome that always qualifies would satisfy every
+    /// assertion above while telling each ordinary rotation it half-failed.
+    #[test]
+    fn a_rewrite_with_one_name_and_a_barrier_is_plain_ok() {
+        assert!(rewrite_outcome(Some(1), false).is_ok());
     }
 }

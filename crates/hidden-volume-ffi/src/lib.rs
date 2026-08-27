@@ -318,6 +318,27 @@ pub enum HvError {
         "rewrite is visible but this platform cannot say whether other names for the old file remain"
     )]
     RenameVisibleAliasesUnknown,
+
+    /// The rewrite landed and BOTH remaining qualifications hold: the old
+    /// inode may still be reachable under another name AND nothing confirmed
+    /// the change reached the disk.
+    ///
+    /// The two used to be reported one at a time, so the alias fact hid the
+    /// durability one and a caller acting on what it was told fixed half the
+    /// problem (report17 HV17-L1). The remedies differ, so both travel.
+    ///
+    /// `other_names` is absent when the platform could not count them.
+    ///
+    /// Not a failure to retry, for the same reason as its two halves.
+    #[error(
+        "rewrite is visible; the old file may still be reachable and the change may not \
+         have reached the disk"
+    )]
+    RenameVisibleAliasesAndDurabilityUncertain {
+        /// How many OTHER names still resolve to the pre-rewrite file, or
+        /// absent when this platform cannot say.
+        other_names: Option<u64>,
+    },
 }
 
 impl From<hidden_volume::Error> for HvError {
@@ -358,6 +379,9 @@ impl From<hidden_volume::Error> for HvError {
                 HvError::RenameVisibleAliasesNotRevoked { others }
             },
             E::RenameVisibleAliasesUnknown => HvError::RenameVisibleAliasesUnknown,
+            E::RenameVisibleAliasesAndDurabilityUncertain { other_names } => {
+                HvError::RenameVisibleAliasesAndDurabilityUncertain { other_names }
+            },
             E::PublishUncertain(s) => HvError::PublishUncertain(s.into()),
             // `hidden_volume::Error` is `#[non_exhaustive]`, so this
             // catch-all is mandatory. It is a deniability-safe default
