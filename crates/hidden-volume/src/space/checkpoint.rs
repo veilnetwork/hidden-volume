@@ -177,24 +177,31 @@ pub(crate) struct CheckpointChunk {
 /// path used to pay them four times over — the live pool as a `Vec`, the
 /// carried one as a second, the concatenation of both as a third, and the
 /// sort that ordered what two sets already had in order.
+/// Returns the merged BITMAP, not a list.
+///
+/// It used to return `Vec<u64>` — eight bytes per slot, 64 MiB at the
+/// supported ceiling, alive at the same moment as the owned list's own 64 MiB.
+/// The writer needs the slots in order, not in a vector; a bitmap answers that
+/// and costs one bit per slot (report17 HV17-M4).
 fn merge_carried_pool(
     live: &crate::space::pool::DecoyPool,
     mut carried: crate::space::pool::DecoyPool,
     owned: &crate::space::slots::OwnedSet,
     high_water: u64,
-) -> Result<Vec<u64>> {
-    // Fallible for the reason `owned` is: this is the other 128-MiB-at-the-
-    // ceiling allocation on the checkpoint path, and `panic = "abort"` makes
-    // a refusal from the allocator process death (report14 HV14-M5).
-    let too_big = |_| Error::Internal("checkpoint pool does not fit in memory");
+) -> Result<crate::space::pool::DecoyPool> {
     if carried.is_empty() {
-        return live.try_sorted().map_err(too_big);
+        let mut only_live = crate::space::pool::DecoyPool::with_capacity(high_water);
+        for slot in live.iter() {
+            only_live.record(slot);
+        }
+        only_live.retain_below_and_unowned(high_water, owned);
+        return Ok(only_live);
     }
     for slot in live.iter() {
         carried.record(slot);
     }
     carried.retain_below_and_unowned(high_water, owned);
-    carried.try_sorted().map_err(too_big)
+    Ok(carried)
 }
 
 impl CheckpointChunk {
@@ -300,17 +307,30 @@ fn checkpoint_group_count(owned_len: usize, pool_len: usize) -> usize {
     (owned_len + pool_len).div_ceil(CP_ENTRIES_PER_CHUNK).max(1)
 }
 
-/// A copy that reports failure instead of aborting the process.
+/// The next `n` items, in a buffer that reports failure instead of aborting.
 ///
-/// `slice.to_vec()` allocates infallibly, and this crate builds with
-/// `panic = "abort"` — so an allocator that cannot serve it ends the process
-/// rather than unwinding to a caller who could refuse the checkpoint and move
-/// on (report15 HV15-M2).
-fn try_copy(slice: &[u64]) -> Result<Vec<u64>> {
+/// One chunk's worth at a time is the whole point: the checkpoint used to
+/// build both halves as eight bytes per slot — 128 MiB together at the
+/// supported ceiling — purely so the tail-first writer could index backwards
+/// into them (report17 HV17-M4).
+///
+/// Fewer than `n` items means the caller's arithmetic disagrees with the set
+/// it is walking, which is a bug here rather than a state a container can be
+/// in; it is reported rather than papered over with a short chunk.
+fn try_take(iter: &mut impl Iterator<Item = u64>, n: usize) -> Result<Vec<u64>> {
     let mut out = Vec::new();
-    out.try_reserve_exact(slice.len())
+    out.try_reserve_exact(n)
         .map_err(|_| Error::Internal("checkpoint group does not fit in memory"))?;
-    out.extend_from_slice(slice);
+    for _ in 0..n {
+        match iter.next() {
+            Some(slot) => out.push(slot),
+            None => {
+                return Err(Error::Internal(
+                    "checkpoint group is longer than the set it is cut from",
+                ));
+            },
+        }
+    }
     Ok(out)
 }
 
@@ -448,39 +468,42 @@ impl<'f> Space<'f> {
         // does not change slot_count (in-place overwrite), so `total`
         // sampled before the scrub is still the high-water.
         let cp_high_water = total;
-        // The one place the set is materialized as eight bytes per slot: the
-        // record is encoded from it. Already ascending and duplicate-free by
-        // the set's construction, which is what the sort and dedup here used
-        // to guarantee.
-        // Fallibly: eight bytes per slot is 128 MiB at the supported ceiling,
-        // and this crate builds with `panic = "abort"`, so an allocation the
-        // allocator cannot serve ENDS THE PROCESS rather than unwinding. A
-        // checkpoint is an optimisation hint — refusing to write one costs the
-        // next open a full scan, and that is a trade worth making against
-        // taking the caller down with it (report14 HV14-M5).
-        let owned: Vec<u64> = self
-            .state
-            .owned_slots
-            .try_to_sorted_vec()
-            .map_err(|_| Error::Internal("checkpoint owned set does not fit in memory"))?;
+        // NOT materialized. The record is encoded from these sets, and the
+        // encoder walks them a chunk at a time — so the eight-bytes-per-slot
+        // list they used to be built into never exists. At the supported
+        // ceiling that list was 64 MiB, with the pool's own 64 MiB alive
+        // beside it, in a crate that builds with `panic = "abort"`: an
+        // allocation the allocator cannot serve ends the process rather than
+        // unwinding, and a checkpoint is an optimisation hint that is not
+        // worth a caller's life (report14 HV14-M5, report17 HV17-M4).
+        let owned_len = self.state.owned_slots.len();
         debug_assert!(
-            owned.last().map(|&s| s < cp_high_water).unwrap_or(true),
+            self.state
+                .owned_slots
+                .iter_rev()
+                .next()
+                .map(|s| s < cp_high_water)
+                .unwrap_or(true),
             "owned slots must be below the checkpoint high-water"
         );
         // The pool travels with the owned set, and it must be recorded from
         // the SAME moment: the two are complementary halves of "what this
         // space has below the high-water", and a reader that mixed one
         // era's owned set with another's pool could see a slot in neither.
-        let pool: Vec<u64> = merge_carried_pool(
+        let pool = merge_carried_pool(
             &self.state.pool,
             carried_pool,
             &self.state.owned_slots,
             cp_high_water,
         )?;
         debug_assert!(
-            pool.last().map(|&s| s < cp_high_water).unwrap_or(true),
+            pool.iter_rev()
+                .next()
+                .map(|s| s < cp_high_water)
+                .unwrap_or(true),
             "pool slots must be below the checkpoint high-water"
         );
+        let pool_len = pool.len();
 
         // Same rule as `commit_tx`: never re-use a seq whose replica may
         // already be on disk from a failed publish. Publishing a checkpoint
@@ -493,7 +516,22 @@ impl<'f> Space<'f> {
             .checked_add(1)
             .ok_or(Error::Internal("checkpoint seq overflow"))?;
 
-        let head = self.write_checkpoint_chain(cp_seq, cp_high_water, &owned, &pool)?;
+        // A SNAPSHOT, because placing each chunk of the chain adds its slot to
+        // `owned_slots`: the record describes the set as it was at the
+        // high-water, not as it becomes while being written.
+        let owned_snapshot = self
+            .state
+            .owned_slots
+            .try_clone()
+            .map_err(|_| Error::Internal("checkpoint owned set does not fit in memory"))?;
+        let head = self.write_checkpoint_chain(
+            cp_seq,
+            cp_high_water,
+            owned_len,
+            pool_len,
+            &owned_snapshot,
+            &pool,
+        )?;
         self.file.fsync()?;
 
         // Publish: new superblock, bumped seq, unchanged root, pointing
@@ -553,8 +591,10 @@ impl<'f> Space<'f> {
         &mut self,
         cp_seq: u64,
         cp_high_water: u64,
-        owned: &[u64],
-        pool: &[u64],
+        owned_len: usize,
+        pool_len: usize,
+        owned: &crate::space::slots::OwnedSet,
+        pool: &crate::space::pool::DecoyPool,
     ) -> Result<u64> {
         // The two lists are packed as ONE sequence — owned then pool — cut
         // every `CP_ENTRIES_PER_CHUNK` entries, so group `i` is a pure function
@@ -565,26 +605,42 @@ impl<'f> Space<'f> {
         // describes, in a crate that builds with `panic = "abort"` (report15
         // HV15-M2). Computing the boundaries costs nothing and allocates
         // nothing.
-        let group_count = checkpoint_group_count(owned.len(), pool.len());
+        let group_count = checkpoint_group_count(owned_len, pool_len);
+
+        // Both halves walked BACKWARDS, once, alongside the backward walk over
+        // the groups — so each slot is visited exactly once and the most this
+        // holds at any moment is one chunk's worth. Materialising them was 64
+        // MiB each at the supported ceiling (report17 HV17-M4).
+        //
+        // The two iterators are consumed in the order the groups need them:
+        // the packed sequence is owned-then-pool, so walking it from the tail
+        // means the pool's tail first and the owned set's tail after it.
+        let mut owned_rev = owned.iter_rev();
+        let mut pool_rev = pool.iter_rev();
 
         let mut next = NO_RECORD;
         // Last group first, so `next` always points at an already-written
         // successor; after the reverse walk `next` is the first group's slot =
         // the chain head.
         for i in (0..group_count).rev() {
-            let (o_range, p_range) = checkpoint_group_ranges(i, owned.len(), pool.len());
-            let group_owned = &owned[o_range];
-            let group_pool = &pool[p_range];
+            let (o_range, p_range) = checkpoint_group_ranges(i, owned_len, pool_len);
+
+            // Taken from the tail and turned back the right way round: the
+            // record is an ascending list, and these iterators descend.
+            let mut group_pool = try_take(&mut pool_rev, p_range.len())?;
+            group_pool.reverse();
+            let mut group_owned = try_take(&mut owned_rev, o_range.len())?;
+            group_owned.reverse();
+
+            debug_assert_eq!(group_owned.len(), o_range.len());
+            debug_assert_eq!(group_pool.len(), p_range.len());
 
             let cc = CheckpointChunk {
                 cp_seq,
                 cp_high_water,
                 next_slot: next,
-                // Fallibly, for the same reason the two lists above are: this
-                // is bounded by one chunk's budget rather than by the
-                // container, but an abort is an abort.
-                owned: try_copy(group_owned)?,
-                pool: try_copy(group_pool)?,
+                owned: group_owned,
+                pool: group_pool,
             };
             let payload = cc.encode()?;
             next = self.place_chunk(ChunkKind::Checkpoint, cp_seq, &payload)?;
@@ -824,6 +880,52 @@ mod tests {
         p
     }
 
+    /// The checkpoint writer holds one chunk at a time, not two whole lists.
+    ///
+    /// Both halves used to be built as eight bytes per slot so the tail-first
+    /// writer could index backwards into them — 64 MiB each at the supported
+    /// ceiling, alive together, in a crate that builds with `panic = "abort"`
+    /// (report17 HV17-M4). The sets are bitmaps; walking them backwards costs
+    /// a word at a time.
+    ///
+    /// Structural, and bounded to the two functions it is about: what went
+    /// wrong is which call each one makes, and reproducing the allocation
+    /// means asking a test to allocate 128 MiB to prove it should not.
+    #[test]
+    fn the_checkpoint_writer_does_not_materialize_either_half() {
+        let source = include_str!("checkpoint.rs");
+        let cut = source
+            .find("#[cfg(test)]")
+            .expect("this file has a test module");
+        let production = &source[..cut];
+
+        for (name, end) in [
+            ("fn write_self_heal_checkpoint", "\n    }\n"),
+            ("fn write_checkpoint_chain", "\n    }\n"),
+        ] {
+            let at = production
+                .find(name)
+                .unwrap_or_else(|| panic!("{name} moved"));
+            let body = &production[at..];
+            let body = &body[..body.find(end).expect("no end of function")];
+            for materializer in ["try_to_sorted_vec", "try_sorted(", ".sorted()"] {
+                assert!(
+                    !body.contains(materializer),
+                    "{name} calls {materializer}: that is eight bytes per slot, \
+                     and there are two of them"
+                );
+            }
+        }
+
+        // And the walk it uses instead is really there — otherwise the
+        // assertions above are satisfied by a function that does nothing.
+        assert!(
+            production.contains("iter_rev()"),
+            "nothing walks the sets backwards, so the tail-first writer has \
+             nothing to write from"
+        );
+    }
+
     /// The carried half must never name a slot this era owns.
     ///
     /// Defence-in-depth, and the only place it can be exercised: a session
@@ -836,7 +938,11 @@ mod tests {
         let owned = [5u64, 9].into_iter().collect();
         let pool =
             super::merge_carried_pool(&pool_of(&[2]), pool_of(&[5, 7, 9]), &owned, 100).unwrap();
-        assert_eq!(pool, vec![2, 7], "a live slot was recorded as reusable");
+        assert_eq!(
+            pool.sorted(),
+            vec![2, 7],
+            "a live slot was recorded as reusable"
+        );
     }
 
     /// And past the high-water: the record summarizes only what is below it.
@@ -845,7 +951,7 @@ mod tests {
         let pool =
             super::merge_carried_pool(&pool_of(&[1]), pool_of(&[3, 42]), &Default::default(), 10)
                 .unwrap();
-        assert_eq!(pool, vec![1, 3]);
+        assert_eq!(pool.sorted(), vec![1, 3]);
     }
 
     /// Merged, not substituted, and deduplicated across the two halves.
@@ -854,7 +960,7 @@ mod tests {
         let pool =
             super::merge_carried_pool(&pool_of(&[4, 1]), pool_of(&[1, 6]), &Default::default(), 10)
                 .unwrap();
-        assert_eq!(pool, vec![1, 4, 6]);
+        assert_eq!(pool.sorted(), vec![1, 4, 6]);
     }
     use super::*;
 

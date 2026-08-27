@@ -133,6 +133,23 @@ impl DecoyPool {
     ///
     /// The bitmap's own order, without the eight-bytes-per-slot `Vec`
     /// [`Self::sorted`] hands the checkpoint encoder.
+    /// The same slots, DESCENDING. See [`super::slots::OwnedSet::iter_rev`]
+    /// — the checkpoint writer walks both halves backwards so it never has to
+    /// hold either as eight bytes per slot (report17 HV17-M4).
+    pub(crate) fn iter_rev(&self) -> impl Iterator<Item = u64> + '_ {
+        self.words.iter().enumerate().rev().flat_map(|(w, word)| {
+            let mut bits = *word;
+            std::iter::from_fn(move || {
+                if bits == 0 {
+                    return None;
+                }
+                let b = 63 - bits.leading_zeros() as u64;
+                bits &= !(1u64 << b);
+                Some((w as u64) * 64 + b)
+            })
+        })
+    }
+
     pub(crate) fn iter(&self) -> impl Iterator<Item = u64> + '_ {
         self.words
             .iter()
@@ -238,6 +255,10 @@ impl DecoyPool {
     /// Same reason as `OwnedSet::try_to_sorted_vec`: eight bytes per slot is
     /// 128 MiB at the ceiling, and `panic = "abort"` turns an allocation the
     /// allocator cannot serve into process death (report14 HV14-M5).
+    /// TESTS ONLY, since the checkpoint writer stopped materialising the pool
+    /// (report17 HV17-M4). Kept because the fallible-copy property it stands
+    /// for is still worth asserting.
+    #[cfg(test)]
     pub(crate) fn try_sorted(&self) -> Result<Vec<u64>, std::collections::TryReserveError> {
         let mut out: Vec<u64> = Vec::new();
         out.try_reserve_exact(self.len)?;
