@@ -1351,6 +1351,9 @@ const _hvErrorKinds = <String>[
   // under another one.
   'SourceIsNotARegularFile',
   'RenameVisibleAliasesNotRevoked',
+  // report16 HV16-M2 — `try_run` asked and did not wait; somebody else holds
+  // the handle's permit and NOTHING ran.
+  'WouldBlock',
 ];
 
 HvException _liftHvException(RustBuffer buf) {

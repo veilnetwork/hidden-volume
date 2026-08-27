@@ -265,3 +265,74 @@ async fn the_same_cross_thread_call_succeeds_when_no_permit_is_held() {
     );
     drop(c);
 }
+
+/// Asking without waiting turns the cross-thread deadlock into an answer.
+///
+/// The re-entrancy guard is a thread-local, so the child cannot be told it is
+/// part of the parent's call. `try_run` does not need to be told: it refuses
+/// the moment the permit is not free, which the parent is holding
+/// (report16 HV16-M2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn try_run_refuses_across_threads_instead_of_queueing() {
+    let path = scratch_path();
+    let c = AsyncContainer::create_with_options(&path, fast_options())
+        .await
+        .unwrap();
+    let clone = c.clone();
+    let handle = tokio::runtime::Handle::current();
+
+    let answer = c
+        .run(move |_container| {
+            let child = std::thread::spawn(move || {
+                handle.block_on(async { clone.try_run(|_c| Ok(7u32)).await })
+            });
+            Ok(child.join().expect("child thread panicked"))
+        })
+        .await
+        .expect("the outer run returns because the child does");
+
+    assert!(
+        matches!(answer, Err(hidden_volume::Error::WouldBlock)),
+        "expected WouldBlock, got {answer:?}"
+    );
+}
+
+/// CONTROL: with nobody holding the permit the same call runs.
+///
+/// Without this the test above is satisfied by a `try_run` that refuses
+/// always, which is not an API.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn try_run_runs_when_the_permit_is_free() {
+    let path = scratch_path();
+    let c = AsyncContainer::create_with_options(&path, fast_options())
+        .await
+        .unwrap();
+
+    let answer = c.try_run(|_c| Ok(7u32)).await;
+
+    assert!(matches!(answer, Ok(7)), "got {answer:?}");
+}
+
+/// And a closure re-entering on its OWN thread still gets the error that
+/// names what IT did, not the one about somebody else.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn try_run_reentering_on_its_own_thread_is_still_reentrant() {
+    let path = scratch_path();
+    let c = AsyncContainer::create_with_options(&path, fast_options())
+        .await
+        .unwrap();
+    let clone = c.clone();
+
+    let answer = c
+        .run(move |_container| {
+            Ok(tokio::runtime::Handle::current()
+                .block_on(async { clone.try_run(|_c| Ok(7u32)).await }))
+        })
+        .await
+        .expect("the outer run returns");
+
+    assert!(
+        matches!(answer, Err(hidden_volume::Error::ReentrantRun)),
+        "expected ReentrantRun, got {answer:?}"
+    );
+}

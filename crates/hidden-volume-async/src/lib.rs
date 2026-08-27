@@ -331,6 +331,49 @@ impl AsyncContainer {
             .await
     }
 
+    /// Like [`Self::run`], but never queues.
+    ///
+    /// [`Error::WouldBlock`] when another caller holds the handle's operation
+    /// permit — and NOTHING RAN: no permit was taken, no task dispatched, no
+    /// operation filed.
+    ///
+    /// For the one shape [`Self::run`]'s re-entrancy guard cannot see. That
+    /// guard is a thread-local, so a closure that hands its work to another OS
+    /// thread and waits for it leaves nothing the child can find: the child
+    /// queues for a permit the parent will not release until the child
+    /// returns. A deadline on the inner call escapes it — see
+    /// `tests/reentrant_run.rs` — and asking without waiting avoids it
+    /// altogether (report16 HV16-M2, report15 HV15-M1).
+    ///
+    /// Ordinary contention answers the same way, because from here the two are
+    /// the same fact: somebody else holds it. A caller that CAN wait should
+    /// use [`Self::run`]; the permit is a queue, not a verdict.
+    pub async fn try_run<F, R>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce(&mut Container) -> Result<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        let ledger = Arc::as_ptr(&self.ops) as usize;
+        // Asked first, and it still answers first: a closure re-entering on
+        // its OWN thread gets the error that names what it did, rather than
+        // the one that says somebody else is holding it.
+        refuse_if_reentrant(ledger)?;
+        let inner = self.inner.clone();
+        self.ops
+            .try_run(
+                move || {
+                    let _held = reentrancy::enter(ledger);
+                    let mut guard = inner.lock().map_err(|_| {
+                        Error::Internal("AsyncContainer mutex poisoned by prior panicked task")
+                    })?;
+                    f(&mut guard)
+                },
+                container_failure(),
+            )
+            .await
+            .unwrap_or(Err(Error::WouldBlock))
+    }
+
     /// Set the post-commit padding policy. Affects future commits only.
     /// Errors with [`hidden_volume::Error::ReadOnly`] if the container
     /// was opened via [`Container::open_readonly`].
