@@ -127,6 +127,9 @@ windows-sys = { version = "0.61", features = [
     # `MoveFileExW` with `MOVEFILE_WRITE_THROUGH` — the only durability barrier
     # Windows offers for a rename. See `rename_durable` in `container/mod.rs`.
     "Win32_Storage_FileSystem",
+    # `CreateFileW` names `SECURITY_ATTRIBUTES` in its signature, so the
+    # directory handle the parent-dir flush opens needs this too.
+    "Win32_Security",
 ] }
 
 [dev-dependencies]

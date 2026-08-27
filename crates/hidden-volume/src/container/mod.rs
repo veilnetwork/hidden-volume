@@ -1695,18 +1695,20 @@ where
         return Err(Error::RenameVisibleAliasesNotRevoked(source_links - 1));
     }
 
-    // Two ways to reach the same outcome, and they are named apart because an
-    // operator reading the message wants to know which platform failed them.
-    if barrier == RenameBarrier::Skipped {
+    // EITHER barrier is enough, and only if BOTH are missing is the durability
+    // unknown.
+    //
+    // The rename carries one on Windows when `MoveFileExW` accepts
+    // write-through; the directory flush carries one on both platforms. This
+    // used to report uncertainty whenever the rename's own barrier was
+    // skipped — which on Windows is EVERY compaction and every rotation, since
+    // the destination is held open by this very rewrite — so the qualified
+    // outcome became the ordinary one there and stopped meaning anything
+    // (report16 HV16-H1, measured on a Windows VM).
+    if barrier == RenameBarrier::Skipped && durability.is_err() {
         return Err(Error::RenameVisibleDurabilityUncertain(
-            "the rename fell back to a path that carries no write-through \
-             barrier (destination held open elsewhere)",
-        ));
-    }
-
-    if durability.is_err() {
-        return Err(Error::RenameVisibleDurabilityUncertain(
-            "parent-directory fsync failed after a successful rename",
+            "neither the rename nor the directory flush confirmed the change \
+             reached the disk",
         ));
     }
     Ok(())
@@ -1885,11 +1887,64 @@ fn fsync_parent_dir(path: &std::path::Path) -> std::io::Result<()> {
             other => other,
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        // Windows has no parent-dir fsync concept. The barrier it DOES have is
-        // MOVEFILE_WRITE_THROUGH, taken inside [`rename_durable`]; there is
-        // nothing left for this to do.
+        // Windows DOES have one, and this used to say it did not.
+        //
+        // `FlushFileBuffers` on a handle opened with FILE_FLAG_BACKUP_SEMANTICS
+        // — the only way to open a directory — flushes that directory's
+        // metadata, which is where a rename lives. It is the same barrier the
+        // Unix side takes, by the API Windows provides for it.
+        //
+        // Measured on a Windows VM, not reasoned: this rewrite holds the
+        // DESTINATION open for the whole critical section (that is what stops
+        // a concurrent writer's commits being overwritten), and `MoveFileExW`
+        // with MOVEFILE_WRITE_THROUGH cannot replace a file anybody holds
+        // open. So it fails with ERROR_ACCESS_DENIED on EVERY compaction and
+        // every rotation, the fallback rescues the rename without the barrier,
+        // and the outcome was `RenameVisibleDurabilityUncertain` for the
+        // ordinary case rather than the rare one. Flushing the directory here
+        // is what puts the barrier back (report16 HV16-H1).
+        use std::os::windows::ffi::OsStrExt as _;
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_WRITE;
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, FlushFileBuffers, OPEN_EXISTING,
+        };
+
+        let dir = parent_dir_for(path);
+        let wide: Vec<u16> = dir
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: the buffer is NUL-terminated and outlives the call.
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                FILE_GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `handle` is a directory handle this call owns.
+        let flushed = unsafe { FlushFileBuffers(handle) };
+        // SAFETY: same, and closed exactly once.
+        unsafe { CloseHandle(handle) };
+        if flushed == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
         let _ = path;
         Ok(())
     }
@@ -1898,21 +1953,26 @@ fn fsync_parent_dir(path: &std::path::Path) -> std::io::Result<()> {
 /// What a rename achieved, beyond being visible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RenameBarrier {
-    /// Everything this platform owes for the rename ITSELF was done.
+    /// The rename ITSELF made the change durable.
     ///
-    /// On Unix that is nothing: the barrier there is the parent-directory
-    /// fsync the caller takes afterwards, so Unix always answers this and the
-    /// fsync's own result carries the durability.
+    /// Windows only, and only when `MoveFileExW` accepted
+    /// MOVEFILE_WRITE_THROUGH — so the variant exists only there. Declared
+    /// unconditionally it is a variant nothing constructs anywhere else, which
+    /// is a dead-code error under `-D warnings` and, worse, an outcome the
+    /// type offers that the platform cannot produce.
+    #[cfg(windows)]
     Taken,
-    /// The rename is visible and its barrier was NOT taken.
+    /// It did not, so the directory flush is what has to.
     ///
-    /// Windows only, and it is a real path rather than a theoretical one: the
-    /// `MoveFileExW` write-through call fails with ERROR_ACCESS_DENIED when
-    /// the destination is open elsewhere, and the fallback that rescues it is
-    /// `std::fs::rename`, which carries no barrier. Since `fsync_parent_dir`
-    /// is a no-op on Windows, nothing else could notice — so the rewrite
-    /// reported plain success, and a caller who had just rotated a leaked
-    /// password was told the old one was dead with no grounds (report16
+    /// Unix always answers this: `rename(2)` carries no barrier there and
+    /// never did — the parent-directory fsync is the barrier.
+    ///
+    /// Windows answers it on the ERROR_ACCESS_DENIED fallback, which is not a
+    /// rare path but the ORDINARY one: this rewrite holds the DESTINATION open
+    /// for the whole critical section — that is what stops a concurrent
+    /// writer's commits being overwritten — and `MoveFileExW` with
+    /// write-through cannot replace a file anybody holds open. Measured on a
+    /// Windows VM: it fails on every compaction and every rotation (report16
     /// HV16-H1).
     Skipped,
 }
@@ -1945,12 +2005,11 @@ enum RenameBarrier {
 fn rename_durable(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<RenameBarrier> {
     #[cfg(not(windows))]
     {
-        #[cfg(test)]
-        if rename_barrier_should_be_skipped() {
-            std::fs::rename(from, to)?;
-            return Ok(RenameBarrier::Skipped);
-        }
-        std::fs::rename(from, to).map(|()| RenameBarrier::Taken)
+        // `rename(2)` is atomic, not durable. The barrier here is the
+        // parent-directory fsync the caller takes next, so this answers
+        // `Skipped` always — and that is not a defect, it is what the call
+        // does.
+        std::fs::rename(from, to).map(|()| RenameBarrier::Skipped)
     }
     #[cfg(windows)]
     {
@@ -2020,25 +2079,6 @@ thread_local! {
 #[cfg(all(test, unix))]
 fn fsync_parent_dir_should_fail() -> bool {
     FSYNC_PARENT_DIR_FAILS.with(std::cell::Cell::get)
-}
-
-#[cfg(all(test, not(windows)))]
-thread_local! {
-    /// Test-only switch that makes [`rename_durable`] report
-    /// [`RenameBarrier::Skipped`].
-    ///
-    /// The condition it stands in for is Windows-only — `MoveFileExW` refusing
-    /// with ERROR_ACCESS_DENIED and the fallback rescuing the rename without a
-    /// barrier — and it cannot be provoked on this platform at all. What IS
-    /// the same on every platform is what the caller does with the answer, and
-    /// that is what used to be missing: the fallback existed, said so in its
-    /// own comment, and nothing read it.
-    static RENAME_BARRIER_SKIPPED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-#[cfg(all(test, not(windows)))]
-fn rename_barrier_should_be_skipped() -> bool {
-    RENAME_BARRIER_SKIPPED.with(std::cell::Cell::get)
 }
 
 fn compact_in_place_impl(
@@ -2580,81 +2620,6 @@ mod hv03_tests {
         drop(c);
 
         let mut c = Container::open(&path).unwrap();
-        assert!(
-            c.open_space(b"old").is_err(),
-            "the old password must be dead — that is what the caller rotated for"
-        );
-    }
-
-    /// Restores the barrier switch even if the test panics.
-    struct ForcedBarrierSkip;
-
-    impl ForcedBarrierSkip {
-        fn arm() -> Self {
-            RENAME_BARRIER_SKIPPED.with(|c| c.set(true));
-            Self
-        }
-    }
-
-    impl Drop for ForcedBarrierSkip {
-        fn drop(&mut self) {
-            RENAME_BARRIER_SKIPPED.with(|c| c.set(false));
-        }
-    }
-
-    /// The OTHER way durability can be missed, and the one nothing watched.
-    ///
-    /// On Windows `MoveFileExW` with write-through fails with
-    /// ERROR_ACCESS_DENIED when the destination is open elsewhere — which this
-    /// rewrite meets, since it holds the source while it publishes — and the
-    /// fallback that rescues it is a plain `std::fs::rename`, with no barrier.
-    /// `fsync_parent_dir` is a no-op on Windows, so the test above could not
-    /// fire there and nothing else looked: the rewrite reported plain success
-    /// on a path whose own comment said the barrier was lost (report16
-    /// HV16-H1).
-    ///
-    /// The Windows branch cannot run here; what is pinned is what the caller
-    /// does with the answer, which is where the gap was. The branch itself is
-    /// type-checked by building for a Windows target.
-    #[test]
-    fn a_rename_that_lost_its_barrier_is_reported_the_same_way() {
-        let dir = std::env::temp_dir().join(format!("hv16h1-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("c.bin");
-        let _cleanup = scopeguard(&dir);
-
-        {
-            let mut c = Container::create_with_options(&path, fast_options()).unwrap();
-            let mut s = c.create_space(b"old").unwrap();
-            let mut tx = s.begin_tx();
-            tx.put(crate::space::index::Namespace::SETTINGS, b"k", b"v")
-                .unwrap();
-            tx.commit().unwrap();
-        }
-
-        let err = {
-            let _armed = ForcedBarrierSkip::arm();
-            Container::change_passwords(&path, &[(b"old", b"new")], RepackOptions::default())
-                .expect_err("a rename without its barrier must not be reported as success")
-        };
-        assert!(
-            matches!(err, Error::RenameVisibleDurabilityUncertain(_)),
-            "expected the durability-specific outcome, got {err:?}"
-        );
-        // Named apart from the fsync case: an operator reading this wants to
-        // know which of the two happened.
-        let Error::RenameVisibleDurabilityUncertain(detail) = &err else {
-            unreachable!()
-        };
-        assert!(
-            detail.contains("write-through"),
-            "the two durability paths report the same text: {detail}"
-        );
-
-        // And it APPLIED, exactly like the fsync case.
-        let mut c = Container::open(&path).unwrap();
-        c.open_space(b"new")
-            .expect("the new password must open the container");
         assert!(
             c.open_space(b"old").is_err(),
             "the old password must be dead — that is what the caller rotated for"
