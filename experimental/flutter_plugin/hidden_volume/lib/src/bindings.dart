@@ -307,6 +307,8 @@ const Map<String, int> _methodChecksums = <String, int>{
   'uniffi_hidden_volume_ffi_checksum_func_change_passwords': 12821,
   'uniffi_hidden_volume_ffi_checksum_func_compact_known': 9495,
   'uniffi_hidden_volume_ffi_checksum_func_header_info': 40142,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_acknowledge_hardening_error':
+      28324,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_commit': 27479,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_commit_seq': 20495,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_count': 7841,
@@ -323,6 +325,7 @@ const Map<String, int> _methodChecksums = <String, int>{
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_space_count':
       64423,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_space_keys': 15090,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_stats': 46401,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_vacuum_data_batches':
       40066,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_vacuum_space':
@@ -1997,6 +2000,18 @@ final _msVacuumSpace = _dylib.lookupFunction<
         void Function(int, int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_multispacehandle_vacuum_space');
 
+final _msStats =
+    _dylib.lookupFunction<
+            RustBuffer Function(
+                ffi.Uint64, ffi.Uint32, ffi.Pointer<RustCallStatus>),
+            RustBuffer Function(int, int, ffi.Pointer<RustCallStatus>)>(
+        'uniffi_hidden_volume_ffi_fn_method_multispacehandle_stats');
+
+final _msAcknowledgeHardeningError = _dylib.lookupFunction<
+        ffi.Void Function(ffi.Uint64, ffi.Uint32, ffi.Pointer<RustCallStatus>),
+        void Function(int, int, ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_method_multispacehandle_acknowledge_hardening_error');
+
 final _msSpaceCount = _dylib.lookupFunction<
         ffi.Uint32 Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
         int Function(int, ffi.Pointer<RustCallStatus>)>(
@@ -2120,6 +2135,36 @@ class MultiSpaceHandleBindings {
     final sid = _sid(spaceId);
     final h = _clone();
     rustCall<void>((s) => _msVacuumSpace(h, sid, s));
+  }
+
+  /// Aggregated stats for hosted space [id] — the same shape the single-space
+  /// handle returns, including the sticky [HvStatsInfo.hardeningFailure].
+  ///
+  /// This surface did not exist, so a host running several identities over one
+  /// container answered `null` for both the utilization and the hardening
+  /// record — and `null` is indistinguishable from "nothing is wrong"
+  /// (report16 XV-08).
+  HvStatsInfo stats(int id) {
+    _ensureOpen();
+    final sid = _sid(id);
+    final h = _clone();
+    final out = rustCall<RustBuffer>((s) => _msStats(h, sid, s));
+    return _readStats(_bufferToBytes(out));
+  }
+
+  /// Acknowledge the sticky hardening record of hosted space [id] — "I have
+  /// shown this to the person". Clears it; nothing else does.
+  ///
+  /// Idempotent. Call it once the warning has actually been surfaced: the
+  /// record survives commits precisely so it cannot fall between two polls,
+  /// and acknowledging it unread throws away the same warning by hand.
+  void acknowledgeHardeningError(int id) {
+    _ensureOpen();
+    final sid = _sid(id);
+    final h = _clone();
+    rustCall<void>((s) {
+      _msAcknowledgeHardeningError(h, sid, s);
+    });
   }
 
   /// Number of hosted spaces.
