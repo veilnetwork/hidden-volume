@@ -67,7 +67,7 @@ fn mmap_open_recovers_same_state_as_sequential() {
 
     let (mmap_seq, mmap_history, mmap_owned, mmap_log) = {
         let mut c = Container::open(&path).unwrap();
-        let mut s = c.open_space_mmap(b"pw").unwrap();
+        let mut s = unsafe { c.open_space_mmap(b"pw") }.unwrap();
         let log = s.iter_log(Namespace::MESSAGE_LOG).unwrap();
         (
             s.commit_seq(),
@@ -98,7 +98,7 @@ fn mmap_open_picks_max_seq_across_many_replicas() {
         }
     }
     let mut c = Container::open(&path).unwrap();
-    let s = c.open_space_mmap(b"pw").unwrap();
+    let s = unsafe { c.open_space_mmap(b"pw") }.unwrap();
     assert_eq!(s.commit_seq(), 11);
     assert_eq!(s.commit_history().len(), 11);
 }
@@ -114,7 +114,7 @@ fn mmap_open_wrong_password_returns_auth_failed() {
         tx.commit().unwrap();
     }
     let mut c = Container::open(&path).unwrap();
-    let result = c.open_space_mmap(b"wrong");
+    let result = unsafe { c.open_space_mmap(b"wrong") };
     assert!(matches!(result, Err(hidden_volume::Error::AuthFailed)));
 }
 
@@ -125,7 +125,7 @@ fn mmap_open_empty_file_authfails_too() {
         let _c = Container::create(&path, fast_params()).unwrap();
     }
     let mut c = Container::open(&path).unwrap();
-    let result = c.open_space_mmap(b"any");
+    let result = unsafe { c.open_space_mmap(b"any") };
     assert!(matches!(result, Err(hidden_volume::Error::AuthFailed)));
 }
 
@@ -141,7 +141,7 @@ fn mmap_open_with_keys_skips_argon2() {
     }
     let mut c = Container::open(&path).unwrap();
     let keys = c.derive_space_keys(b"pw").unwrap();
-    let s = c.open_space_with_keys_mmap(keys).unwrap();
+    let s = unsafe { c.open_space_with_keys_mmap(keys) }.unwrap();
     assert_eq!(s.commit_seq(), 2);
 }
 
@@ -161,7 +161,7 @@ fn mmap_open_then_verify_integrity_holds() {
         tx.commit().unwrap();
     }
     let mut c = Container::open(&path).unwrap();
-    let mut s = c.open_space_mmap(b"pw").unwrap();
+    let mut s = unsafe { c.open_space_mmap(b"pw") }.unwrap();
     let report = s.verify_integrity().unwrap();
     assert_eq!(report.namespaces_verified, 1);
 }
@@ -208,7 +208,7 @@ fn mmap_three_paths_agree() {
         };
         let mmap_state = {
             let mut c = Container::open(&path).unwrap();
-            let mut s = c.open_space_mmap(b"pw").unwrap();
+            let mut s = unsafe { c.open_space_mmap(b"pw") }.unwrap();
             (
                 s.commit_seq(),
                 s.commit_history().to_vec(),
@@ -218,4 +218,47 @@ fn mmap_three_paths_agree() {
         assert_eq!(seq_state, par_state);
         assert_eq!(seq_state, mmap_state);
     }
+}
+
+/// The mapped opens carry their precondition in the signature
+/// (report17 HV17-L3).
+///
+/// `flock(2)` is advisory: a process of the same user that opens the container
+/// without taking the lock and truncates it makes this scan touch a page that
+/// is no longer backed, and the kernel answers with SIGBUS — the process dies
+/// and no `Result` is ever returned. A safe function may not have a
+/// precondition its caller cannot see, which is why `memmap2` marks the
+/// mapping itself unsafe; wrapping it in a safe signature only moved the
+/// contract somewhere nobody reads.
+///
+/// Checked as text rather than by types: a safe `fn` coerces to an
+/// `unsafe fn` pointer, so a type-level assertion would pass either way — the
+/// direction that matters cannot be expressed as a compiling test.
+#[test]
+fn every_mapped_open_is_unsafe_and_says_why() {
+    let src = include_str!("../src/container/mod.rs");
+    for name in [
+        "open_space_mmap",
+        "open_space_with_keys_mmap",
+        "open_space_mmap_constant_time",
+        "open_space_with_keys_mmap_constant_time",
+    ] {
+        // Split so the needle exists in this file only where it is built: a
+        // whole literal here would be found in this assertion itself.
+        let needle = format!("{}unsafe fn {name}(", "pub ");
+        assert!(
+            src.contains(&needle),
+            "{name} is a safe function with a precondition its caller cannot see"
+        );
+    }
+    // And the contract is written down, once per entry point.
+    assert_eq!(
+        src.matches("# Safety").count(),
+        4,
+        "an entry point gained or lost its safety contract"
+    );
+    assert!(
+        src.contains("SIGBUS"),
+        "the contract does not name what happens"
+    );
 }
