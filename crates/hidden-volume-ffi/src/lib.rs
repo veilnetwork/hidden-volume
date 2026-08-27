@@ -300,6 +300,24 @@ pub enum HvError {
     /// reasonable: the permit is a queue, not a verdict.
     #[error("the handle's operation permit is held by another caller; nothing ran")]
     WouldBlock,
+    /// The rewrite landed, and this platform could not say whether the old
+    /// file is still reachable under another name.
+    ///
+    /// APPENDED, and it has to be: the Dart side maps these positionally, so
+    /// inserting a variant anywhere above silently renames every one after it.
+    ///
+    /// Not the same as "no other names" — that is what a hard-coded count of
+    /// one claimed on every non-Unix platform, and NTFS hard links exist, so a
+    /// rotation could leave one behind and still report success (report17
+    /// HV17-M3).
+    ///
+    /// **Not a failure to retry.** The rewrite is in place at the path that
+    /// was named; what is unknown is how far the revocation reached, and
+    /// rewriting the same name again does not find out.
+    #[error(
+        "rewrite is visible but this platform cannot say whether other names for the old file remain"
+    )]
+    RenameVisibleAliasesUnknown,
 }
 
 impl From<hidden_volume::Error> for HvError {
@@ -339,6 +357,7 @@ impl From<hidden_volume::Error> for HvError {
             E::RenameVisibleAliasesNotRevoked(others) => {
                 HvError::RenameVisibleAliasesNotRevoked { others }
             },
+            E::RenameVisibleAliasesUnknown => HvError::RenameVisibleAliasesUnknown,
             E::PublishUncertain(s) => HvError::PublishUncertain(s.into()),
             // `hidden_volume::Error` is `#[non_exhaustive]`, so this
             // catch-all is mandatory. It is a deniability-safe default
@@ -3217,6 +3236,7 @@ mod tests {
             hidden_volume::Error::RenameVisibleContentUnverified("c"),
             hidden_volume::Error::SourceIsNotARegularFile("s"),
             hidden_volume::Error::RenameVisibleAliasesNotRevoked(1),
+            hidden_volume::Error::RenameVisibleAliasesUnknown,
             hidden_volume::Error::WouldBlock,
             hidden_volume::Error::PublishUncertain("p"),
             hidden_volume::Error::Malformed("m"),

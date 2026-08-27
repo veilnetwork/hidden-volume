@@ -148,6 +148,25 @@ pub enum Error {
     #[error("rewrite is visible but the old file is still reachable under {0} other name(s)")]
     RenameVisibleAliasesNotRevoked(u64),
 
+    /// The rewrite landed, and this platform could not say whether the
+    /// previous inode is still reachable under another name.
+    ///
+    /// Not the same as "there are no other names", which is what a hard-coded
+    /// count of one said for every non-Unix platform — NTFS hard links exist,
+    /// and a rotation that leaves one behind revokes nothing while returning
+    /// success (report17 HV17-M3). Windows is asked directly now; this variant
+    /// is for the case where the ask itself fails, and for platforms with no
+    /// answer at all.
+    ///
+    /// **Not a failure to retry**, for the same reason as its certain twin:
+    /// the rewrite is in place at the path that was named. What is unknown is
+    /// how far the revocation reached, and rewriting the same name again does
+    /// not find out.
+    #[error(
+        "rewrite is visible but this platform cannot say whether other names for the old file remain"
+    )]
+    RenameVisibleAliasesUnknown,
+
     /// A publish got at least one Superblock replica onto the disk and then
     /// failed, so this handle's view of the tree may be one era behind what a
     /// reopen would select.

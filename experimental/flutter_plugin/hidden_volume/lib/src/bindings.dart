@@ -1299,6 +1299,9 @@ const _kindsThatMayHaveApplied = <String>{
   // far the revocation reached. A caller that reads this as "nothing happened"
   // and retries with the old password is wrong twice over.
   'RenameVisibleAliasesNotRevoked',
+  // Same, one step less certain: the rewrite applied and whether another name
+  // survives is unknown rather than known-yes (report17 HV17-M3).
+  'RenameVisibleAliasesUnknown',
 };
 
 /// The names an [HvException.kind] can carry, for the drift check above.
@@ -1354,6 +1357,10 @@ const _hvErrorKinds = <String>[
   // report16 HV16-M2 — `try_run` asked and did not wait; somebody else holds
   // the handle's permit and NOTHING ran.
   'WouldBlock',
+  // report17 HV17-M3 — the rewrite applied and this platform could not say
+  // whether another name for the old file remains. Appended, because this list
+  // is positional: inserting anywhere above renames every kind after it.
+  'RenameVisibleAliasesUnknown',
 ];
 
 HvException _liftHvException(RustBuffer buf) {

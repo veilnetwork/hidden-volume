@@ -1529,10 +1529,10 @@ where
         // same inode, and the rewrite replaces only the one it was given; read
         // here because after the rename this inode is unlinked from `path` and
         // the count no longer answers the question.
-        Ok(meta) => source_link_count(&meta),
+        Ok(meta) => source_link_count(path, &meta),
         // Unknown is not wrong. Let the open below decide whether there is a
         // container here at all.
-        Err(_) => 1,
+        Err(_) => Some(1),
     };
 
     let mut src = Container::open_exclusive_readonly(path)?;
@@ -1691,8 +1691,15 @@ where
     // Reported before durability and after the inode pin, in order of how bad
     // the news is: "this is not the file we wrote" beats "the old file is still
     // reachable elsewhere", which beats "this might not survive a crash".
-    if source_links > 1 {
-        return Err(Error::RenameVisibleAliasesNotRevoked(source_links - 1));
+    match source_links {
+        Some(n) if n > 1 => {
+            return Err(Error::RenameVisibleAliasesNotRevoked(n - 1));
+        },
+        // The platform could not say. Reported rather than assumed away: a
+        // silent `1` is a claim that there are no other names, and on NTFS
+        // that claim was simply wrong (report17 HV17-M3).
+        None => return Err(Error::RenameVisibleAliasesUnknown),
+        Some(_) => {},
     }
 
     // EITHER barrier is enough, and only if BOTH are missing is the durability
@@ -1714,22 +1721,76 @@ where
     Ok(())
 }
 
-/// How many names the file behind `meta` has.
+/// How many names the file at `path` has, or `None` when this platform cannot
+/// say.
 ///
-/// Unix answers exactly; everywhere else the answer is "one", which is what
-/// the code assumed everywhere before it started asking. Windows hard links
-/// exist and are not visible through `std`'s metadata, so this is a limit of
-/// the check rather than a claim about the platform.
-fn source_link_count(meta: &std::fs::Metadata) -> u64 {
+/// Unix reads it from the metadata already in hand. Windows does not surface
+/// it through `std`, and the answer used to be a hard-coded `1` — which is not
+/// "unknown", it is "there are no other names", and NTFS hard links exist. A
+/// second name kept the OLD inode after a password rotation: the old password
+/// still opens the container through it, the operation returned `Ok`, and the
+/// rotation revoked nothing (report17 HV17-M3). So Windows asks the OS, with
+/// the same call `stat` uses underneath.
+///
+/// `None` is returned when the ask itself fails — the file is gone, the handle
+/// cannot be opened, the filesystem does not implement it. Unknown is not the
+/// same as one, and the caller treats it as such.
+fn source_link_count(path: &std::path::Path, meta: &std::fs::Metadata) -> Option<u64> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
-        meta.nlink()
+        let _ = path;
+        Some(meta.nlink())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
         let _ = meta;
-        1
+        use std::os::windows::ffi::OsStrExt as _;
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, GetFileInformationByHandle, OPEN_EXISTING,
+        };
+
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // Opened for no access at all: this asks a question about the file, it
+        // does not read it, and a zero-access handle is granted where a read
+        // handle would be refused. Shared every way so the ask never gets in
+        // the way of the rewrite happening around it.
+        // SAFETY: the buffer is NUL-terminated and outlives the call.
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: `handle` is owned by this call and `info` is a valid, sized
+        // out-parameter.
+        let ok = unsafe { GetFileInformationByHandle(handle, &raw mut info) };
+        // SAFETY: same handle, closed exactly once.
+        unsafe { CloseHandle(handle) };
+        if ok == 0 {
+            return None;
+        }
+        Some(u64::from(info.nNumberOfLinks))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (path, meta);
+        None
     }
 }
 
