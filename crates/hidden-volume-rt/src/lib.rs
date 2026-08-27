@@ -619,6 +619,44 @@ impl OpLedger {
         self.run_cancellable(CancelToken::new(), f, map_err).await
     }
 
+    /// Like [`Self::run`], but never queues: `None` when no permit is free.
+    ///
+    /// `None` means NOTHING RAN — the permit was not taken, no task was
+    /// dispatched, and no operation was filed. It is the answer for a caller
+    /// that must not wait, which is the one shape the async layer's
+    /// re-entrancy guard cannot see: work handed to another OS thread leaves
+    /// no thread-local mark, so the child queues for a permit the parent will
+    /// not release until the child returns (report16 HV16-M2).
+    ///
+    /// Ordinary contention answers `None` too. The permit is a queue, not a
+    /// verdict, so a caller that CAN wait should use [`Self::run`].
+    pub async fn try_run<F, T, E>(
+        &self,
+        f: F,
+        map_err: impl FnOnce(BlockingFailure) -> E + Send + 'static,
+    ) -> Option<Result<T, E>>
+    where
+        F: FnOnce() -> Result<T, E> + Send + 'static,
+        T: Send + 'static,
+        E: Send + 'static,
+    {
+        // Taken HERE and handed to the dispatch, so there is no window between
+        // "a permit was free" and "this call took it".
+        let permit = Arc::clone(&self.permits).try_acquire_owned().ok()?;
+        let state = Arc::new(OpState {
+            id: self.next_id.fetch_add(1, Ordering::Relaxed),
+            token: CancelToken::new(),
+            started: AtomicBool::new(false),
+            outcome: AtomicU8::new(OUT_PENDING),
+        });
+        let guard = AbandonGuard {
+            ledger: self,
+            state: Some(Arc::clone(&state)),
+            dispatched: false,
+        };
+        Some(Self::dispatch_with_permit(permit, state, guard, f, map_err).await)
+    }
+
     /// Dispatch `f` to the blocking pool, wired to `token`.
     ///
     /// `token` is the caller's own token — clone it into `f` and the
@@ -676,6 +714,27 @@ impl OpLedger {
             },
         };
 
+        Self::dispatch_with_permit(permit, state, guard, f, map_err).await
+    }
+
+    /// Everything from "a permit is in hand" onwards.
+    ///
+    /// Shared by [`Self::run_cancellable`], which waits for the permit, and
+    /// [`Self::try_run`], which refuses rather than wait. Extracted rather
+    /// than copied: this is where the operation stops being cancellable by
+    /// dropping the future, and two copies of that boundary is one too many.
+    async fn dispatch_with_permit<F, T, E>(
+        permit: tokio::sync::OwnedSemaphorePermit,
+        state: Arc<OpState>,
+        mut guard: AbandonGuard<'_>,
+        f: F,
+        map_err: impl FnOnce(BlockingFailure) -> E + Send + 'static,
+    ) -> Result<T, E>
+    where
+        F: FnOnce() -> Result<T, E> + Send + 'static,
+        T: Send + 'static,
+        E: Send + 'static,
+    {
         // From here on the task exists independently of this future.
         guard.dispatched = true;
         let task_state = Arc::clone(&state);

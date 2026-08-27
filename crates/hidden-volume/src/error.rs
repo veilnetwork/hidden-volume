@@ -245,6 +245,24 @@ pub enum Error {
     #[error("reentrant run: this closure already holds the handle's operation permit")]
     ReentrantRun,
 
+    /// Somebody else holds the handle's operation permit, and the caller asked
+    /// not to wait.
+    ///
+    /// **Nothing ran.** Distinct from [`Self::ReentrantRun`], which says THIS
+    /// closure holds it: here the holder may be an unrelated caller, or a
+    /// thread this one is about to wait for.
+    ///
+    /// Raised only by the `try_run` family. It exists for the one shape the
+    /// re-entrancy guard cannot see: a closure that hands its work to another
+    /// OS thread and waits for it leaves no thread-local mark the child can
+    /// find, so the child queues for a permit the parent will not release
+    /// until the child returns. Asking without waiting turns that deadlock
+    /// into an answer (report16 HV16-M2, report15 HV15-M1).
+    ///
+    /// Retrying is reasonable — the permit is a queue, not a verdict.
+    #[error("the handle's operation permit is held by another caller; nothing ran")]
+    WouldBlock,
+
     /// A namespace's stored shape is not what the called API
     /// expects. Currently raised by `iter_log_*` / `read_log` when the
     /// namespace is a regular KV namespace (entries don't match the

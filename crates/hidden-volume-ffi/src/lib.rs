@@ -293,6 +293,13 @@ pub enum HvError {
         /// How many OTHER names still resolve to the pre-rewrite file.
         others: u64,
     },
+    /// Another caller holds the handle's operation permit, and this one
+    /// asked not to wait.
+    ///
+    /// **Nothing ran.** Raised only by the `try_run` family. Retrying is
+    /// reasonable: the permit is a queue, not a verdict.
+    #[error("the handle's operation permit is held by another caller; nothing ran")]
+    WouldBlock,
 }
 
 impl From<hidden_volume::Error> for HvError {
@@ -327,6 +334,7 @@ impl From<hidden_volume::Error> for HvError {
             E::RenameVisibleContentUnverified(s) => {
                 HvError::RenameVisibleContentUnverified(s.into())
             },
+            E::WouldBlock => HvError::WouldBlock,
             E::SourceIsNotARegularFile(s) => HvError::SourceIsNotARegularFile(s.into()),
             E::RenameVisibleAliasesNotRevoked(others) => {
                 HvError::RenameVisibleAliasesNotRevoked { others }
@@ -3209,6 +3217,7 @@ mod tests {
             hidden_volume::Error::RenameVisibleContentUnverified("c"),
             hidden_volume::Error::SourceIsNotARegularFile("s"),
             hidden_volume::Error::RenameVisibleAliasesNotRevoked(1),
+            hidden_volume::Error::WouldBlock,
             hidden_volume::Error::PublishUncertain("p"),
             hidden_volume::Error::Malformed("m"),
             hidden_volume::Error::Kdf("k"),
