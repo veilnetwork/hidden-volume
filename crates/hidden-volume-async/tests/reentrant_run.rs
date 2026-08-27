@@ -336,3 +336,101 @@ async fn try_run_reentering_on_its_own_thread_is_still_reentrant() {
         "expected ReentrantRun, got {answer:?}"
     );
 }
+
+/// The SPACE handle needs the same escape as the container handle.
+///
+/// The re-entrancy guard is a thread-local, so a closure that hands its work
+/// to another OS thread and waits for it leaves the child queueing for a
+/// permit the parent will not release until the child returns. `AsyncContainer`
+/// got `try_run` for exactly this in report16 HV16-M2; `AsyncSpace` did not,
+/// so the same shape one level down still hung — and a space is where an
+/// application does its work (report17 HV17-M2).
+///
+/// A HANG is what this test is about, and the deadline below does NOT rescue
+/// it: the parent blocks a runtime worker on `join`, so the timer never gets
+/// to fire. Measured — removing `AsyncSpace::try_run` makes this test hang
+/// rather than fail, and the run has to be killed from outside. Anyone
+/// break-checking this needs a hard deadline around `cargo test` itself; the
+/// timeout here only covers a slow machine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn space_try_run_refuses_across_threads_instead_of_queueing() {
+    let path = scratch_path();
+    let space = hidden_volume_async::AsyncSpace::create(
+        &path,
+        b"pw".to_vec(),
+        hidden_volume::crypto::kdf::Argon2Params::MIN,
+    )
+    .await
+    .unwrap();
+    let clone = space.clone();
+    let handle = tokio::runtime::Handle::current();
+
+    let outer = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        space.run(move |_s| {
+            let child = std::thread::spawn(move || {
+                handle.block_on(async { clone.try_run(|_s| Ok(7u32)).await })
+            });
+            Ok(child.join().expect("child thread panicked"))
+        }),
+    )
+    .await
+    .expect(
+        "the outer run never returned: the child is still queueing for a permit the parent holds",
+    );
+
+    let answer = outer.expect("the outer run returns because the child does");
+    assert!(
+        matches!(answer, Err(hidden_volume::Error::WouldBlock)),
+        "expected WouldBlock, got {answer:?}"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// CONTROL: with nobody holding the permit, the same call runs.
+///
+/// Without it the test above is satisfied by a `try_run` that refuses always,
+/// which is not an API.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn space_try_run_runs_when_the_permit_is_free() {
+    let path = scratch_path();
+    let space = hidden_volume_async::AsyncSpace::create(
+        &path,
+        b"pw".to_vec(),
+        hidden_volume::crypto::kdf::Argon2Params::MIN,
+    )
+    .await
+    .unwrap();
+
+    let answer = space.try_run(|_s| Ok(7u32)).await;
+
+    assert!(matches!(answer, Ok(7)), "got {answer:?}");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// And a closure re-entering on its OWN thread still gets the error naming
+/// what IT did, rather than the one about somebody else holding the permit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn space_try_run_reentering_on_its_own_thread_is_still_reentrant() {
+    let path = scratch_path();
+    let space = hidden_volume_async::AsyncSpace::create(
+        &path,
+        b"pw".to_vec(),
+        hidden_volume::crypto::kdf::Argon2Params::MIN,
+    )
+    .await
+    .unwrap();
+    let clone = space.clone();
+
+    let answer = space
+        .run(move |_s| {
+            tokio::runtime::Handle::current().block_on(async { clone.try_run(|_s| Ok(7u32)).await })
+        })
+        .await;
+
+    match answer {
+        Err(hidden_volume::Error::ReentrantRun) => {},
+        other => panic!("expected ReentrantRun, got {other:?}"),
+    }
+    let _ = std::fs::remove_file(&path);
+}

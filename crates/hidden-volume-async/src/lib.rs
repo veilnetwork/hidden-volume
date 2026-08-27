@@ -739,6 +739,47 @@ impl AsyncSpace {
             .await
     }
 
+    /// Ask for the space WITHOUT queueing: [`hidden_volume::Error::WouldBlock`]
+    /// rather than a wait.
+    ///
+    /// The twin of [`AsyncContainer::try_run`], and it is needed for the same
+    /// reason. [`Self::run`]'s re-entrancy guard is a thread-local, so it sees
+    /// a closure that re-enters on its OWN thread and nothing else: a closure
+    /// that hands its work to another OS thread and waits for it leaves the
+    /// child queueing for a permit the parent will not release until the child
+    /// returns, and neither side can move. `AsyncContainer` got this escape in
+    /// report16 HV16-M2; the space handle did not, so the same shape one level
+    /// down still hung (report17 HV17-M2).
+    ///
+    /// Ordinary contention answers the same way, because from here the two are
+    /// the same fact: somebody else holds it. A caller that CAN wait should
+    /// use [`Self::run`]; the permit is a queue, not a verdict.
+    pub async fn try_run<F, R>(&self, f: F) -> Result<R>
+    where
+        F: for<'s> FnOnce(&mut Space<'s>) -> Result<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        let ledger = Arc::as_ptr(&self.ops) as usize;
+        // Asked first, and it still answers first: a closure re-entering on
+        // its OWN thread gets the error that names what it did, rather than
+        // the one that says somebody else is holding it.
+        refuse_if_reentrant(ledger)?;
+        let inner = self.inner.clone();
+        self.ops
+            .try_run(
+                move || {
+                    let _held = reentrancy::enter(ledger);
+                    let mut guard = inner.lock().map_err(|_| {
+                        Error::Internal("AsyncSpace mutex poisoned by prior panicked task")
+                    })?;
+                    guard.with_space_mut(f)
+                },
+                space_failure(),
+            )
+            .await
+            .unwrap_or(Err(Error::WouldBlock))
+    }
+
     /// Every operation on this handle whose future was dropped before
     /// it reported back. See [`AsyncContainer::abandoned_operations`]
     /// — identical contract and identical reconciliation advice.
