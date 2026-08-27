@@ -763,16 +763,52 @@ impl Container {
     /// writable by a hostile local process; otherwise use
     /// [`Self::open_space`], which reads through `pread` and turns the same
     /// truncate into a short read (report16 HV16-M1).
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that, for the duration of this call, no other
+    /// process shortens or otherwise remaps the container file. `flock(2)` is
+    /// advisory and does not provide that: a process of the same user that
+    /// opens the file WITHOUT taking the lock and truncates it makes the scan
+    /// touch a page that is no longer backed, and the kernel answers with
+    /// SIGBUS — the process dies, and no `Result` is ever returned
+    /// (report17 HV17-L3).
+    ///
+    /// A safe function may not have a precondition its caller cannot see. The
+    /// mapping underneath is `unsafe` in `memmap2` for exactly this reason,
+    /// and wrapping it in a safe signature only moved the contract somewhere
+    /// nobody reads. Where the directory can be written by anything hostile,
+    /// use [`Self::open_space`] instead: it reads through `pread` and turns
+    /// the same truncate into a short read.
     #[cfg(all(feature = "mmap", unix))]
-    pub fn open_space_mmap(&mut self, password: &[u8]) -> Result<Space<'_>> {
+    pub unsafe fn open_space_mmap(&mut self, password: &[u8]) -> Result<Space<'_>> {
         let keys = self.derive_keys(password)?;
-        self.open_space_with_keys_mmap(keys)
+        // SAFETY: forwarded to the caller of this function, which carries the
+        // same contract.
+        unsafe { self.open_space_with_keys_mmap(keys) }
     }
 
     /// mmap variant of [`Self::open_space_with_keys`]. See
     /// [`Self::open_space_mmap`] for when to use.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that, for the duration of this call, no other
+    /// process shortens or otherwise remaps the container file. `flock(2)` is
+    /// advisory and does not provide that: a process of the same user that
+    /// opens the file WITHOUT taking the lock and truncates it makes the scan
+    /// touch a page that is no longer backed, and the kernel answers with
+    /// SIGBUS — the process dies, and no `Result` is ever returned
+    /// (report17 HV17-L3).
+    ///
+    /// A safe function may not have a precondition its caller cannot see. The
+    /// mapping underneath is `unsafe` in `memmap2` for exactly this reason,
+    /// and wrapping it in a safe signature only moved the contract somewhere
+    /// nobody reads. Where the directory can be written by anything hostile,
+    /// use [`Self::open_space`] instead: it reads through `pread` and turns
+    /// the same truncate into a short read.
     #[cfg(all(feature = "mmap", unix))]
-    pub fn open_space_with_keys_mmap(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
+    pub unsafe fn open_space_with_keys_mmap(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
         let is_ro = self.is_readonly();
         let mut space = Space::open_mmap(&mut self.file, keys)?;
         if !is_ro {
@@ -915,18 +951,53 @@ impl Container {
     ///
     /// **Honest scope.** Same as
     /// [`Self::open_space_constant_time`].
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that, for the duration of this call, no other
+    /// process shortens or otherwise remaps the container file. `flock(2)` is
+    /// advisory and does not provide that: a process of the same user that
+    /// opens the file WITHOUT taking the lock and truncates it makes the scan
+    /// touch a page that is no longer backed, and the kernel answers with
+    /// SIGBUS — the process dies, and no `Result` is ever returned
+    /// (report17 HV17-L3).
+    ///
+    /// A safe function may not have a precondition its caller cannot see. The
+    /// mapping underneath is `unsafe` in `memmap2` for exactly this reason,
+    /// and wrapping it in a safe signature only moved the contract somewhere
+    /// nobody reads. Where the directory can be written by anything hostile,
+    /// use [`Self::open_space`] instead: it reads through `pread` and turns
+    /// the same truncate into a short read.
     #[cfg(all(feature = "mmap", unix))]
-    pub fn open_space_mmap_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
+    pub unsafe fn open_space_mmap_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
         let keys = self.derive_keys(password)?;
-        self.open_space_with_keys_mmap_constant_time(keys)
+        // SAFETY: forwarded to the caller, which carries the same contract.
+        unsafe { self.open_space_with_keys_mmap_constant_time(keys) }
     }
 
     /// `SpaceKeys`-driven companion to
     /// [`Self::open_space_mmap_constant_time`]. Performs no
     /// maintenance — [`Space::vacuum_after_open`] is owed afterwards
     /// (audit HV-01).
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that, for the duration of this call, no other
+    /// process shortens or otherwise remaps the container file. `flock(2)` is
+    /// advisory and does not provide that: a process of the same user that
+    /// opens the file WITHOUT taking the lock and truncates it makes the scan
+    /// touch a page that is no longer backed, and the kernel answers with
+    /// SIGBUS — the process dies, and no `Result` is ever returned
+    /// (report17 HV17-L3).
+    ///
+    /// A safe function may not have a precondition its caller cannot see. The
+    /// mapping underneath is `unsafe` in `memmap2` for exactly this reason,
+    /// and wrapping it in a safe signature only moved the contract somewhere
+    /// nobody reads. Where the directory can be written by anything hostile,
+    /// use [`Self::open_space`] instead: it reads through `pread` and turns
+    /// the same truncate into a short read.
     #[cfg(all(feature = "mmap", unix))]
-    pub fn open_space_with_keys_mmap_constant_time(
+    pub unsafe fn open_space_with_keys_mmap_constant_time(
         &mut self,
         keys: SpaceKeys,
     ) -> Result<Space<'_>> {

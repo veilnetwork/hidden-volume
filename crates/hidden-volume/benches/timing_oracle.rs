@@ -126,7 +126,7 @@ impl ScanMode {
             #[cfg(all(feature = "parallel-scan", unix))]
             ScanMode::Parallel => c.open_space_parallel(password).map(|_| ()),
             #[cfg(all(feature = "mmap", unix))]
-            ScanMode::Mmap => c.open_space_mmap(password).map(|_| ()),
+            ScanMode::Mmap => unsafe { c.open_space_mmap(password) }.map(|_| ()),
         }
     }
 }

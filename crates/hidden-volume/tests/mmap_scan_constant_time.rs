@@ -59,7 +59,7 @@ fn mmap_constant_time_recovers_same_state_as_sequential() {
     // mmap CT companion.
     let (ct_seq, ct_owned, ct_count) = {
         let mut c = Container::open(&path).unwrap();
-        let mut s = c.open_space_mmap_constant_time(b"pw").unwrap();
+        let mut s = unsafe { c.open_space_mmap_constant_time(b"pw") }.unwrap();
         (
             s.commit_seq(),
             s.audit_owned_chunk_count(),
@@ -92,6 +92,6 @@ fn mmap_constant_time_wrong_password_returns_auth_failed() {
         tx.commit().unwrap();
     }
     let mut c = Container::open(&path).unwrap();
-    let err = c.open_space_mmap_constant_time(b"wrong").unwrap_err();
+    let err = unsafe { c.open_space_mmap_constant_time(b"wrong") }.unwrap_err();
     assert!(matches!(err, hidden_volume::Error::AuthFailed));
 }
