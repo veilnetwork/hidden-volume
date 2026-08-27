@@ -43,7 +43,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use zeroize::Zeroizing;
+use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::chunk::ChunkKind;
 use crate::chunk::format::PAYLOAD_CAP;
@@ -564,7 +564,10 @@ impl<'f> Space<'f> {
                     },
                 },
             };
-            for (key, value) in node.entries.into_inner() {
+            // Consumed with its remainder scrubbed: an error raised further
+            // down leaves the rest of this leaf's plaintext behind, and there
+            // is a `?` on nearly every line below (report17 HV17-M6).
+            for (key, value) in node.entries.into_secret_pairs() {
                 // Operations sorted below this entry are insertions.
                 while pending
                     .peek()
@@ -578,10 +581,23 @@ impl<'f> Space<'f> {
                     .peek()
                     .is_some_and(|(k, _)| k.as_slice() == key.as_slice())
                 {
-                    // Overwrite or delete: either way the stored entry
-                    // does not survive.
-                    if let Some((_, Some(v))) = pending.next() {
-                        self.leaf_push(&mut run, key, v.clone(), b, &mut below)?;
+                    // Overwrite or delete: either way the stored entry does
+                    // not survive — so the value it held is scrubbed here
+                    // rather than dropped. That value is the user's previous
+                    // content, and "previous" is exactly what somebody
+                    // overwriting or deleting it wants gone (report17
+                    // HV17-M6).
+                    let mut value = value;
+                    value.zeroize();
+                    match pending.next() {
+                        Some((_, Some(v))) => {
+                            self.leaf_push(&mut run, key, v.clone(), b, &mut below)?;
+                        },
+                        // A delete: the key goes too.
+                        _ => {
+                            let mut key = key;
+                            key.zeroize();
+                        },
                     }
                 } else {
                     self.leaf_push(&mut run, key, value, b, &mut below)?;
