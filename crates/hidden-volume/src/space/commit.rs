@@ -263,14 +263,19 @@ impl<'f> Space<'f> {
             // Coalesce duplicate log_ids — last append wins (matches
             // KV semantics for repeated puts in one tx). Use a BTreeMap
             // keyed by log_id; later inserts overwrite earlier ones.
-            let mut by_id: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
+            // Keyed by log_id, and the VALUES scrub themselves: a repeated
+            // append in one transaction means `insert` drops the earlier
+            // payload right here, and that payload is the caller's record in
+            // the clear (report17 HV17-M6).
+            let mut by_id: BTreeMap<u64, log::LogPayload> = BTreeMap::new();
             for (id, payload) in log_records {
-                by_id.insert(id, payload);
+                by_id.insert(id, zeroize::Zeroizing::new(payload));
             }
             // Re-wrapped once the shape settles. `into_iter` moves the same
             // payload buffers `Tx::append_log` allocated, so the wrapper's
             // drop is what scrubs them when this iteration ends (HV-07).
-            let log_records = Redacted::new(by_id.into_iter().collect::<Vec<(u64, Vec<u8>)>>());
+            let log_records =
+                Redacted::new(by_id.into_iter().collect::<Vec<(u64, log::LogPayload)>>());
 
             // Auto-split into 1+ DataBatch chunks if the compressed
             // payload of the full record set would exceed PAYLOAD_CAP.

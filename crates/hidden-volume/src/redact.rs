@@ -244,6 +244,25 @@ impl Secret for Vec<(Vec<u8>, Vec<u8>)> {
     }
 }
 
+/// One namespace's coalesced log records, `[(log_id, payload)]`.
+///
+/// The payloads scrub themselves, so the wrapper's own scrub only has to
+/// empty the vector — but it is still a `Secret`, because what `{:?}` must not
+/// print is as true here as anywhere (report17 HV17-M6).
+impl Secret for Vec<(u64, zeroize::Zeroizing<Vec<u8>>)> {
+    fn secret_shape(&self) -> SecretShape {
+        SecretShape {
+            items: self.len(),
+            bytes: self.iter().map(|(_, payload)| payload.len()).sum(),
+        }
+    }
+
+    fn scrub_secret(&mut self) {
+        // `clear` drops each payload, and each payload scrubs itself on drop.
+        self.clear();
+    }
+}
+
 /// A transaction's pending log appends, `namespace → [(log_id, payload)]`.
 /// The `log_id` is the caller's own index, not plaintext; the payload is.
 impl Secret for crate::tx::PendingLog {

@@ -150,7 +150,13 @@ pub fn single_record_fits(log_id: u64, payload: &[u8]) -> Result<()> {
     if payload.len() <= GUARANTEED_ADMISSIBLE_PAYLOAD_LEN {
         return Ok(());
     }
-    encode_batch(std::slice::from_ref(&(log_id, payload.to_vec()))).map(|_| ())
+    // The probe's own copy of the payload scrubs itself. It is the caller's
+    // record verbatim, made purely to ask a question, and it used to be an
+    // ordinary `Vec<u8>` dropped as soon as the answer came back — including
+    // on the successful path, which is the one every oversize append takes
+    // (report17 HV17-M7).
+    let probe: LogPayload = Zeroizing::new(payload.to_vec());
+    encode_batch(std::slice::from_ref(&(log_id, probe))).map(|_| ())
 }
 
 /// Encode and compress a batch. Returns the bytes that should be the
@@ -160,7 +166,15 @@ pub fn single_record_fits(log_id: u64, payload: &[u8]) -> Result<()> {
 /// - [`Error::Malformed`] for too many records or invalid sizes.
 /// - [`Error::PayloadTooLarge`] if compressed result exceeds `PAYLOAD_CAP`.
 /// - [`Error::Compression`] for zstd internal failure.
-pub fn encode_batch(records: &[(u64, Vec<u8>)]) -> Result<Vec<u8>> {
+///
+/// The compressed bytes scrub themselves. zstd output is a LOSSLESS
+/// representation of the plaintext that went in: it decodes back to the
+/// caller's records exactly. `raw` has been `Zeroizing` since it was written,
+/// and this — the thing that survives the function — was an ordinary
+/// `Vec<u8>`, dropped without scrubbing on the oversize refusal, after a
+/// successful admission probe, after the AEAD seal that borrowed it, and for
+/// every batch already built when a later split fails (report17 HV17-M7).
+pub fn encode_batch(records: &[(u64, LogPayload)]) -> Result<Zeroizing<Vec<u8>>> {
     if records.len() > MAX_RECORDS_PER_BATCH {
         return Err(Error::Malformed("batch exceeds MAX_RECORDS_PER_BATCH"));
     }
@@ -189,8 +203,13 @@ pub fn encode_batch(records: &[(u64, Vec<u8>)]) -> Result<Vec<u8>> {
         raw.extend_from_slice(payload);
     }
 
-    let compressed = zstd::encode_all(&raw[..], ZSTD_LEVEL)
-        .map_err(|_| Error::Compression("zstd encode failed"))?;
+    // Wrapped BEFORE the size check, not after: the oversize path returns
+    // without ever handing these bytes to anyone, and that is exactly the path
+    // that used to drop them in the clear.
+    let compressed: Zeroizing<Vec<u8>> = Zeroizing::new(
+        zstd::encode_all(&raw[..], ZSTD_LEVEL)
+            .map_err(|_| Error::Compression("zstd encode failed"))?,
+    );
     if compressed.len() > PAYLOAD_CAP {
         return Err(Error::PayloadTooLarge);
     }
@@ -222,7 +241,7 @@ pub fn encode_batch(records: &[(u64, Vec<u8>)]) -> Result<Vec<u8>> {
 ///   payloads ≤ [`MAX_LOG_PAYLOAD_LEN`] (8 KiB) since zstd headers add
 ///   at most a few hundred bytes.
 /// - [`Error::Compression`] for zstd internal failure.
-pub fn encode_batches_split(records: &[(u64, Vec<u8>)]) -> Result<Vec<(Vec<u64>, Vec<u8>)>> {
+pub fn encode_batches_split(records: &[(u64, LogPayload)]) -> Result<Vec<EncodedBatch>> {
     if records.is_empty() {
         return Ok(Vec::new());
     }
@@ -235,8 +254,8 @@ pub fn encode_batches_split(records: &[(u64, Vec<u8>)]) -> Result<Vec<(Vec<u64>,
 }
 
 fn encode_batches_split_into(
-    records: &[(u64, Vec<u8>)],
-    out: &mut Vec<(Vec<u64>, Vec<u8>)>,
+    records: &[(u64, LogPayload)],
+    out: &mut Vec<EncodedBatch>,
 ) -> Result<()> {
     match encode_batch(records) {
         Ok(bytes) => {
@@ -269,6 +288,11 @@ fn encode_batches_split_into(
 /// (≈ 8.4 MiB), which is the absolute maximum any *legitimate* batch
 /// can decompress to.
 pub type LogPayload = Zeroizing<Vec<u8>>;
+
+/// One encoded `DataBatch`: the log ids it holds, and its compressed bytes.
+///
+/// The bytes scrub themselves — see [`encode_batch`].
+pub type EncodedBatch = (Vec<u64>, Zeroizing<Vec<u8>>);
 
 /// Decode a compressed `DataBatch` into its records.
 ///
@@ -436,5 +460,50 @@ mod endianness_tests {
     fn the_regression_value_is_not_byte_order_agnostic() {
         let id: u64 = 0x0102_0304_0506_0708;
         assert_ne!(id, id.swap_bytes());
+    }
+}
+
+#[cfg(test)]
+mod scrub_order_tests {
+    /// The compressor's output is wrapped BEFORE the size check, not after.
+    ///
+    /// Wrapping after produces the same TYPE, so the signature test in
+    /// `tests/plaintext_hygiene.rs` stays green — and the oversize path, which
+    /// returns without handing those bytes to anyone, drops a lossless
+    /// plaintext representation in the clear. That is the path every refused
+    /// append takes (report17 HV17-M7).
+    ///
+    /// Measured: moving the wrapper past the check leaves every type test
+    /// passing, which is why this one exists.
+    #[test]
+    fn the_compressor_output_is_wrapped_before_it_can_be_refused() {
+        let source = include_str!("log.rs");
+        let at = source
+            .find("pub fn encode_batch(")
+            .expect("the encoder moved");
+        let body = &source[at..];
+        let body = &body[..body.find("\n}\n").expect("no end of function")];
+
+        // The BINDING, named exactly. A plain `find("Zeroizing::new(")` finds
+        // the `raw` buffer wrapped at the top of the same function and passes
+        // against the defect — which is what the first version of this test
+        // did, measured green on a build where the wrapper had been moved
+        // past the check.
+        let bound = body
+            .find("let compressed: Zeroizing<Vec<u8>> = Zeroizing::new(")
+            .expect(
+                "the compressor's output is not bound as Zeroizing at the point it is produced",
+            );
+        let refuse = body
+            .find("PAYLOAD_CAP")
+            .expect("the size check is gone, which is a different bug");
+        assert!(
+            bound < refuse,
+            "the oversize refusal drops the compressed plaintext unwrapped"
+        );
+        assert!(
+            body[bound..refuse].contains("zstd::encode_all"),
+            "the compressor no longer runs inside the wrapper"
+        );
     }
 }
