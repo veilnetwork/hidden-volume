@@ -61,3 +61,44 @@ fn zeroizing_array_derefs_to_array_slice() {
     let z: Zeroizing<[u8; 16]> = Zeroizing::new([0u8; 16]);
     takes_slice(&z[..]);
 }
+
+/// report17 HV17-M5 — a decoded log record is plaintext, and it outlives the
+/// buffer it was copied out of.
+///
+/// The decompressed batch has been `Zeroizing` since it was written, but every
+/// payload was copied out of it into an ordinary `Vec<u8>`. Those copies go on
+/// living: in the caller's result, in the iterator's cache holding up to 8 MiB
+/// of them, and in the partial result a batch that fails to decode leaves
+/// behind — and each one is a user's log record in the clear. Every way one
+/// left was a plain drop.
+///
+/// Type-level, like the rest of this file: safe Rust cannot watch a freed
+/// allocation without going somewhere it should not. What it CAN do is hold
+/// the signature still.
+#[test]
+fn decoded_log_payloads_are_zeroizing() {
+    use hidden_volume::space::log::{LogPayload, decode_batch, encode_batch};
+
+    let records: Vec<(u64, Vec<u8>)> = vec![
+        (1, b"the first log record".to_vec()),
+        (2, b"the second".to_vec()),
+    ];
+    let bytes = encode_batch(&records).expect("a small batch encodes");
+
+    // The annotation is the test: if `decode_batch` regresses to plain
+    // `Vec<u8>` payloads this stops compiling.
+    let decoded: Vec<(u64, LogPayload)> = decode_batch(&bytes).expect("it decodes");
+    assert_eq!(decoded.len(), 2, "the fixture did not round-trip");
+    assert_eq!(&decoded[0].1[..], b"the first log record");
+
+    // And the alias really is the self-scrubbing wrapper, rather than a name
+    // for `Vec<u8>` that would make the annotation above prove nothing.
+    fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+    assert_zeroize_on_drop::<LogPayload>();
+
+    // The lookup hands back the same wrapper, so a caller cannot pick a
+    // payload out of a batch and hold it in the clear by accident.
+    let found: &LogPayload =
+        hidden_volume::space::log::find_in_batch(&decoded, 2).expect("id 2 is in the batch");
+    assert_eq!(&found[..], b"the second");
+}
