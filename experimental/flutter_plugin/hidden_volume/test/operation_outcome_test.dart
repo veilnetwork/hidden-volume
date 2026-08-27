@@ -223,6 +223,10 @@ void main() {
       // caller reading it as "nothing happened" retries with the old
       // password, which no longer opens the name it just rotated.
       'RenameVisibleAliasesNotRevoked',
+      // report17 HV17-M3. Same half, one step less certain: the rewrite
+      // applied and whether another name for the old file survives is
+      // UNKNOWN. Reading it as "nothing happened" is the same mistake.
+      'RenameVisibleAliasesUnknown',
     ]) {
       expect(HvOpFailed(HvException(kind, '')).mayHaveApplied, isTrue,
           reason: '$kind means the rewrite applied');
