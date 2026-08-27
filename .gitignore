@@ -4,7 +4,6 @@
 debug
 
 # the local tooling session data (this directory's prompts/state).
-/.agent/
 
 # Editor / IDE local config (do not commit per-developer settings).
 .idea/
@@ -64,8 +63,3 @@ bindings/swift/hidden_volume_ffiFFI.h
 bindings/swift/hidden_volume_ffiFFI.modulemap
 bindings/dart/hidden_volume_ffi.dart
 
-# Local working notes — see the xVeil .gitignore for why.
-/TASKS.md
-/TASKS_ARCHIVE.md
-/the local release checklist
-/.agent/
