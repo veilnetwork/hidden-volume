@@ -258,7 +258,11 @@ proptest! {
             Ok(b) => b,
             Err(_) => return Ok(()), // payload too large after compression
         };
-        let records2 = decode_batch(&bytes).unwrap();
+        let records2: Vec<(u64, Vec<u8>)> = decode_batch(&bytes)
+            .unwrap()
+            .into_iter()
+            .map(|(id, payload)| (id, payload.to_vec()))
+            .collect();
         prop_assert_eq!(records, records2);
     }
 }

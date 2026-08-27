@@ -12,7 +12,12 @@ use super::log;
 use super::walk::TreeWalk;
 
 /// One decoded log record: `(log_id, payload)`.
-type LogRecord = (u64, Vec<u8>);
+///
+/// The payload scrubs itself on drop. It has to: this cache holds up to 8 MiB
+/// of decoded records, and every way one leaves — eviction, replacement, a
+/// rejected batch, the end of the call — used to be an ordinary drop of a
+/// user's log record in the clear (report17 HV17-M5).
+type LogRecord = (u64, log::LogPayload);
 /// A decoded `DataBatch`'s records, in append order.
 type DecodedBatch = Vec<LogRecord>;
 /// A resident cache entry: the tick of its last use plus the batch.
@@ -264,6 +269,10 @@ impl<'f> Space<'f> {
     /// a [`BatchCache`] bounded in both bytes and entries. The cache is
     /// an optimization only: an eviction costs a re-read plus a
     /// re-decode and cannot change what this returns.
+    /// The result is handed over as ordinary `Vec<u8>` — the caller owns what
+    /// it asked for. Everything BEFORE that boundary is scrubbed: the cache,
+    /// the per-batch decode, and the partial result a failure abandons partway
+    /// through (report17 HV17-M5).
     fn decode_log_entries(
         &mut self,
         kv_pairs: Vec<(Vec<u8>, Vec<u8>)>,
@@ -310,7 +319,15 @@ impl<'f> Space<'f> {
             let payload = payload.ok_or(Error::Malformed("log_id not found in pointed batch"))?;
             out.push((log_id, payload));
         }
-        Ok(out)
+        // Handed over only here. Until this point `out` is a vector of
+        // self-scrubbing payloads, so an error raised partway through — a
+        // later batch that fails to decode, a log_id its batch does not hold —
+        // takes the records already collected down with it rather than
+        // dropping them in the clear.
+        Ok(out
+            .into_iter()
+            .map(|(id, mut payload)| (id, std::mem::take(&mut *payload)))
+            .collect())
     }
 
     /// Resolve the root slot for a log namespace, enforcing that the
@@ -378,7 +395,7 @@ impl<'f> Space<'f> {
         // Surfacing as `Ok(None)` was misleading. Both APIs now
         // return `Err(Malformed)` for this case.
         match log::find_in_batch(&records, log_id) {
-            Some(p) => Ok(Some(p.clone())),
+            Some(p) => Ok(Some(p.to_vec())),
             None => Err(Error::Malformed("log_id not found in pointed batch")),
         }
     }
@@ -668,7 +685,7 @@ mod batch_cache_tests {
     /// `n` records of `payload_len` bytes each, ids `0..n`.
     fn records(n: usize, payload_len: usize) -> DecodedBatch {
         (0..n)
-            .map(|i| (i as u64, vec![0xAB; payload_len]))
+            .map(|i| (i as u64, zeroize::Zeroizing::new(vec![0xAB; payload_len])))
             .collect()
     }
 

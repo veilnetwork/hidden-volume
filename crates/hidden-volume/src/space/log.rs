@@ -108,7 +108,7 @@ pub const MAX_CACHED_BATCHES: usize = 64;
 /// tag and a `Vec` header each). Counting payload bytes alone would let
 /// many-record, tiny-payload batches sit far above their real cost.
 #[must_use]
-pub fn batch_footprint(records: &[(u64, Vec<u8>)]) -> usize {
+pub fn batch_footprint(records: &[(u64, LogPayload)]) -> usize {
     const PER_RECORD_OVERHEAD: usize = std::mem::size_of::<(u64, Vec<u8>)>();
     records
         .iter()
@@ -268,7 +268,18 @@ fn encode_batches_split_into(
 /// to `MAX_RECORDS_PER_BATCH × (8 + 4 + MAX_LOG_PAYLOAD_LEN) + 4`
 /// (≈ 8.4 MiB), which is the absolute maximum any *legitimate* batch
 /// can decompress to.
-pub fn decode_batch(compressed: &[u8]) -> Result<Vec<(u64, Vec<u8>)>> {
+pub type LogPayload = Zeroizing<Vec<u8>>;
+
+/// Decode a compressed `DataBatch` into its records.
+///
+/// The payloads are [`Zeroizing`], and that is the whole point of the type
+/// alias: the decompressed buffer below has been scrubbed on drop since it was
+/// written, but every payload was then COPIED out of it into an ordinary
+/// `Vec<u8>` and those copies were not. They outlive the buffer — in the
+/// caller's result, in the iterator's cache holding up to 8 MiB of them, and
+/// in the partial result a batch that fails to decode leaves behind — and each
+/// one is a user's log record in the clear (report17 HV17-M5).
+pub fn decode_batch(compressed: &[u8]) -> Result<Vec<(u64, LogPayload)>> {
     // Decompressed plaintext form. Held only as long as we walk the
     // record headers; per-record `payload` slices are copied out to
     // owned `Vec<u8>`s in the result. Wrap the raw buffer in
@@ -316,7 +327,7 @@ pub fn decode_batch(compressed: &[u8]) -> Result<Vec<(u64, Vec<u8>)>> {
         if raw.len() < off + plen {
             return Err(Error::Malformed("batch truncated at payload"));
         }
-        let payload = raw[off..off + plen].to_vec();
+        let payload: LogPayload = Zeroizing::new(raw[off..off + plen].to_vec());
         off += plen;
         records.push((id, payload));
     }
@@ -340,7 +351,7 @@ pub fn decode_batch(compressed: &[u8]) -> Result<Vec<(u64, Vec<u8>)>> {
 /// LAST occurrence (matches the "last write wins" coalesce semantics
 /// for repeated `Tx::append_log` calls with the same id).
 #[must_use]
-pub fn find_in_batch(records: &[(u64, Vec<u8>)], log_id: u64) -> Option<&Vec<u8>> {
+pub fn find_in_batch(records: &[(u64, LogPayload)], log_id: u64) -> Option<&LogPayload> {
     records
         .iter()
         .rev()
