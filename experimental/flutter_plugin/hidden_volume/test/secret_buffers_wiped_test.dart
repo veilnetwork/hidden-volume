@@ -274,8 +274,7 @@ void main() {
       overrideDylib(openTestDylib());
     });
 
-    test("changePasswordsAsync leaves the CALLER's passwords intact",
-        () async {
+    test("changePasswordsAsync leaves the CALLER's passwords intact", () async {
       final tmp = Directory.systemTemp.createTempSync('hv_wipe_');
       final path = '${tmp.path}/store.bin';
       addTearDown(() => tmp.deleteSync(recursive: true));
@@ -383,4 +382,84 @@ void main() {
       expect(String.fromCharCodes(v!), 'v');
     });
   });
+
+  group('the dylib load is inside the wipe', () {
+    late String source;
+
+    setUpAll(() {
+      source = File('lib/src/async_bindings.dart').readAsStringSync();
+    });
+
+    test('worker entry', () {
+      _loaderIsUnderTheWipe(source, 'void _workerEntry(');
+    });
+
+    test('change-passwords entry', () {
+      _loaderIsUnderTheWipe(source, 'void _changePasswordsEntry(');
+    });
+
+    test('compact-known entry', () {
+      _loaderIsUnderTheWipe(source, 'void _compactKnownEntry(');
+    });
+
+    test('and each still HAS a wipe under it', () {
+      // Vacuity guard: moving the loader below a try that wipes nothing
+      // satisfies the order check and fixes nothing.
+      for (final signature in const [
+        'void _workerEntry(',
+        'void _changePasswordsEntry(',
+        'void _compactKnownEntry(',
+      ]) {
+        final body = _entryBody(source, signature);
+        expect(
+          body,
+          anyOf(contains('fillRange('), contains('_wipeBootstrapPassword(')),
+          reason: '$signature no longer wipes anything',
+        );
+      }
+    });
+  });
+}
+
+// ── report15 HV15-L1 — the wipe must cover the loader, not start after it ───
+//
+// Every one of the three isolate entry-points took an optional dylib path and
+// opened it BEFORE its try/finally. `DynamicLibrary.open` throws on a path
+// that is not a loadable library, and from above the try that took the isolate
+// down with the password copies still in its heap — and, in the worker's case,
+// with nothing sent back, so the parent learned of it as a death rather than
+// as an answer.
+//
+// A source check for the reason the file's header gives: proving a dead
+// isolate's heap was scrubbed means reading memory that no longer belongs to
+// anybody. What can rot is the ORDER, and that is a fact about the file.
+
+/// One entry-point's body, from its signature to the closing brace of its
+/// `finally`.
+String _entryBody(String source, String signature) {
+  final at = source.indexOf(signature);
+  expect(at, isNot(-1),
+      reason: '$signature moved — this guard watches nothing');
+  // To the function's own closing brace, which is the only `}` at column zero.
+  // A fixed-size window was the first version: too small to reach one entry's
+  // `finally`, and past the end of the file for the last one.
+  final end = source.indexOf('\n}\n', at);
+  expect(end, isNot(-1), reason: '$signature has no closing brace');
+  return source.substring(at, end);
+}
+
+void _loaderIsUnderTheWipe(String source, String signature) {
+  final body = _entryBody(source, signature);
+  final tryAt = body.indexOf('try {');
+  final openAt = body.indexOf('DynamicLibrary.open(');
+  expect(tryAt, isNot(-1), reason: '$signature has no try block');
+  expect(openAt, isNot(-1), reason: '$signature no longer loads a dylib');
+  expect(
+    tryAt,
+    lessThan(openAt),
+    reason:
+        '$signature opens the dylib above its try/finally: a path that does '
+        'not load throws past the wipe and leaves the passwords in the '
+        "isolate's heap",
+  );
 }
