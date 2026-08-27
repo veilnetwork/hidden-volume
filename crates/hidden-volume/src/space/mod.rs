@@ -19,7 +19,7 @@ mod tree;
 mod vacuum;
 mod walk;
 
-use zeroize::Zeroizing;
+use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::cancel::CancelToken;
 use crate::chunk::ChunkKind;
@@ -1033,9 +1033,13 @@ impl<'f> Space<'f> {
             Some(s) => s,
             None => return Ok(Vec::new()),
         };
-        let mut out = Vec::new();
+        // Wrapped for the WALK, unwrapped only on success. A failure partway
+        // through — an unreadable chunk, a walk-budget refusal — used to drop
+        // everything already collected in the clear, which for this call is
+        // most of a namespace (report17 HV17-M6).
+        let mut out = crate::redact::Redacted::new(Vec::new());
         self.collect_leaves(root_slot, namespace, &mut out)?;
-        Ok(out)
+        Ok(out.into_inner())
     }
 
     /// Keys of every entry in `namespace`, sorted ascending. Empty Vec
@@ -1360,16 +1364,26 @@ impl<'f> Space<'f> {
         let node = self.read_index_node_at_expected(slot, namespace)?;
         match node {
             IndexNode::Leaf(l) => {
-                // `for (k, _value) in l.entries` — by value, so each value's
-                // allocation is freed at the end of its iteration instead of
-                // being carried to the end of the walk.
-                for (k, _value) in l.entries.into_inner() {
+                // Consumed, not released. Every value this walk decodes is
+                // plaintext it never returns, and every key below the cursor
+                // or past the limit is plaintext nobody asked for — all of it
+                // used to leave through an ordinary drop (report17 HV17-M6).
+                //
+                // `into_secret_pairs` scrubs whatever the loop does not take,
+                // including the tail abandoned by the `break` below; the value
+                // taken on each turn is scrubbed here, where it is discarded.
+                for (k, mut value) in l.entries.into_secret_pairs() {
+                    value.zeroize();
                     if out.len() >= limit {
                         break;
                     }
                     if let Some(a) = after
                         && k.as_slice() <= a
                     {
+                        // Below the cursor: not this page's, and not going
+                        // anywhere.
+                        let mut k = k;
+                        k.zeroize();
                         continue;
                     }
                     out.push(k);
@@ -1431,13 +1445,20 @@ impl<'f> Space<'f> {
         let node = self.read_index_node_at_expected(slot, namespace)?;
         match node {
             IndexNode::Leaf(l) => {
-                for (k, value) in l.entries.into_inner() {
+                // The pairs this page KEEPS go to the caller, who owns them.
+                // What it does not keep — everything below the cursor, and the
+                // tail past the limit — is plaintext nobody asked for, and it
+                // used to leave through an ordinary drop (report17 HV17-M6).
+                for (k, value) in l.entries.into_secret_pairs() {
                     if out.len() >= limit {
                         break;
                     }
                     if let Some(a) = after
                         && k.as_slice() <= a
                     {
+                        let (mut k, mut value) = (k, value);
+                        k.zeroize();
+                        value.zeroize();
                         continue;
                     }
                     out.push((k, value));

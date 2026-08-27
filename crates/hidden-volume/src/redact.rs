@@ -116,6 +116,85 @@ impl<T: Secret + Default> Redacted<T> {
     }
 }
 
+/// One item a [`SecretItems`] can scrub when nobody takes it.
+///
+/// A trait rather than a hard-coded pair type so the drop behaviour can be
+/// OBSERVED in a test: reading a freed allocation is not available, but a
+/// fixture that counts its own scrubs is.
+pub trait Scrubbable {
+    /// Overwrite every plaintext byte this item owns.
+    fn scrub(&mut self);
+}
+
+impl Scrubbable for (Vec<u8>, Vec<u8>) {
+    fn scrub(&mut self) {
+        self.0.zeroize();
+        self.1.zeroize();
+    }
+}
+
+/// Items being consumed one at a time, whose remainder is scrubbed on drop.
+///
+/// [`Redacted::into_inner`] hands the plaintext over and stops protecting it,
+/// which is right for a caller that asked for it — and wrong for a walk that
+/// takes the keys and discards the values, or stops at a page limit and
+/// abandons the tail. `list_keys` did exactly that: every value it decoded,
+/// and every key past the cursor or the limit, left through an ordinary drop
+/// (report17 HV17-M6).
+///
+/// This is the shape that CONSUMES rather than releases: whatever the loop did
+/// not take is still scrubbed.
+pub struct SecretItems<T: Scrubbable> {
+    inner: std::vec::IntoIter<T>,
+}
+
+impl<T: Scrubbable> fmt::Debug for SecretItems<T> {
+    /// Counts, never content — the same rule [`Redacted`] follows.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecretItems")
+            .field("remaining", &self.inner.len())
+            .finish()
+    }
+}
+
+impl<T: Scrubbable> Iterator for SecretItems<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl<T: Scrubbable> Drop for SecretItems<T> {
+    fn drop(&mut self) {
+        // Whatever the consumer stopped short of — a page limit reached, an
+        // error raised mid-walk, a `break`.
+        for mut item in self.inner.by_ref() {
+            item.scrub();
+        }
+    }
+}
+
+/// Key-value pairs being consumed, whose remainder is scrubbed on drop.
+pub type SecretPairs = SecretItems<(Vec<u8>, Vec<u8>)>;
+
+impl Redacted<Vec<(Vec<u8>, Vec<u8>)>> {
+    /// Consume the pairs one at a time, scrubbing whatever is left behind.
+    ///
+    /// The item handed to the loop is the caller's to deal with — a key it
+    /// keeps, a value it should scrub — but the REMAINDER never becomes
+    /// anybody's problem, which is the difference from [`Self::into_inner`].
+    pub fn into_secret_pairs(self) -> SecretPairs {
+        SecretItems {
+            inner: self.into_inner().into_iter(),
+        }
+    }
+}
+
 impl<T: Secret> fmt::Debug for Redacted<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let shape = self.inner.secret_shape();
@@ -341,6 +420,110 @@ mod tests {
     /// The collapsed key-ops map — `space::tree::KeyOps` — is a full copy
     /// of a transaction's plaintext and gets the same treatment as the
     /// `KvOp`s it is built from (report7 P3).
+    /// The KV walks consume their leaves rather than releasing them.
+    ///
+    /// The behaviour cannot be observed from outside — a walk that scrubs and
+    /// one that does not return the same keys — so this asserts the call each
+    /// walk makes. `l.entries.into_inner()` hands a leaf's plaintext over with
+    /// no owner; `into_secret_pairs()` scrubs whatever the walk does not take.
+    ///
+    /// Bounded to the three functions BY NAME. The first version of this test
+    /// cut each file at its first `#[cfg(test)]` and searched what was left —
+    /// and in `space/mod.rs` that attribute is on line 15, so it searched
+    /// almost nothing and passed against a build with the fix removed.
+    /// Measured green on that build before it was rewritten.
+    ///
+    /// The LOG walks are deliberately absent: their leaf values are batch-slot
+    /// pointers, not user plaintext, and the payloads they point at are
+    /// handled where they are decoded (HV17-M5). So is `collect_leaves_at`,
+    /// whose every pair goes to the caller.
+    #[test]
+    fn the_kv_leaf_walks_do_not_release_their_leaves() {
+        fn body<'a>(source: &'a str, name: &str) -> &'a str {
+            let at = source
+                .find(name)
+                .unwrap_or_else(|| panic!("{name} moved or was renamed"));
+            let rest = &source[at..];
+            // To the function's closing brace at its own indentation.
+            let end = rest.find("\n    }\n").unwrap_or(rest.len());
+            &rest[..end]
+        }
+
+        let space = include_str!("space/mod.rs");
+        let tree = include_str!("space/tree.rs");
+
+        for (name, source) in [
+            ("fn collect_leaf_keys_after_at", space),
+            ("fn collect_leaf_pairs_after_at", space),
+            ("fn update_tree", tree),
+        ] {
+            let body = body(source, name);
+            assert!(
+                !body.contains("entries.into_inner()"),
+                "{name} releases a leaf's plaintext instead of consuming it: \
+                 every value a keys-only walk decodes, and every pair past a \
+                 cursor or a limit, is then dropped in the clear"
+            );
+            assert!(
+                body.contains("into_secret_pairs()"),
+                "{name} no longer consumes its leaves at all, so the check \
+                 above is about nothing"
+            );
+        }
+    }
+
+    /// report17 HV17-M6 — what a consumer does NOT take is still scrubbed.
+    ///
+    /// `into_inner` hands the plaintext over and stops protecting it, which is
+    /// right for a caller that asked for it. A walk that takes the keys and
+    /// discards the values, or stops at a page limit and abandons the tail,
+    /// asked for none of what it leaves behind — and that used to leave
+    /// through an ordinary drop.
+    ///
+    /// Observed rather than assumed: reading a freed allocation is not
+    /// available, so the fixture counts its own scrubs. That is why
+    /// `SecretItems` is generic over [`Scrubbable`] instead of hard-coding the
+    /// pair type — a version of this test that could only watch `Vec<u8>` had
+    /// nothing to assert and passed on anything.
+    #[test]
+    fn an_abandoned_tail_is_scrubbed_rather_than_dropped() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        struct Counted(Rc<Cell<usize>>);
+        impl super::Scrubbable for Counted {
+            fn scrub(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+
+        let scrubs = Rc::new(Cell::new(0));
+        let items: Vec<Counted> = (0..5).map(|_| Counted(Rc::clone(&scrubs))).collect();
+
+        let taken = {
+            let mut drain = super::SecretItems {
+                inner: items.into_iter(),
+            };
+            // Take two, abandon three — the page-limit shape.
+            let a = drain.next().expect("a first item");
+            let b = drain.next().expect("a second item");
+            assert_eq!(
+                scrubs.get(),
+                0,
+                "taking an item scrubbed it: the consumer would get an empty one"
+            );
+            vec![a, b]
+            // `drain` drops here, with three items left in it.
+        };
+
+        assert_eq!(
+            scrubs.get(),
+            3,
+            "the abandoned tail was dropped without being scrubbed"
+        );
+        assert_eq!(taken.len(), 2, "the taken items did not survive");
+    }
+
     #[test]
     fn key_ops_map_is_redacted_and_scrubbed() {
         let mut m: BTreeMap<Vec<u8>, Option<Vec<u8>>> = BTreeMap::new();
