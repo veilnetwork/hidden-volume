@@ -176,3 +176,92 @@ async fn a_log_stream_polled_from_inside_a_run_is_refused() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+// ── report15 HV15-M1 — the cross-thread shape, and what actually escapes it ─
+//
+// The same-thread case above is refused outright. The cross-thread one cannot
+// be: the mark is a thread-local, and a closure that hands its work to another
+// OS thread and waits for it leaves no trace the child can see. It waits for a
+// permit the parent is holding, and the parent waits for the child.
+//
+// What was ALSO believed is that nothing unwinds it — that a dropped future or
+// a timeout cannot help, the way they cannot in the same-thread case above,
+// where the deadlock parks the runtime's workers so the timer never gets a
+// thread to fire on. That is not true here, and the difference is the whole
+// severity: the child is parked on the PERMIT, which is an ordinary `.await`,
+// and the parent's blocking thread is not a worker. The timer fires, the
+// child's future is dropped while it is still queued, the ledger files it as
+// never started, and the parent's join returns.
+//
+// So the hang is permanent only for a caller who never bounds it. That is
+// worth knowing and worth keeping: it is the difference between "do not do
+// this" and "if you must, put a deadline on the inner call".
+
+/// A deadline on the INNER call unwinds the cross-thread re-entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_deadline_on_the_inner_call_escapes_the_cross_thread_hang() {
+    let path = scratch_path();
+    let c = AsyncContainer::create_with_options(&path, fast_options())
+        .await
+        .unwrap();
+    let clone = c.clone();
+    let handle = tokio::runtime::Handle::current();
+
+    let outer = c
+        .run(move |_container| {
+            // The shape the guard above cannot see: the work goes to another
+            // OS thread, and this closure waits for it while holding the
+            // permit that thread is about to queue for.
+            let child = std::thread::spawn(move || {
+                handle.block_on(async {
+                    tokio::time::timeout(
+                        std::time::Duration::from_millis(750),
+                        clone.run(|_c| Ok(7u32)),
+                    )
+                    .await
+                })
+            });
+            Ok(child.join().expect("child thread panicked"))
+        })
+        .await
+        .expect("the outer run must return once the child does");
+
+    assert!(
+        outer.is_err(),
+        "the inner call was not blocked at all — this fixture proves nothing \
+         about the hang: {outer:?}"
+    );
+}
+
+/// CONTROL: without the outer permit held, the very same cross-thread call
+/// succeeds well inside that deadline.
+///
+/// Without this the test above is satisfied by any inner call that is merely
+/// slow, or by one that fails for an unrelated reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_same_cross_thread_call_succeeds_when_no_permit_is_held() {
+    let path = scratch_path();
+    let c = AsyncContainer::create_with_options(&path, fast_options())
+        .await
+        .unwrap();
+    let clone = c.clone();
+    let handle = tokio::runtime::Handle::current();
+
+    let child = std::thread::spawn(move || {
+        handle.block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_millis(750),
+                clone.run(|_c| Ok(7u32)),
+            )
+            .await
+        })
+    });
+    let answer = child.join().expect("child thread panicked");
+
+    assert!(
+        matches!(answer, Ok(Ok(7))),
+        "the same call fails without a permit held, so the test above is not \
+         measuring the permit: {answer:?}"
+    );
+    drop(c);
+}
