@@ -103,9 +103,16 @@ pub(super) struct Build {
     /// budget and the derived depth bound.
     walk: TreeWalk,
     /// Last key handed to any level-0 node, for the global-order check.
-    prev_leaf_key: Option<Vec<u8>>,
+    ///
+    /// Wrapped, because these cursors are the host's own KV KEYS in the clear
+    /// and a build replaces them once per node: every replacement used to drop
+    /// the previous key into a freed heap block, and the last one survived the
+    /// commit (report17 HV17-L5). Keys, not values — which is why this is
+    /// small — but a key is what a namespace is indexed by, and in a deniable
+    /// container the list of keys is itself the answer to "what is in here".
+    prev_leaf_key: Option<Zeroizing<Vec<u8>>>,
     /// Same, per internal level: `prev_level_key[l - 1]`.
-    prev_level_key: Vec<Option<Vec<u8>>>,
+    prev_level_key: Vec<Option<Zeroizing<Vec<u8>>>>,
 }
 
 impl Build {
@@ -146,14 +153,17 @@ impl Build {
             }
             &mut self.prev_level_key[idx]
         };
-        if let Some(prev) = slot.as_deref()
+        if let Some(prev) = slot.as_ref().map(|k| k.as_slice())
             && prev >= key
         {
             return Err(Error::Malformed(
                 "tree nodes are not globally sorted / contain duplicate keys",
             ));
         }
-        *slot = Some(key.to_vec());
+        // The assignment is what erases the previous cursor: dropping a
+        // `Zeroizing` wipes it, so the old key does not outlive the node it
+        // came from.
+        *slot = Some(Zeroizing::new(key.to_vec()));
         Ok(())
     }
 }
@@ -1055,5 +1065,86 @@ mod tests {
             "a namespace that grew levels and lost them again must not \
              remember having had them"
         );
+    }
+
+    /// The order cursors do not hand the host's keys back to the allocator
+    /// (report17 HV17-L5).
+    ///
+    /// A build replaces its cursor once per node and keeps the last one until
+    /// it goes. Both used to be ordinary `Vec<u8>`, so every replacement
+    /// dropped a plaintext KV key into a freed block and the final one
+    /// survived the commit. Keys, not values — but a key is what a namespace
+    /// is indexed by, and in a deniable container the list of keys is itself
+    /// the answer to "what is in here".
+    #[test]
+    fn a_build_wipes_the_keys_it_ordered_by() {
+        use crate::alloc_sentinel::{NEEDLE, dirty_frees_during};
+
+        // Keys long enough to allocate, each carrying the needle so a block
+        // freed unwiped is visible.
+        let keys: Vec<Vec<u8>> = (0u8..8)
+            .map(|i| {
+                let mut k = NEEDLE.to_vec();
+                k.push(i);
+                k
+            })
+            .collect();
+
+        let dirty = dirty_frees_during(|| {
+            let mut build = Build::new(1, TreeWalk::new(64, 4096));
+            for k in &keys {
+                build.check_order(0, k).expect("keys are ascending");
+                build.check_order(1, k).expect("keys are ascending");
+            }
+            drop(build);
+        });
+
+        assert_eq!(
+            dirty, 0,
+            "{dirty} key(s) went back to the allocator in the clear"
+        );
+    }
+
+    /// CONTROL: the sentinel can see. Without this the assertion above is
+    /// satisfied by a hook that never fires, which is how a memory-hygiene
+    /// test ships green over a defect.
+    #[test]
+    fn the_sentinel_sees_an_ordinary_key_dropped() {
+        use crate::alloc_sentinel::{NEEDLE, dirty_frees_during};
+
+        let dirty = dirty_frees_during(|| {
+            let mut plain = NEEDLE.to_vec();
+            plain.push(0xFF);
+            drop(plain);
+        });
+
+        assert!(
+            dirty >= 1,
+            "the sentinel saw nothing when a plain key was freed unwiped"
+        );
+    }
+
+    /// And the order check still refuses what it existed to refuse.
+    ///
+    /// The cursor type changed underneath it, and the comparison had to be
+    /// rewritten with it; a wipe that also stopped rejecting unsorted trees
+    /// would be a worse defect than the one it fixed.
+    #[test]
+    fn the_order_check_still_rejects_a_repeat_or_a_step_back() {
+        let mut build = Build::new(1, TreeWalk::new(64, 4096));
+        build.check_order(0, b"aa").expect("first key");
+        build.check_order(0, b"bb").expect("ascending");
+        assert!(
+            build.check_order(0, b"bb").is_err(),
+            "a duplicate key was accepted"
+        );
+        assert!(
+            build.check_order(0, b"a0").is_err(),
+            "a key that steps back was accepted"
+        );
+        // Levels are independent cursors.
+        build
+            .check_order(1, b"a0")
+            .expect("a fresh level starts anywhere");
     }
 }
