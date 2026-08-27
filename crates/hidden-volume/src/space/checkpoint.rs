@@ -271,6 +271,49 @@ impl CheckpointChunk {
     }
 }
 
+/// Which entries of the two lists belong to group `i`.
+///
+/// The lists are packed as ONE sequence — owned then pool — cut every
+/// [`CP_ENTRIES_PER_CHUNK`] entries, so a group is a pure function of its
+/// index and the two lengths, and the chain can be walked backwards without
+/// materializing the groups first.
+///
+/// Separate and pure so it can be checked against the loop it replaced rather
+/// than only through a container large enough to have several chunks.
+fn checkpoint_group_ranges(
+    i: usize,
+    owned_len: usize,
+    pool_len: usize,
+) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
+    let total = owned_len + pool_len;
+    let from = i * CP_ENTRIES_PER_CHUNK;
+    let to = (from + CP_ENTRIES_PER_CHUNK).min(total);
+    (
+        from.min(owned_len)..to.min(owned_len),
+        from.saturating_sub(owned_len)..to.saturating_sub(owned_len).min(pool_len),
+    )
+}
+
+/// How many groups the two lists make. Empty lists still make ONE: a chain
+/// head has to exist for the superblock to point at.
+fn checkpoint_group_count(owned_len: usize, pool_len: usize) -> usize {
+    (owned_len + pool_len).div_ceil(CP_ENTRIES_PER_CHUNK).max(1)
+}
+
+/// A copy that reports failure instead of aborting the process.
+///
+/// `slice.to_vec()` allocates infallibly, and this crate builds with
+/// `panic = "abort"` — so an allocator that cannot serve it ends the process
+/// rather than unwinding to a caller who could refuse the checkpoint and move
+/// on (report15 HV15-M2).
+fn try_copy(slice: &[u64]) -> Result<Vec<u64>> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(slice.len())
+        .map_err(|_| Error::Internal("checkpoint group does not fit in memory"))?;
+    out.extend_from_slice(slice);
+    Ok(out)
+}
+
 impl<'f> Space<'f> {
     /// Lazily (re)write this space's open-scan checkpoint so the next
     /// open is O(working-set). Returns `true` if a checkpoint was
@@ -513,31 +556,35 @@ impl<'f> Space<'f> {
         owned: &[u64],
         pool: &[u64],
     ) -> Result<u64> {
-        // Groups of at most CP_ENTRIES_PER_CHUNK entries, in forward
-        // order. Empty lists ⇒ a single empty group.
-        let mut groups: Vec<(&[u64], &[u64])> = Vec::new();
-        let (mut o, mut p) = (owned, pool);
-        loop {
-            let take_o = o.len().min(CP_ENTRIES_PER_CHUNK);
-            let take_p = (CP_ENTRIES_PER_CHUNK - take_o).min(p.len());
-            groups.push((&o[..take_o], &p[..take_p]));
-            o = &o[take_o..];
-            p = &p[take_p..];
-            if o.is_empty() && p.is_empty() {
-                break;
-            }
-        }
+        // The two lists are packed as ONE sequence — owned then pool — cut
+        // every `CP_ENTRIES_PER_CHUNK` entries, so group `i` is a pure function
+        // of `i` and the two lengths. It used to be materialized as a
+        // `Vec<(&[u64], &[u64])>` built forward and walked backward, which at
+        // the supported ceiling is tens of thousands of fat pointers grown by
+        // doubling — an infallible allocation on top of the two 64 MiB lists it
+        // describes, in a crate that builds with `panic = "abort"` (report15
+        // HV15-M2). Computing the boundaries costs nothing and allocates
+        // nothing.
+        let group_count = checkpoint_group_count(owned.len(), pool.len());
+
         let mut next = NO_RECORD;
-        // Write last group first so `next` always points at an
-        // already-written successor; after the reverse walk `next` is
-        // the first group's slot = the chain head.
-        for (group_owned, group_pool) in groups.iter().rev() {
+        // Last group first, so `next` always points at an already-written
+        // successor; after the reverse walk `next` is the first group's slot =
+        // the chain head.
+        for i in (0..group_count).rev() {
+            let (o_range, p_range) = checkpoint_group_ranges(i, owned.len(), pool.len());
+            let group_owned = &owned[o_range];
+            let group_pool = &pool[p_range];
+
             let cc = CheckpointChunk {
                 cp_seq,
                 cp_high_water,
                 next_slot: next,
-                owned: group_owned.to_vec(),
-                pool: group_pool.to_vec(),
+                // Fallibly, for the same reason the two lists above are: this
+                // is bounded by one chunk's budget rather than by the
+                // container, but an abort is an abort.
+                owned: try_copy(group_owned)?,
+                pool: try_copy(group_pool)?,
             };
             let payload = cc.encode()?;
             next = self.place_chunk(ChunkKind::Checkpoint, cp_seq, &payload)?;
@@ -1342,5 +1389,87 @@ mod tests {
         drop(s);
         drop(c);
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod hv15_m2_grouping_tests {
+    use super::{CP_ENTRIES_PER_CHUNK, checkpoint_group_count, checkpoint_group_ranges};
+
+    /// The loop this replaced, kept as the reference.
+    ///
+    /// It built a `Vec<(&[u64], &[u64])>` forward and walked it backward: tens
+    /// of thousands of fat pointers at the supported ceiling, grown by
+    /// doubling, allocated infallibly in a crate that aborts on OOM. The
+    /// replacement computes the same boundaries and allocates nothing — which
+    /// is only an improvement if it computes the SAME ones (report15 HV15-M2).
+    fn reference_groups(owned_len: usize, pool_len: usize) -> Vec<(usize, usize, usize, usize)> {
+        let mut out = Vec::new();
+        let (mut o_at, mut p_at) = (0usize, 0usize);
+        let (mut o_left, mut p_left) = (owned_len, pool_len);
+        loop {
+            let take_o = o_left.min(CP_ENTRIES_PER_CHUNK);
+            let take_p = (CP_ENTRIES_PER_CHUNK - take_o).min(p_left);
+            out.push((o_at, o_at + take_o, p_at, p_at + take_p));
+            o_at += take_o;
+            p_at += take_p;
+            o_left -= take_o;
+            p_left -= take_p;
+            if o_left == 0 && p_left == 0 {
+                break;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_computed_groups_are_the_ones_the_loop_produced() {
+        let cp = CP_ENTRIES_PER_CHUNK;
+        // Every shape that can behave differently: empty, one short of a
+        // chunk, exactly a chunk, one over, and both lists straddling the
+        // boundary in each direction.
+        let interesting = [0, 1, 2, cp - 1, cp, cp + 1, 2 * cp - 1, 2 * cp, 2 * cp + 3];
+        for &owned_len in &interesting {
+            for &pool_len in &interesting {
+                let reference = reference_groups(owned_len, pool_len);
+                assert_eq!(
+                    checkpoint_group_count(owned_len, pool_len),
+                    reference.len(),
+                    "group count differs for owned={owned_len} pool={pool_len}"
+                );
+                for (i, expected) in reference.iter().enumerate() {
+                    let (o, p) = checkpoint_group_ranges(i, owned_len, pool_len);
+                    assert_eq!(
+                        (o.start, o.end, p.start, p.end),
+                        *expected,
+                        "group {i} differs for owned={owned_len} pool={pool_len}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// And every entry is carried exactly once, in order — the property the
+    /// equality above is a proxy for.
+    #[test]
+    fn the_groups_partition_both_lists_in_order() {
+        let cp = CP_ENTRIES_PER_CHUNK;
+        for (owned_len, pool_len) in [(0, 0), (1, 0), (0, 1), (cp, 1), (cp + 3, 2 * cp - 4)] {
+            let mut o_seen = 0usize;
+            let mut p_seen = 0usize;
+            for i in 0..checkpoint_group_count(owned_len, pool_len) {
+                let (o, p) = checkpoint_group_ranges(i, owned_len, pool_len);
+                assert_eq!(o.start, o_seen, "owned gap or overlap at group {i}");
+                assert_eq!(p.start, p_seen, "pool gap or overlap at group {i}");
+                assert!(
+                    o.len() + p.len() <= cp,
+                    "group {i} exceeds one chunk's budget"
+                );
+                o_seen = o.end;
+                p_seen = p.end;
+            }
+            assert_eq!(o_seen, owned_len, "owned entries left behind");
+            assert_eq!(p_seen, pool_len, "pool entries left behind");
+        }
     }
 }
