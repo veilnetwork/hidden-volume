@@ -224,7 +224,24 @@ fn read_password(prompt: &str) -> Result<zeroize::Zeroizing<Vec<u8>>> {
         // own line.
         eprintln!();
     }
-    Ok(line.unwrap_or_else(|| zeroize::Zeroizing::new(Vec::new())))
+    // EOF is NOT a blank line. `read_capped_line` already tells the two apart
+    // — `None` for "the stream ended without a byte", `Some([])` for "somebody
+    // pressed Enter" — and collapsing them here undid that: `hv create-space
+    // … </dev/null` read nothing at all and went on to create a space with an
+    // EMPTY password, silently. An unattended script that lost its input
+    // produced a container anybody can open, and said it had succeeded
+    // (report15 HV15-L2).
+    //
+    // A genuine blank line stays an explicit empty password. That is a choice
+    // somebody made at a prompt, and refusing it would be this program
+    // deciding what a password may be.
+    line.ok_or_else(|| {
+        hidden_volume::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "hv: no password on stdin (the stream ended before a line). \
+             An empty password must be given as a blank LINE, not as no input",
+        ))
+    })
 }
 
 /// Terminal echo, off for as long as this value lives.

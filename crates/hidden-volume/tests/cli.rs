@@ -393,3 +393,114 @@ fn dump_stats_after_writes() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+// ── report15 HV15-L2 — no input is not an empty password ────────────────────
+
+/// Removes the scratch container when the test ends, however it ends.
+struct Cleanup(std::path::PathBuf);
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Run with stdin closed immediately, the way `… </dev/null` does.
+fn run_with_closed_stdin(args: &[&str]) -> std::process::Output {
+    hv().args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("failed to spawn hv")
+}
+
+/// Run with stdin carrying ONE blank line — somebody pressed Enter.
+fn run_with_blank_line(args: &[&str]) -> std::process::Output {
+    use std::io::Write;
+    let mut child = hv()
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn hv");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin captured")
+        .write_all(b"\n")
+        .expect("write blank line");
+    child.wait_with_output().expect("wait for hv")
+}
+
+/// A stream that ends without a line must not become an empty password.
+///
+/// `read_capped_line` already tells EOF from a blank line, and the password
+/// reader collapsed the two — so `hv create-space … </dev/null` read nothing,
+/// created a space with an EMPTY password, and reported success. An unattended
+/// script that lost its input produced a container anybody can open
+/// (report15 HV15-L2).
+#[test]
+fn no_input_at_all_is_refused_rather_than_read_as_an_empty_password() {
+    let path = scratch_path();
+    let _cleanup = Cleanup(path.clone());
+    assert_success(&run(&[
+        "create",
+        path.to_str().unwrap(),
+        "--params",
+        "min",
+        "--replicas",
+        "1",
+    ]));
+
+    let out = run_with_closed_stdin(&["create-space", path.to_str().unwrap()]);
+
+    assert!(
+        !out.status.success(),
+        "a space was created from a stream that carried no password"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no password on stdin"),
+        "the refusal does not say what happened: {stderr}"
+    );
+
+    // And nothing was created: had the empty password gone through, a blank
+    // line would now OPEN that space.
+    let opened = run_with_blank_line(&["inspect", path.to_str().unwrap()]);
+    assert!(
+        !opened.status.success(),
+        "a space with an empty password exists: {}",
+        String::from_utf8_lossy(&opened.stdout)
+    );
+}
+
+/// A blank LINE is still an explicit empty password.
+///
+/// Vacuity guard, and a policy statement: refusing this too would be the
+/// program deciding what a password may be, and would satisfy the test above
+/// without distinguishing anything.
+#[test]
+fn a_blank_line_is_still_an_explicit_empty_password() {
+    let path = scratch_path();
+    let _cleanup = Cleanup(path.clone());
+
+    assert_success(&run(&[
+        "create",
+        path.to_str().unwrap(),
+        "--params",
+        "min",
+        "--replicas",
+        "1",
+    ]));
+
+    let out = run_with_blank_line(&["create-space", path.to_str().unwrap()]);
+
+    assert_success(&out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("no password on stdin"),
+        "a blank line was refused as if it were EOF: {stderr}"
+    );
+}

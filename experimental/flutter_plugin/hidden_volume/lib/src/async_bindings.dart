@@ -540,13 +540,18 @@ class HvWorkerDeath {
 // ------------------------------------------------------------------
 
 void _workerEntry(_SpawnConfig config) {
-  if (config.dylibPath != null) {
-    overrideDylib(DynamicLibrary.open(config.dylibPath!));
-  }
-
   // Bootstrap: construct the handle. On failure, send error and exit.
   final SpaceHandleBindings space;
   try {
+    // INSIDE the try, not above it. `DynamicLibrary.open` throws on a path
+    // that is not a loadable library, and from above the try that took the
+    // whole isolate down with the password copies still in its heap and
+    // nothing sent back — the parent learned of it as a death rather than as
+    // an answer (report15 HV15-L1). The `finally` below is what wipes them,
+    // so everything that can throw belongs under it.
+    if (config.dylibPath != null) {
+      overrideDylib(DynamicLibrary.open(config.dylibPath!));
+    }
     space = switch (config.bootstrap) {
       _BootstrapCreate(
         :final path,
@@ -1475,10 +1480,13 @@ Future<HvHeaderInfo> headerInfoAsync(String path, {String? dylibPath}) {
 
 void _changePasswordsEntry((String, List<HvPasswordRotation>, String?) args) {
   final (path, rotations, dylibPath) = args;
-  if (dylibPath != null) {
-    overrideDylib(DynamicLibrary.open(dylibPath));
-  }
   try {
+    // INSIDE the try — see `_workerEntry`. A dylib path that does not load
+    // threw past the wipe below and left both passwords of every rotation in
+    // the isolate's heap (report15 HV15-L1).
+    if (dylibPath != null) {
+      overrideDylib(DynamicLibrary.open(dylibPath));
+    }
     changePasswords(path, rotations);
   } finally {
     // The isolate's OWN copies (report9 HV-16) — `Isolate.run` deep-copies the
@@ -1504,10 +1512,11 @@ Future<void> changePasswordsAsync(
 
 void _compactKnownEntry((String, List<Uint8List>, String?) args) {
   final (path, passwords, dylibPath) = args;
-  if (dylibPath != null) {
-    overrideDylib(DynamicLibrary.open(dylibPath));
-  }
   try {
+    // INSIDE the try — see `_workerEntry`.
+    if (dylibPath != null) {
+      overrideDylib(DynamicLibrary.open(dylibPath));
+    }
     compactKnown(path, passwords);
   } finally {
     // The isolate's own clones — see `_changePasswordsEntry`.
