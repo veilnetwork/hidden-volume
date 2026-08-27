@@ -422,6 +422,20 @@ class HvMultiSpace {
   /// Number of hosted spaces.
   int spaceCount() => _inner.spaceCount();
 
+  /// Aggregated stats for hosted space [id] — the same shape [HvSpace.stats]
+  /// returns, including the sticky [ffi.HvStatsInfo.hardeningFailure].
+  ///
+  /// This did not exist, and a host running several identities over one
+  /// container is exactly the configuration with no other source: it answered
+  /// `null` for both the utilization and the hardening record, and `null`
+  /// reads as "nothing is wrong" (report16 XV-08).
+  ffi.HvStatsInfo stats(int id) => _inner.stats(id);
+
+  /// Acknowledge the sticky hardening record of hosted space [id] — "I have
+  /// shown this to the person". Clears it; nothing else does. Idempotent.
+  void acknowledgeHardeningError(int id) =>
+      _inner.acknowledgeHardeningError(id);
+
   /// Override the shared container's post-commit padding policy.
   void setPaddingPolicy(ffi.PaddingPreset preset) =>
       _inner.setPaddingPolicy(preset);

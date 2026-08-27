@@ -94,8 +94,7 @@ void main() {
         path: path,
         password: Uint8List.fromList('wrong'.codeUnits),
       ),
-      throwsA(isA<HvException>()
-          .having((e) => e.kind, 'kind', 'AuthFailed')),
+      throwsA(isA<HvException>().having((e) => e.kind, 'kind', 'AuthFailed')),
     );
   });
 
@@ -153,7 +152,8 @@ void main() {
     Uint8List u(String s) => Uint8List.fromList(s.codeUnits);
 
     // Two spaces in one container; capture each space's keys.
-    final a = HvSpace.create(path: path, password: u('pa'), argon: ArgonPreset.light);
+    final a =
+        HvSpace.create(path: path, password: u('pa'), argon: ArgonPreset.light);
     final ka = a.spaceKeys();
     a.close();
     final b = HvSpace.addSpace(path: path, password: u('pb'));
@@ -167,8 +167,10 @@ void main() {
     expect(ms.spaceCount(), 2);
 
     // Interleaved writes to both spaces.
-    ms.commit(ida, [HvWriteOpPut(namespace: 1, key: u('who'), value: u('alice'))]);
-    ms.commit(idb, [HvWriteOpPut(namespace: 1, key: u('who'), value: u('bob'))]);
+    ms.commit(
+        ida, [HvWriteOpPut(namespace: 1, key: u('who'), value: u('alice'))]);
+    ms.commit(
+        idb, [HvWriteOpPut(namespace: 1, key: u('who'), value: u('bob'))]);
 
     // Each space reads back only its own data.
     expect(String.fromCharCodes(ms.get(ida, 1, u('who'))!), 'alice');
@@ -177,10 +179,78 @@ void main() {
     // Wrong length → Malformed; bogus keys → AuthFailed.
     expect(() => ms.openSpace(Uint8List(10)),
         throwsA(isA<HvException>().having((e) => e.kind, 'kind', 'Malformed')));
-    expect(() => ms.openSpace(Uint8List.fromList(List.filled(64, 7))),
-        throwsA(isA<HvException>().having((e) => e.kind, 'kind', 'AuthFailed')));
+    expect(
+        () => ms.openSpace(Uint8List.fromList(List.filled(64, 7))),
+        throwsA(
+            isA<HvException>().having((e) => e.kind, 'kind', 'AuthFailed')));
 
     ms.close();
+  });
+
+  /// The multi-space handle answers about its OWN spaces, one id at a time.
+  ///
+  /// It had no stats at all, so a host running several identities over one
+  /// container answered `null` for the utilization and `null` for the hardening
+  /// record — and `null` is indistinguishable from "nothing is wrong". A
+  /// padding, churn or sync step that failed after a commit was never shown to
+  /// anybody (report16 XV-08).
+  ///
+  /// Driven through the real cdylib, because what is new here is a wire path:
+  /// two hand-written symbol bindings and a `StatsInfo` decode at a new call
+  /// site. The bytes are what can be wrong.
+  test('HvMultiSpace reports per-space stats and takes an acknowledgement', () {
+    final tmp = Directory.systemTemp.createTempSync('hv_multi_stats_');
+    final path = '${tmp.path}/store.bin';
+    addTearDown(() => tmp.deleteSync(recursive: true));
+
+    Uint8List u(String s) => Uint8List.fromList(s.codeUnits);
+
+    final a = HvSpace.create(
+      path: path,
+      password: u('pa'),
+      argon: ArgonPreset.light,
+    );
+    final ka = a.spaceKeys();
+    a.close();
+    final b = HvSpace.addSpace(path: path, password: u('pb'));
+    final kb = b.spaceKeys();
+    b.close();
+
+    final ms = HvMultiSpace.open(path: path);
+    addTearDown(ms.close);
+    final ida = ms.openSpace(ka);
+    final idb = ms.openSpace(kb);
+
+    ms.commit(ida, [
+      HvWriteOpPut(namespace: 1, key: u('who'), value: u('alice')),
+    ]);
+
+    final statsA = ms.stats(ida);
+    final statsB = ms.stats(idb);
+
+    // Each id answers about ITS space. The commit above went to one of them,
+    // and reading the other's seq is how a per-id path that ignores its id
+    // looks from outside.
+    expect(statsA.commitSeq, greaterThan(statsB.commitSeq),
+        reason: 'both ids answered with the same space');
+    expect(statsA.totalSlotCount, greaterThan(0));
+    expect(statsA.utilizationRatio(), inInclusiveRange(0.0, 1.0));
+
+    // A healthy space records nothing, and the acknowledgement is reachable
+    // and idempotent. That a REAL record crosses is proved on the Rust side,
+    // where the fault seam lives — a Dart test can only ever see a healthy
+    // space, and "reports nothing" is what a broken surface does too.
+    expect(statsA.hardeningFailure, isNull);
+    ms.acknowledgeHardeningError(ida);
+    ms.acknowledgeHardeningError(ida);
+    expect(ms.stats(ida).hardeningFailure, isNull);
+
+    // An id nobody hosts is refused rather than answered for somebody else.
+    expect(() => ms.stats(99), throwsA(isA<HvException>()));
+    expect(
+      () => ms.acknowledgeHardeningError(99),
+      throwsA(isA<HvException>()),
+    );
   });
 
   // The `Option<Vec<u8>>` cursor argument is hand-encoded on the Dart
