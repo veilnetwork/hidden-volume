@@ -51,7 +51,11 @@ fn the_integration_guides_qualify_the_untouched_promise() {
         let claim = text
             .find("hv-rotate")
             .expect("the rotation mechanics section moved");
-        let section = window(&text, claim, 1800);
+        // Widened from 1800 when report17 HV17-L2 split the pre-open refusal
+        // into its own table below the post-rename ones: the section grew, and
+        // the Russian file is not ASCII so its bytes grow faster than its
+        // words.
+        let section = window(&text, claim, 3200);
 
         assert!(
             section.contains("RenameVisibleDurabilityUncertain"),
@@ -115,6 +119,111 @@ fn the_threat_model_does_not_call_a_shipped_release_pre_release() {
             !status.contains("v1.0"),
             "{model} still says its shape holds until v1.0, and the crate is \
              at {version}"
+        );
+    }
+}
+
+/// report17 HV17-L2 — every rewrite outcome the code can return is documented.
+///
+/// The drift this catches is not a wrong sentence but a MISSING one: two
+/// variants were added to the error enum after the integration guides were
+/// written, and every substring assertion about those guides stayed green
+/// because nothing asked what the code actually returns. The expectation is
+/// derived from `error.rs` rather than listed here, so a variant added
+/// tomorrow fails until both guides mention it.
+#[test]
+fn every_rename_outcome_is_in_both_integration_guides() {
+    let errors = repo("crates/hidden-volume/src/error.rs");
+    let variants: Vec<&str> = errors
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            let name = l.strip_prefix("RenameVisible")?;
+            // The declaration line, not a doc-comment mention: variants end in
+            // `,` (unit), `(` (tuple) or ` {` (struct).
+            let end = name.find(['(', ',', ' '])?;
+            Some(&l[..("RenameVisible".len() + end)])
+        })
+        .collect();
+
+    assert!(
+        variants.len() >= 4,
+        "the outcome family shrank to {variants:?} — re-anchor this test"
+    );
+
+    for guide in [
+        "docs/en/guide/integration.md",
+        "docs/ru/guide/integration.md",
+    ] {
+        let text = repo(guide);
+        for v in &variants {
+            assert!(
+                text.contains(v),
+                "{guide} does not document {v}; a caller reading it cannot know \
+                 what the call can answer"
+            );
+        }
+    }
+}
+
+/// And the outcome that happens BEFORE anything is opened is not filed with
+/// the ones that happen after the rename.
+///
+/// The guides introduced the table with "the old container is already gone
+/// from that path in every one of them" and then listed a pre-open refusal in
+/// it. A reader following that sentence stops trusting the old password after
+/// a call that did nothing at all.
+#[test]
+fn the_pre_open_refusal_is_not_listed_as_having_applied() {
+    for (guide, phrase) in [
+        ("docs/en/guide/integration.md", "Nothing ran"),
+        ("docs/ru/guide/integration.md", "Ничего не выполнялось"),
+    ] {
+        let text = repo(guide);
+        let at = text
+            .find("SourceIsNotARegularFile")
+            .unwrap_or_else(|| panic!("{guide} stopped documenting the pre-open refusal"));
+        assert!(
+            window(&text, at, 400).contains(phrase),
+            "{guide} lists the pre-open refusal without saying nothing ran"
+        );
+    }
+}
+
+/// The threat model no longer claims an advisory lock satisfies the mapping's
+/// contract.
+///
+/// It said `flock` "satisfies the contract" on local filesystems and filed the
+/// risk under network mounts — which told a server operator their local
+/// deployment was safe when a same-user process that never asks for the lock
+/// can truncate the file and kill theirs (report17 HV17-L2, following
+/// HV16-M1 and HV17-L3).
+#[test]
+fn the_threat_model_does_not_promise_the_lock_is_enough() {
+    for (guide, forbidden, required) in [
+        (
+            "docs/en/security/threat-model.md",
+            "satisfies the contract: another writer",
+            "advisory",
+        ),
+        (
+            "docs/ru/security/threat-model.md",
+            "удовлетворяет\nконтракт",
+            "рекомендательная",
+        ),
+    ] {
+        let text = repo(guide);
+        assert!(
+            !text.contains(forbidden),
+            "{guide} still promises the lock is enough"
+        );
+        assert!(
+            text.contains(required),
+            "{guide} does not say the lock is advisory"
+        );
+        assert!(
+            text.contains("SIGBUS"),
+            "{guide} does not name what actually happens"
         );
     }
 }
