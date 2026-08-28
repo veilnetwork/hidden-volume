@@ -13,6 +13,33 @@ public Rust + FFI + Dart APIs. The format generation did not move with it
 and no migration tool was required; the 2.0.0 entry says why, and names the
 one direction of container compatibility the release does not keep.
 
+## [2.0.5] — 2026-08-28
+
+No library change: every byte of the crate is v2.0.4. This release exists so
+the builds match what the project ships.
+
+### Added
+
+- **A Windows ARM64 build.** The matrix carried both architectures for Linux
+  and macOS and one for Windows, so an ARM64 Windows host had nothing to
+  install and ran the x64 binary under emulation — not what a container tool
+  with a hot crypto path should be doing. Cross-compiled from the x64 runner,
+  the way the other cross legs already work.
+
+### Fixed
+
+- **The public-API gate could not see `unsafe`.** Its pattern listed `fn` and
+  `async fn`, so the four mmap entry points left the snapshot without a word
+  when v2.0.4 made them `unsafe fn`. `unsafe`, `const` and `extern` are part
+  of it now. Going the other way, the insides of a `#[cfg(test)]` module were
+  being reported as public API and no longer are.
+- **Three tests failed on Windows and nowhere else.** They read their own
+  source and looked for `"\n    }\n"`; Windows runners check out with CRLF,
+  so the needle matched nothing. A `.gitattributes` now checks source out as
+  LF everywhere — nothing here is committed with CRLF, so no content moved —
+  and the tests normalise what they read rather than depending on how git is
+  configured.
+
 ## [2.0.4] — 2026-08-28
 
 The report17 audit pass, and then a second pass that removed each fix and
