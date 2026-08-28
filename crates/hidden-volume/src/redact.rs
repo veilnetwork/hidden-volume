@@ -485,6 +485,47 @@ mod tests {
     /// `SecretItems` is generic over [`Scrubbable`] instead of hard-coding the
     /// pair type — a version of this test that could only watch `Vec<u8>` had
     /// nothing to assert and passed on anything.
+    /// And the pair impl actually wipes the bytes, not just the lengths.
+    ///
+    /// The two checks above hold up the MECHANISM: one reads the walk bodies
+    /// for `into_secret_pairs`, the other counts scrubs through a fixture that
+    /// implements [`Scrubbable`] itself. Neither touches the impl that carries
+    /// the user's plaintext, and emptying that impl to `fn scrub(&mut self) {}`
+    /// left every test in the crate green — a wipe nobody was checking.
+    ///
+    /// Read back through the allocation rather than through the `Vec`:
+    /// `zeroize` truncates the length as well, so a `clear()` that left the
+    /// bytes in place would satisfy anything that only asked whether the
+    /// vector looks empty.
+    #[test]
+    fn the_pair_impl_wipes_the_bytes_and_not_only_the_lengths() {
+        let mut pair = (vec![0xAAu8; 48], vec![0xBBu8; 64]);
+        let (key_ptr, key_cap) = (pair.0.as_ptr(), pair.0.capacity());
+        let (val_ptr, val_cap) = (pair.1.as_ptr(), pair.1.capacity());
+
+        // SAFETY: `pair` owns both allocations and they are fully initialised.
+        let before = unsafe { std::slice::from_raw_parts(key_ptr, key_cap) };
+        assert!(
+            before.iter().any(|b| *b != 0),
+            "premise: the buffer holds something to wipe"
+        );
+
+        pair.scrub();
+
+        // SAFETY: `zeroize` sets the length to zero without freeing, so both
+        // allocations are still owned by `pair` and still ours to read.
+        let key = unsafe { std::slice::from_raw_parts(key_ptr, key_cap) };
+        let value = unsafe { std::slice::from_raw_parts(val_ptr, val_cap) };
+        assert!(
+            key.iter().all(|b| *b == 0),
+            "the key's bytes survived the scrub: {key:02x?}"
+        );
+        assert!(
+            value.iter().all(|b| *b == 0),
+            "the value's bytes survived the scrub: {value:02x?}"
+        );
+    }
+
     #[test]
     fn an_abandoned_tail_is_scrubbed_rather_than_dropped() {
         use std::cell::Cell;
