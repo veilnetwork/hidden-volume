@@ -893,7 +893,11 @@ mod tests {
     /// means asking a test to allocate 128 MiB to prove it should not.
     #[test]
     fn the_checkpoint_writer_does_not_materialize_either_half() {
-        let source = include_str!("checkpoint.rs");
+        // Read with line endings normalised: a Windows checkout hands
+        // `include_str!` CRLF, and a needle written with "\n" then
+        // matches nothing. The three tests that read source this way
+        // failed only there.
+        let source = include_str!("checkpoint.rs").replace("\r\n", "\n");
         let cut = source
             .find("#[cfg(test)]")
             .expect("this file has a test module");

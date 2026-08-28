@@ -449,13 +449,17 @@ mod tests {
             &rest[..end]
         }
 
-        let space = include_str!("space/mod.rs");
-        let tree = include_str!("space/tree.rs");
+        // Read with line endings normalised: a Windows checkout hands
+        // `include_str!` CRLF, and a needle written with "\n" then
+        // matches nothing. The three tests that read source this way
+        // failed only there.
+        let space = include_str!("space/mod.rs").replace("\r\n", "\n");
+        let tree = include_str!("space/tree.rs").replace("\r\n", "\n");
 
         for (name, source) in [
-            ("fn collect_leaf_keys_after_at", space),
-            ("fn collect_leaf_pairs_after_at", space),
-            ("fn update_tree", tree),
+            ("fn collect_leaf_keys_after_at", space.as_str()),
+            ("fn collect_leaf_pairs_after_at", space.as_str()),
+            ("fn update_tree", tree.as_str()),
         ] {
             let body = body(source, name);
             assert!(
