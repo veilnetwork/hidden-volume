@@ -40,7 +40,11 @@ use crate::{Error, Result};
 pub use commit::{CommitPayload, IndexRoot, MAX_NAMESPACES_PER_TX, NamespaceKind};
 
 /// One pending KV change inside a [`Tx`].
-#[derive(Clone)]
+///
+/// Deliberately NOT `Clone`. The plaintext lives here until commit and is
+/// wiped by the `Redacted<PendingKv>` that holds it; a clone would be a copy
+/// that wrapper never sees and never scrubs. Nothing cloned one -- the derive
+/// was only the capability to start (report17).
 pub(crate) enum KvOp {
     Put { key: Vec<u8>, value: Vec<u8> },
     Delete { key: Vec<u8> },
