@@ -216,7 +216,11 @@ mod hv15_wipe_reach_tests {
     /// itself.
     #[test]
     fn from_master_names_no_intermediate_key() {
-        let source = include_str!("derive.rs");
+        // Read with line endings normalised: a Windows checkout hands
+        // `include_str!` CRLF, and a needle written with "\n" then
+        // matches nothing. The three tests that read source this way
+        // failed only there.
+        let source = include_str!("derive.rs").replace("\r\n", "\n");
         let production = &source[..source
             .find("mod hv15_wipe_reach_tests")
             .expect("this module moved — the guard is reading the wrong region")];

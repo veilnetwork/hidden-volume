@@ -1,0 +1,22 @@
+# Source is checked out with LF on every platform.
+#
+# Windows runners default to `core.autocrlf=true`, so `.rs` files arrived with
+# CRLF and three tests that read their own source with `include_str!` looked
+# for "\n    }\n" and did not find it. They failed only on Windows, and only
+# after the tests that read source were added — the checkout, not the code,
+# was the difference. Nothing in the repository is committed with CRLF, so
+# this changes no content; it fixes what the working tree looks like.
+* text=auto eol=lf
+
+# The two that Windows genuinely wants CRLF for.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Never touched.
+*.png binary
+*.jpg binary
+*.ico binary
+*.so binary
+*.dylib binary
+*.dll binary
+*.a binary

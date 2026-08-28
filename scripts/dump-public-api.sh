@@ -132,7 +132,37 @@ for crate in "${CRATES[@]}"; do
             # or removing one passed silently. Nothing in the tree is declared
             # that way today, which is why this cost nothing to fix and would
             # have cost the whole gate to discover later.
-            /^[[:space:]]*pub (fn|async fn|struct|enum|trait|const|static|type|mod|use)/ {
+            # A `#[cfg(test)]` module is not public API, and the
+            # indentation tolerance above is what let its insides in: an
+            # allocator sentinel added for report17 HV17-M1 arrived in the
+            # snapshot as `pub const NEEDLE` / `pub static ARMED`, which the
+            # gate then reported as a change to the surface every consumer
+            # compiles against. It is `pub(crate)` inside `#[cfg(test)]`; no
+            # build outside `cargo test` even has it.
+            #
+            # Skipped by brace depth rather than by indentation, so a
+            # differently formatted module does not walk past it.
+            /^[[:space:]]*#\[cfg\(test\)\]/ { pending_test = 1; next }
+            pending_test && /^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?mod[[:space:]]/ {
+                in_test_mod = 1
+                pending_test = 0
+                depth = gsub(/\{/, "{") - gsub(/\}/, "}")
+                if (depth <= 0) in_test_mod = 0
+                next
+            }
+            pending_test { pending_test = 0 }
+            in_test_mod {
+                depth += gsub(/\{/, "{") - gsub(/\}/, "}")
+                if (depth <= 0) in_test_mod = 0
+                next
+            }
+            # `unsafe`, `const` and `extern` belong here too. The pattern
+            # listed `fn` and `async fn` only, so `pub unsafe fn` was invisible
+            # — and report17 HV17-L3 turned the four mmap entry points into
+            # exactly that, which took them OUT of the snapshot without the
+            # gate saying a word. A public unsafe function is the last one that
+            # should be able to appear, change or vanish unwatched.
+            /^[[:space:]]*pub ((unsafe|const|async|extern)[[:space:]]+("[^"]*"[[:space:]]+)?)*(fn|struct|enum|trait|const|static|type|mod|use)/ {
                 sub(/^[[:space:]]+/, "  ")
                 print fname ": " $0
                 next

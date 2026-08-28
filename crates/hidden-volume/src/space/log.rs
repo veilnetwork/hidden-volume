@@ -477,7 +477,11 @@ mod scrub_order_tests {
     /// passing, which is why this one exists.
     #[test]
     fn the_compressor_output_is_wrapped_before_it_can_be_refused() {
-        let source = include_str!("log.rs");
+        // Read with line endings normalised: a Windows checkout hands
+        // `include_str!` CRLF, and a needle written with "\n" then
+        // matches nothing. The three tests that read source this way
+        // failed only there.
+        let source = include_str!("log.rs").replace("\r\n", "\n");
         let at = source
             .find("pub fn encode_batch(")
             .expect("the encoder moved");

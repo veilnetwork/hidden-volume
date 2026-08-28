@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-25T12:07:27Z
+# Captured: 2026-08-28T05:40:45Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -100,14 +100,14 @@ container/mod.rs:   pub fn open_space_cancellable(
 container/mod.rs:   pub fn open_space_with_keys_cancellable(
 container/mod.rs:   pub fn open_space_parallel(&mut self, password: &[u8]) -> Result<Space<'_>> {
 container/mod.rs:   pub fn open_space_with_keys_parallel(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
-container/mod.rs:   pub fn open_space_mmap(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:   pub fn open_space_with_keys_mmap(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
+container/mod.rs:   pub unsafe fn open_space_mmap(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:   pub unsafe fn open_space_with_keys_mmap(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
 container/mod.rs:   pub fn open_space_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
 container/mod.rs:   pub fn open_space_with_keys_constant_time(&mut self, keys: SpaceKeys) -> Result<Space<'_>> {
 container/mod.rs:   pub fn open_space_parallel_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
 container/mod.rs:   pub fn open_space_with_keys_parallel_constant_time(
-container/mod.rs:   pub fn open_space_mmap_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
-container/mod.rs:   pub fn open_space_with_keys_mmap_constant_time(
+container/mod.rs:   pub unsafe fn open_space_mmap_constant_time(&mut self, password: &[u8]) -> Result<Space<'_>> {
+container/mod.rs:   pub unsafe fn open_space_with_keys_mmap_constant_time(
 container/mod.rs:   pub fn repack(
 container/mod.rs:   pub fn repack_cancellable(
 container/mod.rs:   pub fn compact_known(
@@ -200,6 +200,10 @@ redact.rs: pub struct Redacted<T: Secret> {
 redact.rs:   pub const fn new(inner: T) -> Self {
 redact.rs:   pub const fn as_inner(&self) -> &T {
 redact.rs:   pub fn into_inner(mut self) -> T {
+redact.rs: pub trait Scrubbable {
+redact.rs: pub struct SecretItems<T: Scrubbable> {
+redact.rs: pub type SecretPairs = SecretItems<(Vec<u8>, Vec<u8>)>;
+redact.rs:   pub fn into_secret_pairs(self) -> SecretPairs {
 space/index.rs: pub struct Namespace(pub u8);
 space/index.rs:   pub const SETTINGS: Self = Self(1);
 space/index.rs:   pub const CONTACTS: Self = Self(2);
@@ -231,13 +235,15 @@ space/log.rs: pub const MAX_LOG_PAYLOAD_LEN: usize = 8 * 1024;
 space/log.rs: pub const MAX_DECODED_BATCH_LEN: usize = 4 + MAX_RECORDS_PER_BATCH * (12 + MAX_LOG_PAYLOAD_LEN);
 space/log.rs: pub const MAX_CACHED_BATCH_BYTES: usize = 8 * 1024 * 1024;
 space/log.rs: pub const MAX_CACHED_BATCHES: usize = 64;
-space/log.rs: pub fn batch_footprint(records: &[(u64, Vec<u8>)]) -> usize {
+space/log.rs: pub fn batch_footprint(records: &[(u64, LogPayload)]) -> usize {
 space/log.rs: pub const GUARANTEED_ADMISSIBLE_PAYLOAD_LEN: usize = PAYLOAD_CAP / 2;
 space/log.rs: pub fn single_record_fits(log_id: u64, payload: &[u8]) -> Result<()> {
-space/log.rs: pub fn encode_batch(records: &[(u64, Vec<u8>)]) -> Result<Vec<u8>> {
-space/log.rs: pub fn encode_batches_split(records: &[(u64, Vec<u8>)]) -> Result<Vec<(Vec<u64>, Vec<u8>)>> {
-space/log.rs: pub fn decode_batch(compressed: &[u8]) -> Result<Vec<(u64, Vec<u8>)>> {
-space/log.rs: pub fn find_in_batch(records: &[(u64, Vec<u8>)], log_id: u64) -> Option<&Vec<u8>> {
+space/log.rs: pub fn encode_batch(records: &[(u64, LogPayload)]) -> Result<Zeroizing<Vec<u8>>> {
+space/log.rs: pub fn encode_batches_split(records: &[(u64, LogPayload)]) -> Result<Vec<EncodedBatch>> {
+space/log.rs: pub type LogPayload = Zeroizing<Vec<u8>>;
+space/log.rs: pub type EncodedBatch = (Vec<u64>, Zeroizing<Vec<u8>>);
+space/log.rs: pub fn decode_batch(compressed: &[u8]) -> Result<Vec<(u64, LogPayload)>> {
+space/log.rs: pub fn find_in_batch(records: &[(u64, LogPayload)], log_id: u64) -> Option<&LogPayload> {
 space/log.rs: pub fn log_id_key(log_id: u64) -> [u8; 8] {
 space/log.rs: pub fn parse_log_id_key(key: &[u8]) -> Result<u64> {
 space/log.rs: pub fn parse_batch_slot_value(value: &[u8]) -> Result<u64> {
@@ -250,6 +256,8 @@ space/log_iter.rs:   pub fn read_log(&mut self, namespace: Namespace, log_id: u6
 space/mod.rs: pub mod index;
 space/mod.rs: pub mod log;
 space/mod.rs: pub mod superblock;
+space/mod.rs: pub mod hardening_hooks {
+space/mod.rs:   pub fn set_sync_fails(v: bool) {
 space/mod.rs: pub struct HardeningFailure {
 space/mod.rs: pub enum HardeningStep {
 space/mod.rs: pub struct SpaceStats {
@@ -334,6 +342,7 @@ lib.rs:   pub fn abandoned_operations(&self) -> Vec<AbandonedOp> {
 lib.rs:   pub fn clear_settled_operations(&self) {
 lib.rs:   pub fn forgotten_abandonments(&self) -> u64 {
 lib.rs:   pub async fn run<F, T, E>(
+lib.rs:   pub async fn try_run<F, T, E>(
 lib.rs:   pub async fn run_cancellable<F, T, E>(
 
 ==========================================
@@ -349,6 +358,7 @@ lib.rs:   pub fn abandoned_operations(&self) -> Vec<AbandonedOp> {
 lib.rs:   pub fn clear_settled_operations(&self) {
 lib.rs:   pub fn forgotten_abandonments(&self) -> u64 {
 lib.rs:   pub async fn run<F, R>(&self, f: F) -> Result<R>
+lib.rs:   pub async fn try_run<F, R>(&self, f: F) -> Result<R>
 lib.rs:   pub async fn set_padding_policy(&self, policy: PaddingPolicy) -> Result<()> {
 lib.rs:   pub async fn set_superblock_replicas(&self, replicas: u8) -> Result<()> {
 lib.rs:   pub async fn run_cancellable<F, R>(
@@ -356,6 +366,7 @@ lib.rs: pub struct AsyncSpace {
 lib.rs:   pub async fn create(
 lib.rs:   pub async fn open(path: impl AsRef<Path>, password: Vec<u8>) -> Result<Self> {
 lib.rs:   pub async fn run<F, R>(&self, f: F) -> Result<R>
+lib.rs:   pub async fn try_run<F, R>(&self, f: F) -> Result<R>
 lib.rs:   pub fn abandoned_operations(&self) -> Vec<AbandonedOp> {
 lib.rs:   pub fn clear_settled_operations(&self) {
 lib.rs:   pub fn forgotten_abandonments(&self) -> u64 {
@@ -438,6 +449,8 @@ lib.rs: pub struct MultiSpaceHandle {
 lib.rs:   pub fn open(path: String) -> HvResult<std::sync::Arc<Self>> {
 lib.rs:   pub fn open_space(&self, keys: Vec<u8>) -> HvResult<u32> {
 lib.rs:   pub fn vacuum_space(&self, id: u32) -> HvResult<()> {
+lib.rs:   pub fn stats(&self, id: u32) -> HvResult<StatsInfo> {
+lib.rs:   pub fn acknowledge_hardening_error(&self, id: u32) -> HvResult<()> {
 lib.rs:   pub fn space_count(&self) -> HvResult<u32> {
 lib.rs:   pub fn set_padding_policy(&self, preset: PaddingPreset) -> HvResult<()> {
 lib.rs:   pub fn space_keys(&self, id: u32) -> HvResult<Vec<u8>> {
@@ -480,6 +493,7 @@ hidden_volume.dart: void compactKnown(String path, List<Uint8List> passwords) =>
 hidden_volume.dart: class HvMultiSpace {
 hidden_volume.dart:   int openSpace(Uint8List keys) => _inner.openSpace(keys);
 hidden_volume.dart:   int spaceCount() => _inner.spaceCount();
+hidden_volume.dart:   void acknowledgeHardeningError(int id) =>
 hidden_volume.dart:   void setPaddingPolicy(ffi.PaddingPreset preset) =>
 hidden_volume.dart:   Uint8List spaceKeys(int id) => _inner.spaceKeys(id);
 hidden_volume.dart:   int commit(int id, List<ffi.HvWriteOp> ops) => _inner.commit(id, ops);
@@ -728,6 +742,8 @@ src/bindings.dart: class MultiSpaceHandleBindings {
 src/bindings.dart:   static MultiSpaceHandleBindings open({required String path}) {
 src/bindings.dart:   int openSpace(Uint8List keys) {
 src/bindings.dart:   void vacuumSpace(int spaceId) {
+src/bindings.dart:   HvStatsInfo stats(int id) {
+src/bindings.dart:   void acknowledgeHardeningError(int id) {
 src/bindings.dart:   int spaceCount() {
 src/bindings.dart:   void setPaddingPolicy(PaddingPreset preset) {
 src/bindings.dart:   Uint8List spaceKeys(int id) {
