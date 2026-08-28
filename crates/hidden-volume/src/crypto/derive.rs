@@ -68,17 +68,27 @@ impl SpaceKeys {
     /// [`crate::crypto::kdf::derive_master_key`]). Derives both
     /// `container_id` and `aead_root` via `derive_subkey` with
     /// distinct context labels.
+    /// ## Copies of the derived bytes
+    ///
+    /// The two subkeys arrive in `Zeroizing` temporaries, whose drop wipes
+    /// them, and go straight into the returned struct — which is
+    /// `ZeroizeOnDrop`. There are no named intermediate arrays: they existed
+    /// here, were not wiped, and are the copies report17 HV17-L4 asks about.
+    ///
+    /// What was MEASURED rather than reasoned (arm64, release profile): the
+    /// optimiser had already elided those arrays, both temporaries were
+    /// copied directly into the caller's output, and all 64 bytes of them
+    /// were zeroized by the volatile writes `Zeroizing` performs. Writing the
+    /// source this way stops that resting on the optimiser.
+    ///
+    /// What is still not guaranteed, and cannot be from within Rust: the
+    /// returned value is moved to the caller, and the language promises
+    /// nothing about the slot it was moved out of.
     #[must_use]
     pub fn from_master(versioned_master: &Zeroizing<[u8; 32]>) -> Self {
-        let container_id_z = derive_subkey(versioned_master.as_slice(), b"hv/v3/container_id");
-        let aead_root_z = derive_subkey(versioned_master.as_slice(), b"hv/v3/aead_root");
-        let mut container_id = [0u8; 32];
-        container_id.copy_from_slice(container_id_z.as_slice());
-        let mut aead_root = [0u8; 32];
-        aead_root.copy_from_slice(aead_root_z.as_slice());
         Self {
-            container_id,
-            aead_root,
+            container_id: *derive_subkey(versioned_master.as_slice(), b"hv/v3/container_id"),
+            aead_root: *derive_subkey(versioned_master.as_slice(), b"hv/v3/aead_root"),
         }
     }
 }
