@@ -298,6 +298,13 @@ pub enum HvError {
     ///
     /// **Nothing ran.** Raised only by the `try_run` family. Retrying is
     /// reasonable: the permit is a queue, not a verdict.
+    ///
+    /// RESERVED across this boundary: no FFI entry point calls `try_run`, so
+    /// nothing here can produce it today and Dart code written to handle it
+    /// would be handling a case that cannot arrive. It stays because the
+    /// ordinal is the contract — the Dart side reads these positionally, and
+    /// removing this one renames every kind after it at runtime. Wiring a
+    /// non-blocking entry point is what would make it live (report17).
     #[error("the handle's operation permit is held by another caller; nothing ran")]
     WouldBlock,
     /// The rewrite landed, and this platform could not say whether the old
@@ -2498,6 +2505,97 @@ static SENTINEL: sentinel::Sentinel = sentinel::Sentinel;
 
 #[cfg(test)]
 mod tests {
+
+    /// The Dart side reads these variants BY POSITION. Nothing checked that.
+    ///
+    /// `_hvErrorKinds` in the plugin's `bindings.dart` is a list of names
+    /// indexed by the uniffi ordinal, and both files carry a comment saying
+    /// the two orders must agree and that the lists are append-only. A comment
+    /// is all that said it. Insert a variant in the middle here, or drop one —
+    /// the report17 row about the dormant `WouldBlock` is exactly an
+    /// invitation to drop one — and every kind after it is renamed at runtime,
+    /// silently: an `AuthFailed` arrives in Dart as `ReadOnly`, and the app
+    /// takes the remedy for the wrong outcome.
+    ///
+    /// Both sides are read from their own source, so this fails on the change
+    /// rather than on a later memory of it.
+    #[test]
+    fn the_dart_side_names_these_variants_in_this_order() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let ours = std::fs::read_to_string(root.join("src/lib.rs")).expect("this crate");
+        let dart = std::fs::read_to_string(
+            root.join("../../experimental/flutter_plugin/hidden_volume/lib/src/bindings.dart"),
+        )
+        .expect("the plugin bindings");
+
+        let mine = rust_variants(&ours);
+        let theirs = dart_kinds(&dart);
+
+        assert!(
+            mine.len() >= 20,
+            "only {} variants parsed — the declaration moved",
+            mine.len()
+        );
+        for (i, (a, b)) in mine.iter().zip(theirs.iter()).enumerate() {
+            assert_eq!(
+                a,
+                b,
+                "ordinal {} is {a} here and {b} in bindings.dart — every kind \
+                 from this one on is renamed at runtime",
+                i + 1
+            );
+        }
+        assert_eq!(
+            mine.len(),
+            theirs.len(),
+            "{} variants here, {} names in bindings.dart",
+            mine.len(),
+            theirs.len()
+        );
+    }
+
+    /// Variant names of `pub enum HvError`, in declaration order.
+    fn rust_variants(source: &str) -> Vec<String> {
+        let at = source.find("pub enum HvError {").expect("the enum moved");
+        source[at..]
+            .lines()
+            .skip(1)
+            .take_while(|l| *l != "}")
+            .filter(|l| {
+                // Variant level only: a struct field is indented deeper and
+                // starts lowercase, an attribute's continuation line is a
+                // string literal, and doc comments start with a slash.
+                l.len() > 4
+                    && l.starts_with("    ")
+                    && !l.starts_with("     ")
+                    && l.as_bytes()[4].is_ascii_uppercase()
+            })
+            .map(|l| {
+                l[4..]
+                    .split(['(', '{', ',', ' '])
+                    .next()
+                    .expect("a name")
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    /// The names in `_hvErrorKinds`, without the unused zero slot.
+    fn dart_kinds(source: &str) -> Vec<String> {
+        let at = source
+            .find("const _hvErrorKinds = <String>[")
+            .expect("the kind list moved");
+        let end = source[at..].find("];").expect("the list is unterminated") + at;
+        source[at..end]
+            .lines()
+            .filter_map(|l| {
+                let l = l.trim_start();
+                let rest = l.strip_prefix('\'')?;
+                let name = rest.split('\'').next()?;
+                (name != "<reserved-zero>").then(|| name.to_owned())
+            })
+            .collect()
+    }
 
     /// The async surface says it mirrors the sync one. This is what makes that
     /// a fact rather than a sentence.
