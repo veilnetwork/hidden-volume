@@ -180,12 +180,20 @@ fn run(cmd: Cmd) -> Result<()> {
 /// deniability and adds a foot-gun for scripting. Pipe the password
 /// in via stdin instead: `echo password | hv create-space store.bin`.
 ///
-/// Audit pass 17 F: returns `Zeroizing<Vec<u8>>` so the heap buffer
-/// scrubs on drop. The intermediate `String` is a transient that
-/// `into_bytes` consumes; we cannot wrap a `String` in `Zeroizing`
-/// directly (no `Zeroize` impl), but the `String` lives only until
-/// the end-of-function and its bytes are moved (not copied) into the
-/// returned `Vec<u8>`.
+/// Audit pass 17 F: returns `Zeroizing<Vec<u8>>` so the heap buffer scrubs
+/// on drop, and [`read_capped_line`] hands one over already — the bytes are
+/// never in an ordinary buffer on the way here.
+///
+/// This paragraph used to explain an intermediate `String`: that `into_bytes`
+/// moved rather than copied it, and that a `String` could not be wrapped in
+/// `Zeroizing` for want of a `Zeroize` impl. Both statements describe code
+/// that is gone. The `String` went with report14 HV14-M4, because growing one
+/// until a newline arrived left every intermediate buffer — password inside —
+/// on the heap, which is precisely what the moved-not-copied argument had
+/// been offered as reassurance against. And `zeroize` has implemented
+/// `Zeroize` for `String` since 1.x, so the reason given for not wrapping it
+/// was not a reason either. A comment that argues a buffer is safe is read as
+/// a finding, not as history (report17).
 ///
 /// **Echo is suppressed when stdin is a terminal** (report6 P2). It was
 /// a bare `read_line`, so a password typed at a prompt was printed back

@@ -649,12 +649,22 @@ impl ContainerFile {
         Ok(buf)
     }
 
-    /// Borrow the underlying [`File`] handle. Used by the `mmap`
-    /// feature's `scan_and_recover_mmap` to construct a
-    /// [`memmap2::Mmap`]. The flock acquired at open time
-    /// (`LOCK_EX` in writer mode, `LOCK_SH` in readonly mode)
-    /// excludes concurrent writers — this is what makes the unsafe
-    /// `Mmap::map(&File)` call safe in our use.
+    /// Borrow the underlying [`File`] handle. Used by the `mmap` feature's
+    /// `scan_and_recover_mmap` to construct a [`memmap2::Mmap`].
+    ///
+    /// This said the flock taken at open time — `LOCK_EX` in writer mode,
+    /// `LOCK_SH` in readonly — excludes concurrent writers, and that this is
+    /// what makes the unsafe `Mmap::map(&File)` call safe here. It is not.
+    /// `flock(2)` is ADVISORY: it excludes writers that ask for the lock, and
+    /// a process of the same user that opens the file without asking can
+    /// truncate it under the mapping. The scan then touches a page that is no
+    /// longer backed and the kernel answers with SIGBUS — the process dies,
+    /// and no `Result` is ever returned (report17 HV17-L3).
+    ///
+    /// The real precondition therefore belongs to whoever maps: it is written
+    /// out on [`crate::Container::open_space_mmap`] and its three siblings,
+    /// which are `unsafe fn` for this reason. Handing out the handle stays safe; what is
+    /// done with it is not.
     #[cfg(all(feature = "mmap", unix))]
     #[must_use]
     pub fn raw_file(&self) -> &File {

@@ -329,3 +329,76 @@ fn the_threat_model_does_not_promise_the_lock_is_enough() {
         );
     }
 }
+
+/// The lines a maintainer reads before mapping the file all say the same thing.
+///
+/// `FileHandle::raw_file` — whose entire purpose is to hand a `&File` to
+/// `Mmap::map` — said the flock taken at open time "is what makes the unsafe
+/// `Mmap::map(&File)` call safe in our use". That is the claim report17
+/// HV17-L3 removed everywhere else: the lock is ADVISORY, a process that never
+/// asks for it can truncate under the mapping, and the reader gets SIGBUS
+/// rather than an `Err`. The correction reached the four entry points and the
+/// threat model and stopped one file short, leaving the sentence that
+/// authorises the whole pattern standing where it is most likely to be read.
+///
+/// Positive assertions only. The corrected text QUOTES the old claim before
+/// denying it, so a scan for the false sentence would fire on the passage that
+/// removes it — the same trap as a guard reading its own reasoning.
+#[test]
+fn every_mmap_entry_point_states_the_lock_the_same_way() {
+    let container = repo("crates/hidden-volume/src/container/mod.rs");
+    let lines: Vec<&str> = container.lines().collect();
+
+    let mut checked = 0;
+    for (i, line) in lines.iter().enumerate() {
+        let signature = line.trim_start();
+        if !(signature.starts_with("pub unsafe fn") && signature.contains("_mmap")) {
+            continue;
+        }
+        // Lowercased: the same fact is written `advisory` in the safety
+        // sections and `ADVISORY` where it is being insisted on, and a guard
+        // that cared which would be reporting on prose style.
+        let doc = doc_above(&lines, i).to_lowercase();
+        for required in ["# safety", "advisory", "sigbus"] {
+            assert!(
+                doc.contains(required),
+                "{signature} does not say {required:?} in its safety section"
+            );
+        }
+        checked += 1;
+    }
+    assert!(
+        checked >= 4,
+        "found {checked} mmap entry points — the family moved, re-anchor this"
+    );
+
+    // And the function that lends the handle out repeats it rather than
+    // contradicting it.
+    let file = repo("crates/hidden-volume/src/container/file.rs");
+    let lines: Vec<&str> = file.lines().collect();
+    let at = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with("pub fn raw_file"))
+        .expect("raw_file moved; re-anchor this guard");
+    let doc = doc_above(&lines, at).to_lowercase();
+    for required in ["advisory", "sigbus"] {
+        assert!(
+            doc.contains(required),
+            "raw_file hands a &File to a mapping without saying {required:?}"
+        );
+    }
+}
+
+/// The doc comment and attributes immediately above line [`at`].
+fn doc_above(lines: &[&str], at: usize) -> String {
+    lines[..at]
+        .iter()
+        .rev()
+        .take_while(|l| {
+            let t = l.trim_start();
+            t.starts_with("///") || t.starts_with("#[")
+        })
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
