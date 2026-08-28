@@ -200,6 +200,45 @@ mod hv15_wipe_reach_tests {
     /// What can rot is the wiring — a dependency feature dropped in a
     /// dependency bump, or a `.zeroize()` lost in a refactor — and both are
     /// facts about files (report9 HV-15).
+    /// The subkeys go straight into the struct, with nothing named on the way.
+    ///
+    /// report17 HV17-L4 asked whether `from_master` leaves plaintext key
+    /// material on the stack. It does not — measured on the disassembly, and
+    /// the source was tidied so the two derived keys are moved into the
+    /// fields at the point they are produced, with no intermediate binding
+    /// that outlives its `Zeroizing` wrapper.
+    ///
+    /// That conclusion has been the ONLY finding in the report resting on a
+    /// measurement nobody re-runs. A disassembly test would pin a particular
+    /// compiler; what can actually rot is the shape of the function, so the
+    /// shape is what is held. Cut at this module for the same reason the
+    /// check below is: an assertion that contains its own needle counts
+    /// itself.
+    #[test]
+    fn from_master_names_no_intermediate_key() {
+        let source = include_str!("derive.rs");
+        let production = &source[..source
+            .find("mod hv15_wipe_reach_tests")
+            .expect("this module moved — the guard is reading the wrong region")];
+
+        let at = production
+            .find("pub fn from_master(")
+            .expect("from_master moved or was renamed");
+        let body = &production[at..];
+        let body = &body[..body.find("\n    }\n").expect("no end of from_master")];
+
+        assert_eq!(
+            body.matches("derive_subkey(").count(),
+            2,
+            "from_master no longer derives both subkeys, so the check below              is about nothing"
+        );
+        assert!(
+            !body.contains("let "),
+            "from_master binds a name on the way to the struct:\n{body}\n\
+             a local holding the dereferenced key outlives the Zeroizing that              was supposed to wipe it"
+        );
+    }
+
     #[test]
     fn the_key_equivalent_transients_are_still_wiped() {
         let manifest = include_str!("../../Cargo.toml");
