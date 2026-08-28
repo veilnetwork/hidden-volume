@@ -59,6 +59,14 @@ jobs:
             runner: macos-latest
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
+          # Windows on ARM64. Cross-compiled from the x64 runner: the image
+          # carries the VS ARM64 build tools, and `cc` picks the matching
+          # `cl.exe` from the target triple, which is what `zstd` needs.
+          # Without this leg a Windows ARM64 host had no build at all — the
+          # x64 binary runs there under emulation, which is not what a
+          # container tool with a hot crypto path should be doing.
+          - target: aarch64-pc-windows-msvc
+            runner: windows-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -76,7 +84,7 @@ jobs:
       # for 'core'` is what that looks like from inside the build.
       #
       # It only shows on the legs where the target differs from the host:
-      # three of the five matrix entries build their own host triple and were
+      # the legs whose target IS the host build their own triple and were
       # green, which is why this reads as a partial failure rather than a
       # setup that never took effect at all.
       #
