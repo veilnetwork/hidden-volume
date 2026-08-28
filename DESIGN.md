@@ -760,8 +760,12 @@ and a low ratio with an empty pool is one that does.
 ## 11. Open questions
 
 This section catalogues design decisions that were open at v0.1 plan
-time. Items 1, 2, 4, 5 have shipped resolutions; item 3 is a soft cap
-documented under threat-model "out of scope".
+time. All five have shipped resolutions.
+
+This preamble used to say item 3 was "a soft cap documented under
+threat-model out of scope" while item 3 itself, three paragraphs down,
+records the hard cap enforced on both the write and the read side. The
+same drift the item describes, one level up (report17 HV17-L2).
 
 1. **Argon2 params storage.** ✅ Resolved. Parameters are stored in the
    cleartext header (v3: offset 32..48; in v2 it was 64..80, see §2).

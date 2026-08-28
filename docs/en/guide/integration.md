@@ -485,10 +485,21 @@ one of them, so none is a failure to retry against it:
 | `RenameVisibleDurabilityUncertain` | The rewrite applied; whether the directory entry survives a crash is unknown. |
 | `RenameVisibleContentUnverified` | The path resolves to a file this call did not write. |
 | `RenameVisibleAliasesNotRevoked(n)` | The rewrite applied at this name; the previous file is still reachable under `n` other hard links. |
-| `SourceIsNotARegularFile` | Refused BEFORE anything was opened — a symlink or other non-file, where a rename would replace the NAME and leave the container it points at unchanged. |
+| `RenameVisibleAliasesUnknown` | The rewrite applied; this platform could not say whether other names for the previous file remain. Not the same as "there are none". |
+| `RenameVisibleAliasesAndDurabilityUncertain` | Both of the two above at once. They are independent facts and both travel, because the remedies differ. |
 
-After a password change the first three mean the NEW password is in
-force at that path. Retrying with the old one is wrong.
+And one that is NOT in that group, listed apart because it used to sit in
+the same table under a heading that said everything in it had already
+happened (report17 HV17-L2):
+
+| Outcome | What is true |
+|---|---|
+| `SourceIsNotARegularFile` | Refused BEFORE anything was opened — a symlink or other non-file, where a rename would replace the NAME and leave the container it points at unchanged. **Nothing ran**, and the old container is untouched. |
+
+After a password change every outcome in the FIRST table means the NEW
+password is in force at that path; retrying with the old one is wrong. The
+second table is the opposite case: nothing was written, and the old password
+still opens the container.
 The cancellable variant (`change_passwords_cancellable`) honours a
 `CancelToken` at every namespace / Tx boundary; on cancel the temp
 is removed and `Error::Cancelled` is returned.

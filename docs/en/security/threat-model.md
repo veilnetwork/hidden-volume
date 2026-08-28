@@ -447,7 +447,7 @@ explicitly so review can confirm they are not in scope:
 | Multi-snapshot byte-diff on in-place rewrite (T2') | Rewrite is intentional (vacuum, scrub); fully obscuring requires periodic random rewrite of all garbage, prohibitively expensive | `DESIGN.md` §1 out-of-scope |
 | Encryption-at-rest is visible | Deniability is about *which* secrets, not *whether* secrets exist | `DESIGN.md` §1 out-of-scope |
 | Network filesystems that ignore `flock` | Library can't detect; deployer responsibility | [`guide/multi-device.md`](../guide/multi-device.md) Pattern B caveat |
-| **mmap on filesystems that allow concurrent mutation** (NFS, FUSE, SMB) | The `mmap` feature uses `memmap2::Mmap` which assumes the underlying file's bytes are stable for the mapping's lifetime. `flock(LOCK_EX)` enforces this on local filesystems (ext4/xfs/btrfs/APFS/NTFS); on NFS the lock advisory is best-effort and on some FUSE filesystems it's outright ignored. A concurrent mutation under an active mmap violates Rust's aliasing rules. | See §4.2 below; `mmap` is `cfg(unix)` AND opt-in via Cargo feature; mobile and FFI consumers should leave it off |
+| **mmap and any local process that does not take the lock** | The `mmap` feature uses `memmap2::Mmap`, whose contract requires the file's bytes to be stable for the mapping's lifetime. `flock(LOCK_EX)` excludes only those who ASK for the lock; a truncate by a process that does not raises SIGBUS and kills this one — on any filesystem. On NFS/FUSE the lock additionally fails to hold even for those who do ask. | See §4.2 below; `mmap` is `cfg(unix)` AND opt-in via Cargo feature; mobile and FFI consumers should leave it off |
 | **Argon2id is uninterruptible** (`HV-NEW1`) | RustCrypto's `argon2::Argon2::hash_password_into` does not check a cancellation flag. A user who triggers `Container::open_cancellable` with `HEAVY` params (~250ms on x86 server-class, multi-second on Cortex-A53) and then cancels will still see Argon2 run to completion before `Error::Cancelled` surfaces. | See §4.3 below; host-apps should run KDF in a `spawn_blocking` task with a hard timeout and treat the timeout as user-visible cancel |
 | OS-level compromise (root, /proc, /dev/mem) | Threat exceeds library boundary | §2 out-of-scope |
 | CPU side channels (Spectre, cache timing) | OS / microcode boundary | §2 out-of-scope |
@@ -547,12 +547,26 @@ mapping is constructed with `unsafe` because `Mmap`'s safety
 contract requires that **no other process or thread mutates the
 mapped bytes for the lifetime of the mapping**. The library
 acquires `flock(LOCK_EX)` (or `LOCK_SH` for `open_readonly`) before
-constructing the mapping, which on POSIX local filesystems
-satisfies the contract: another writer attempting to acquire
-`LOCK_EX` blocks (or gets `Error::Busy`) until our mapping is
+constructing the mapping, which excludes another writer that ASKS
+for the lock: it blocks, or gets `Error::Busy`, until our mapping is
 dropped.
 
-**Where the contract may not hold.**
+**It excludes nobody else, on any filesystem.** `flock(2)` is
+advisory. A process of the same user that opens the container
+WITHOUT taking the lock and truncates it is not blocked by anything,
+and the scan then touches a page that is no longer backed — SIGBUS,
+a process abort, on ext4 and APFS exactly as anywhere else. This
+section used to say the lock "satisfies the contract" on local
+filesystems and file the risk under network mounts; that reading
+told a server operator their local deployment was safe when it was
+not (report17 HV17-L2, following HV16-M1).
+
+Since report17 HV17-L3 the four mapped entry points are `unsafe fn`
+and carry that requirement in their signatures, so a caller has to
+state that it holds rather than discover it here.
+
+**Where the lock is additionally worthless — even against writers
+that DO ask for it.**
 
 - **NFS v3** without `lockd` — advisory-only; depending on server
   configuration, a remote client can mutate the file regardless of
@@ -565,18 +579,24 @@ dropped.
   driver substitutes a non-flock-honouring backend.
 
 **Concretely what fails.** The mapping is read by `open` /
-`open_readonly` to scan the chunk grid. If a concurrent writer
-mutates the file under us, the AEAD-decrypt of a torn chunk fails
-with `Error::AuthFailed`, which is a safe error path. **But** Rust
-considers the underlying memory aliasing UB; in practice this
-manifests as either a stale-cache read (benign-looking failure) or
-a SIGBUS on Linux when the file shrinks under the mapping.
+`open_readonly` to scan the chunk grid. A concurrent writer that
+REWRITES bytes in place produces a torn chunk whose AEAD-decrypt
+fails with `Error::AuthFailed` — a safe error path. A writer that
+SHORTENS the file produces something else entirely: the next read of
+a page past the new end raises SIGBUS and the process dies, with no
+`Result` to return. That second case is the one demonstrated, and it
+is a denial of service rather than the aliasing UB this paragraph
+used to lead with — the distinction matters because it decides
+whether the mitigation is "handle the error" (it cannot be) or "do
+not use this API where an untrusted local process can write the
+directory".
 
 **Recommendation.** `mmap` is **opt-in** via a Cargo feature AND
-`#[cfg(unix)]`. Mobile and FFI consumers SHOULD leave it disabled.
-For server-side deployments on local ext4/xfs/btrfs/APFS, mmap is
-safe and gives a measurable speedup on cold-cache scans of
-multi-GiB containers. For any environment where the underlying
+`#[cfg(unix)]`, and its entry points are `unsafe`. Mobile and FFI
+consumers SHOULD leave it disabled. For server-side deployments on
+local ext4/xfs/btrfs/APFS **whose directory no untrusted local
+process can write**, mmap gives a measurable speedup on cold-cache
+scans of multi-GiB containers. For any environment where the underlying
 storage is questionable (network-mounted, FUSE-overlayed,
 container-volume-passthrough), use the default streaming `pread`
 path.
