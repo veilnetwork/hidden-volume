@@ -244,3 +244,48 @@ fn new_field_on_a_carrier_is_invisible_by_default() {
     let child = child_with_marker();
     assert!(format!("{child:?}").ends_with(".. }"));
 }
+
+/// A pending KV op must not be copyable out of the wrapper that wipes it.
+///
+/// `Tx::pending_kv` is a `Redacted<PendingKv>`, and what makes that wrapper
+/// worth anything is its `Drop`: it scrubs the plaintext keys and values the
+/// transaction is holding. A `KvOp` that could be cloned is a copy of that
+/// plaintext living outside the wrapper, dropped by the ordinary `Vec` path
+/// with nothing wiping it — and `Redacted<T>` is itself `Clone` whenever its
+/// contents are, so the derive quietly made the whole pending map copyable.
+///
+/// Nothing cloned one; the derive was the capability alone (report17). This
+/// reads the declaration rather than trying to call `.clone()`, because a test
+/// that failed to compile would be a test nobody could run.
+#[test]
+fn a_pending_kv_op_is_not_cloneable() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tx/mod.rs"),
+    )
+    .expect("the transaction module");
+
+    let at = source
+        .find("pub(crate) enum KvOp {")
+        .expect("KvOp moved; re-anchor this guard");
+
+    // The ATTRIBUTE lines above the declaration, not the prose: the doc
+    // comment right above it explains why the derive is gone, and a scan for
+    // the word matched that explanation -- a guard reading its own reasoning.
+    let attributes: Vec<&str> = source[..at]
+        .lines()
+        .rev()
+        .take_while(|l| {
+            let t = l.trim_start();
+            t.starts_with("#[") || t.starts_with("///") || t.is_empty()
+        })
+        .filter(|l| l.trim_start().starts_with("#["))
+        .collect();
+
+    for attribute in &attributes {
+        assert!(
+            !attribute.contains("Clone") && !attribute.contains("Copy"),
+            "KvOp is copyable again: {attribute}\n\
+             a duplicated pending op is plaintext the Redacted wrapper never wipes"
+        );
+    }
+}
