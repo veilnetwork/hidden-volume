@@ -73,22 +73,108 @@ fn the_integration_guides_qualify_the_untouched_promise() {
     }
 }
 
+/// The design documents the cap the code actually enforces — as a NUMBER.
+///
+/// This replaces a guard that asserted one sentence was absent
+/// (`!contains("the library does not enforce a hard cap")`). A negative on an
+/// exact rendering can only ever catch the rendering that was already fixed:
+/// the same denial in any other words kept it green, and so did the constant
+/// changing under a design table that still quoted the old figure. Nothing
+/// about it could fail again, which is the definition of a test that is no
+/// longer testing (report17, the dead-code section).
+///
+/// What is checked instead is agreement: the value in §10 of each design
+/// document, multiplied out of however it is written, must equal the constant
+/// in `open/mod.rs`, and the §11 entry that once denied the cap must still
+/// name it. A shape-scan for denials was considered and rejected — §11
+/// EXPLAINS the old false claim, so a scan for "a negation near a hard cap"
+/// fires on the very text that corrects it, the same trap as a guard reading
+/// its own assertion.
 #[test]
-fn design_does_not_deny_the_cap_it_documents() {
-    let design = repo("DESIGN.md");
+fn the_design_states_the_cap_the_code_enforces() {
+    let cap = const_u64(
+        &repo("crates/hidden-volume/src/open/mod.rs"),
+        "MAX_OPEN_SCAN_CHUNKS",
+    );
 
-    assert!(
-        design.contains("MAX_OPEN_SCAN_CHUNKS"),
-        "premise: the cap is documented here"
-    );
-    assert!(
-        !design.contains("the library does not enforce a hard cap"),
-        "DESIGN.md denies the cap it documents eleven headings above"
-    );
+    for design in ["DESIGN.md", "DESIGN.ru.md"] {
+        let text = repo(design);
+        let row = text
+            .lines()
+            .find(|l| l.starts_with("| `MAX_OPEN_SCAN_CHUNKS`"))
+            .unwrap_or_else(|| panic!("{design} has no §10 row for the cap"));
+        let cell = row
+            .split('|')
+            .nth(2)
+            .unwrap_or_else(|| panic!("{design}: the cap row has no value column"));
+
+        assert_eq!(
+            product_of_integers(cell.split('(').next().unwrap_or(cell)),
+            cap,
+            "{design} states {cell:?} for a cap the code sets to {cap}"
+        );
+
+        // §11's entry is the one that used to say no cap was enforced. It has
+        // to keep pointing at the constant, or the two halves of the document
+        // can drift apart again with nothing to notice.
+        let entry_at = text
+            .find("Maximum slot count")
+            .or_else(|| text.find("Максимальное количество слотов"))
+            .unwrap_or_else(|| panic!("{design} lost the §11 slot-count entry"));
+        assert!(
+            window(&text, entry_at, 700).contains("MAX_OPEN_SCAN_CHUNKS"),
+            "{design}: the slot-count entry no longer names the cap it resolves to"
+        );
+    }
 }
 
+/// The value of `pub const NAME: u64 = <a product of integers>;`.
+///
+/// Written out rather than read from the compiled crate on purpose: the point
+/// is to compare what the SOURCE says with what the document says, and a test
+/// that imported the constant would agree with itself if the source line and
+/// the published constant ever parted company.
+fn const_u64(source: &str, name: &str) -> u64 {
+    let needle = format!("pub const {name}: u64 =");
+    let line = source
+        .lines()
+        .find(|l| l.trim_start().starts_with(&needle))
+        .unwrap_or_else(|| panic!("no `{needle}` in the source"));
+    let expr = line
+        .split('=')
+        .nth(1)
+        .and_then(|e| e.split(';').next())
+        .unwrap_or_else(|| panic!("`{needle}` has no value"));
+    product_of_integers(expr)
+}
+
+/// Every integer in [text], multiplied. `16 × 1024 × 1024`, `16 * 1024 * 1024`
+/// and `16777216` all come out the same, so the documents stay free to write
+/// the figure the way a reader wants it.
+fn product_of_integers(text: &str) -> u64 {
+    let mut product = 1u64;
+    let mut seen = false;
+    for token in text.split(|c: char| !c.is_ascii_digit()) {
+        if token.is_empty() {
+            continue;
+        }
+        seen = true;
+        product = product.saturating_mul(token.parse::<u64>().expect("an integer"));
+    }
+    assert!(seen, "no number at all in {text:?}");
+    product
+}
+
+/// The threat model says which release it is current for, and means it.
+///
+/// It used to call itself pre-release long after v2 shipped, and the guard
+/// written for that asserted the string `v1.0` was absent from the status
+/// line. That could only ever catch the one version it was written against:
+/// the same staleness spelled `v1.5`, or a status line left at `v2.0.x` while
+/// the crate moved to `v2.1`, kept it green. The claim is checked against the
+/// crate instead, so the line goes stale the moment the crate does.
 #[test]
-fn the_threat_model_does_not_call_a_shipped_release_pre_release() {
+fn the_threat_model_is_current_for_the_release_it_names() {
     let version = repo("crates/hidden-volume/Cargo.toml")
         .lines()
         .find_map(|l| {
@@ -96,9 +182,11 @@ fn the_threat_model_does_not_call_a_shipped_release_pre_release() {
                 .map(|v| v.trim_end_matches('"').to_owned())
         })
         .expect("the crate has a version");
-    assert!(
-        version.starts_with('2'),
-        "this guard is written for the v2 line; the crate says {version}"
+    let mut parts = version.split('.');
+    let shipped = format!(
+        "{}.{}",
+        parts.next().expect("a major"),
+        parts.next().expect("a minor")
     );
 
     for model in [
@@ -110,15 +198,29 @@ fn the_threat_model_does_not_call_a_shipped_release_pre_release() {
             .find("Status.")
             .or_else(|| text.find("Статус."))
             .unwrap_or_else(|| panic!("{model} has no status line"));
-        // The first sentence only: the correction below it explains what the
-        // line used to say, and a window that swallowed the explanation found
-        // the phrase in the text that corrects it. Same trap as a source guard
+        // The first sentence only: the paragraph below it explains what the
+        // line used to say, and a window that swallowed the explanation would
+        // read the correction as the claim. Same trap as a source guard
         // reading its own assertion.
         let status = window(&text, status_at, 200);
-        assert!(
-            !status.contains("v1.0"),
-            "{model} still says its shape holds until v1.0, and the crate is \
-             at {version}"
+
+        let named = status
+            .split('v')
+            .find_map(|rest| {
+                let digits: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '.')
+                    .collect();
+                let mut it = digits.split('.');
+                let major = it.next().filter(|s| !s.is_empty())?;
+                let minor = it.next().filter(|s| !s.is_empty())?;
+                Some(format!("{major}.{minor}"))
+            })
+            .unwrap_or_else(|| panic!("{model} names no version: {status:?}"));
+
+        assert_eq!(
+            named, shipped,
+            "{model} says it is current for v{named}.x while the crate is at {version}"
         );
     }
 }
