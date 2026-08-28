@@ -13,6 +13,49 @@ public Rust + FFI + Dart APIs. The format generation did not move with it
 and no migration tool was required; the 2.0.0 entry says why, and names the
 one direction of container compatibility the release does not keep.
 
+## [2.0.4] — 2026-08-28
+
+The report17 audit pass, and then a second pass that removed each fix and
+required its test to fail.
+
+### Fixed
+
+- **A rewrite could report one qualification and swallow the other.** When the
+  old file was still reachable under another name AND the change might not have
+  reached the disk, the caller heard about the aliases only. Both facts now
+  travel in one outcome, and the guides list it.
+- **A mapped open carried its precondition in prose.** The four `_mmap` entry
+  points are `unsafe fn` with a `# Safety` section that says what the caller
+  must ensure — `flock(2)` is advisory and does not provide it, and the reader
+  of a truncated mapping gets SIGBUS rather than an `Err`.
+- **Windows was asked how many names the container has.** The link count was
+  hardcoded to 1 off Unix, so a hard link survived a password rotation with the
+  old password still opening it. Proven on Windows 11 / NTFS: the count is 1
+  for one name, 2 after a hard link, 1 again after unlinking.
+- **A pending KV op could be copied out of the wrapper that wipes it.** `KvOp`
+  derived `Clone` and nothing cloned one; the derive alone made the whole
+  pending map copyable, and a copy is plaintext the `Redacted` drop never sees.
+- **A batch of writes no longer hands its plaintext to the allocator**, the
+  order cursors of a tree walk are wiped, and the self-heal checkpoint is
+  written a chunk at a time instead of materialising both halves.
+- **The space subkeys are derived without intermediate arrays**, so nothing
+  named outlives the wrapper that scrubs it.
+
+### Changed
+
+- Documentation that had outgrown the code: the design no longer denies the cap
+  it documents in the same file — in either language — the threat model no
+  longer promises an advisory lock is enough, and the handle lender no longer
+  claims the lock is what makes a mapping safe.
+
+### Tests
+
+Three guards that could not fail were replaced by guards derived from the
+source they check, and three properties that nothing checked at all now have
+tests: an overwrite at capacity, the impl that wipes a key/value pair, and the
+positional contract between the FFI error enum and the Dart plugin — where a
+variant inserted or removed silently renames every kind after it at runtime.
+
 ## [2.0.3] — 2026-08-25
 
 ### Fixed
