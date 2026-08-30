@@ -1601,9 +1601,15 @@ where
         // here because after the rename this inode is unlinked from `path` and
         // the count no longer answers the question.
         Ok(meta) => source_link_count(path, &meta),
-        // Unknown is not wrong. Let the open below decide whether there is a
-        // container here at all.
-        Err(_) => Some(1),
+        // Unknown, and said as unknown. This used to answer `Some(1)` — "this
+        // file has exactly one name" — which is a definite claim, and the one
+        // claim that makes `rewrite_outcome` report no aliases. A metadata
+        // call that failed knows nothing about hard links, and the rewrite it
+        // is about to report on leaves any other name pointing at the old
+        // inode, with the old password still opening it (report18 HV18-M3).
+        // `None` is the value this function already has for "cannot say", and
+        // the outcome treats it as qualified.
+        Err(_) => None,
     };
 
     let mut src = Container::open_exclusive_readonly(path)?;
@@ -2807,6 +2813,37 @@ mod rewrite_outcome_tests {
             },
             other => panic!("the durability fact was dropped: {other:?}"),
         }
+    }
+
+    /// A metadata failure must reach [`rewrite_outcome`] as unknown.
+    ///
+    /// The function above handles `None` correctly and always did. The defect
+    /// was one line upstream: the caller mapped a failed `symlink_metadata`
+    /// to `Some(1)` — "this file has exactly one name" — which is the single
+    /// value that makes the outcome report no aliases at all. A call that
+    /// failed knows nothing about hard links, and the rewrite it reports on
+    /// leaves any other name pointing at the old inode, openable with the old
+    /// password (report18 HV18-M3).
+    ///
+    /// Asserted against the source because the call site needs a real file and
+    /// a metadata call that fails on it, which is not something a unit test
+    /// arranges. Narrow on purpose: it pins the one mapping, not the shape of
+    /// the function around it.
+    #[test]
+    fn a_metadata_failure_is_carried_as_unknown() {
+        let source = include_str!("mod.rs");
+        let at = source
+            .find("let source_links = match std::fs::symlink_metadata(path)")
+            .expect("the link-count read moved");
+        let arm = &source[at..at + 1500];
+        assert!(
+            arm.contains("Err(_) => None,"),
+            "a failed metadata read is reported as a definite link count"
+        );
+        assert!(
+            !arm.contains("Err(_) => Some(1),"),
+            "a failed metadata read claims the file has exactly one name"
+        );
     }
 
     /// And the same when the platform could not count the names.
