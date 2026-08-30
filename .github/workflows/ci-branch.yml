@@ -1,7 +1,12 @@
 name: CI (branch)
 
-# Lightweight per-push / per-PR gate. Runs on push to master and on
-# pull-requests; mirrors the local pre-tag gate in the local release checklist §4.
+# Lightweight per-push / per-PR gate. Runs on push to the default branch and
+# on pull-requests; mirrors the local pre-tag gate in the release checklist §4.
+#
+# It said `master` until 2026-08-30, and the default branch here is `main` —
+# so from the day it was written to that day it fired exactly never, and the
+# fast feedback it describes below was never once delivered. The check at the
+# end of this file exists so that cannot happen again quietly.
 #
 # This complements [`ci.yml`](ci.yml) which runs only on SemVer tag
 # push + manual dispatch and exercises the full multi-OS matrix.
@@ -9,6 +14,9 @@ name: CI (branch)
 # master gets a fmt/clippy/test/audit/doc-drift sanity check within
 # ~3-5 minutes, so the v3-style drift that audit pass 19 caught only
 # at tag-time would have been caught at push-time.
+#
+# GitHub-hosted runners are free for public repositories, and this repository
+# is public — the minute-spend this was once trimmed for is not a cost here.
 #
 # Scope (intentionally narrow):
 #   - Ubuntu only (the heavy macOS/Windows matrix lives in ci.yml).
@@ -22,9 +30,14 @@ name: CI (branch)
 
 on:
   push:
-    branches: [master]
+    branches: [main]
   pull_request:
-    branches: [master]
+    branches: [main]
+
+# One run per ref: a rapid series of pushes only needs the last one gated.
+concurrency:
+  group: ci-branch-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -37,6 +50,18 @@ permissions:
   contents: read
 
 jobs:
+  # First, and cheapest: does anything here run at all? This workflow was
+  # aimed at `master` on a repository whose default branch is `main`, and an
+  # unreachable trigger looks exactly like a quiet one.
+  reachable:
+    name: the triggers name a branch that exists
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: ./scripts/check-workflow-branches.sh
+
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
