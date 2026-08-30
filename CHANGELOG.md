@@ -13,6 +13,30 @@ public Rust + FFI + Dart APIs. The format generation did not move with it
 and no migration tool was required; the 2.0.0 entry says why, and names the
 one direction of container compatibility the release does not keep.
 
+## [2.0.6] — 2026-08-30
+
+### Fixed
+
+- **A native handle has one owner, and an isolate boundary made two.**
+  `SpaceHandleBindings`, `MultiSpaceHandleBindings` and the `HvSpace` /
+  `HvMultiSpace` facades over them are plain Dart objects holding a raw `int`
+  handle and a `_closed` flag of their own. Sending one to another isolate
+  deep-copies both. The copy takes no new Rust `Arc`, so two objects believe
+  they own one native handle: either can free it, and the other then clones or
+  frees a pointer that is gone — use-after-free, double-free, an allocator
+  abort, or a container lock left stranded, with nothing in Dart saying a word.
+  All four now carry `@pragma('vm:isolate-unsendable')`, which turns that into
+  a synchronous throw at the send. Found by the report18 audit (HV18-H1).
+
+### Note on the version
+
+Neither the on-disk format nor the public Rust or FFI API moved, so this is a
+patch. The Dart side did gain a restriction: passing one of those wrappers
+between isolates now throws where it previously compiled. Nothing in this
+package relied on it — the async helpers pass a PATH and open again on the far
+side, which is the supported way across and is now the only one — and what the
+restriction forbids was undefined behaviour, not a supported use.
+
 ## [2.0.5] — 2026-08-28
 
 No library change: every byte of the crate is v2.0.4. This release exists so
