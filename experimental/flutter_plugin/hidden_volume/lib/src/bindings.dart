@@ -1654,6 +1654,19 @@ void requireOptU64PairForTest(int? a, String an, int? b, String bn) {
 /// Low-level wrapper over the uniffi-exported `SpaceHandle` symbols.
 /// The typed facade in [`../hidden_volume.dart`] adds resource-management
 /// (close-on-finalize) and idiomatic naming on top.
+/// Never crosses an isolate boundary.
+///
+/// This is a plain Dart object holding one raw `int` handle and its own
+/// `_closed` flag. Sending it deep-copies BOTH — and a copy does not take a
+/// new Rust `Arc`, so two objects now believe they own one native handle.
+/// Either can free it; the other then clones or frees a pointer that is gone.
+/// Use-after-free, double-free, an allocator abort, or a container lock left
+/// stranded, and nothing in Dart says a word about it (report18 HV18-H1).
+///
+/// The pragma turns that into a synchronous send-time throw. Passing a PATH
+/// and opening again on the far side is the supported way across, and it is
+/// what this package's own async helpers already do.
+@pragma('vm:isolate-unsendable')
 class SpaceHandleBindings {
   SpaceHandleBindings._(this._handle) {
     _finalizer.attach(this, _handle, detach: this);
@@ -2107,6 +2120,8 @@ final _msVacuum = _dylib.lookupFunction<
 /// Low-level wrapper over the uniffi-exported `MultiSpaceHandle` symbols.
 /// Hosts several spaces of one container open at once under a single lock;
 /// per-space methods take a `spaceId` from [openSpace].
+/// Never crosses an isolate boundary — see [SpaceHandleBindings].
+@pragma('vm:isolate-unsendable')
 class MultiSpaceHandleBindings {
   MultiSpaceHandleBindings._(this._handle) {
     _msFinalizer.attach(this, _handle, detach: this);

@@ -95,6 +95,10 @@ export 'src/async_bindings.dart'
 /// (subsequent launches). Always [close] when done — the underlying
 /// file lock + memory release only when [close] runs (or when the Dart
 /// object is GC'd).
+/// Never crosses an isolate boundary: it owns a native handle through
+/// [ffi.SpaceHandleBindings], and a copy of the owner is a second owner of one
+/// handle.
+@pragma('vm:isolate-unsendable')
 class HvSpace {
   HvSpace._(this._inner);
 
@@ -405,6 +409,8 @@ void compactKnown(String path, List<Uint8List> passwords) =>
 /// Spaces are addressed by a small [int] id from [openSpace]. Every call
 /// serializes internally, so writes to different spaces never overlap (which is
 /// exactly what the single-writer lock requires). Always [close] when done.
+/// Never crosses an isolate boundary — see [HvSpace].
+@pragma('vm:isolate-unsendable')
 class HvMultiSpace {
   HvMultiSpace._(this._inner);
 
