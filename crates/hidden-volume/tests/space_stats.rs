@@ -248,3 +248,39 @@ fn total_entries_helper_sums_correctly() {
     let manual_sum: usize = stats.namespace_counts.iter().map(|(_, n)| n).sum();
     assert_eq!(manual_sum, stats.total_entries());
 }
+
+/// report21 HV21-L2: the entry count is carried in a width that cannot lose
+/// it.
+///
+/// `usize` is 32 bits on armv7 and i686 — both supported targets, one of them
+/// every 32-bit Android device — and the recursive sum was accumulated in it.
+/// A tree holding more than `2^32` entries panicked in debug and WRAPPED in
+/// release, after which the FFI widened the truncated number back to `u64` and
+/// could hand a caller zero for a space full of data. The format allows such a
+/// tree: at four-byte keys and empty values it is roughly 14.2M chunks, inside
+/// the 16M cap.
+///
+/// The container that would prove it is ~58 GB, so what is asserted here is
+/// the arithmetic: the wide count exists, agrees with the narrow one wherever
+/// the narrow one can answer, and the sum is exact rather than truncating.
+#[test]
+fn the_entry_count_is_carried_in_a_width_that_cannot_lose_it() {
+    let path = scratch_path();
+    let mut c = Container::create(&path, fast_params()).unwrap();
+    let mut s = c.create_space(b"pw").unwrap();
+    let mut tx = s.begin_tx();
+    for i in 0u16..40 {
+        tx.put(Namespace(7), &i.to_be_bytes(), b"v").unwrap();
+    }
+    tx.put(Namespace(8), b"c", b"3").unwrap();
+    tx.commit().unwrap();
+
+    // The wide answer and the narrow one agree while both can be given.
+    assert_eq!(s.count_u64(Namespace(7)).unwrap(), 40);
+    assert_eq!(s.count(Namespace(7)).unwrap(), 40);
+    assert_eq!(s.count_u64(Namespace(9)).unwrap(), 0, "an empty namespace");
+
+    let stats = s.stats().unwrap();
+    assert_eq!(stats.total_entries_u64(), 41);
+    assert_eq!(stats.total_entries(), 41);
+}

@@ -301,9 +301,23 @@ impl SpaceStats {
     /// Total entries across all namespaces (sum of `namespace_counts`
     /// values). Useful for a single "items in this profile" headline
     /// number in a UI.
+    ///
+    /// SATURATES rather than wrapping. Every element is already a count this
+    /// platform can hold — [`Space::count`] refuses to narrow one that is not
+    /// — so the sum can only exceed `usize` on a machine whose `usize` is 32
+    /// bits and a container far larger than the format's own chunk cap allows.
+    /// [`Self::total_entries_u64`] is the exact answer (report21 HV21-L2).
     #[must_use]
     pub fn total_entries(&self) -> usize {
-        self.namespace_counts.iter().map(|(_, n)| *n).sum()
+        usize::try_from(self.total_entries_u64()).unwrap_or(usize::MAX)
+    }
+
+    /// Total entries across all namespaces, in a width that cannot lose them.
+    #[must_use]
+    pub fn total_entries_u64(&self) -> u64 {
+        self.namespace_counts
+            .iter()
+            .fold(0u64, |acc, (_, n)| acc.saturating_add(*n as u64))
     }
 
     /// Fraction of the container file's slot grid that is owned by
@@ -1157,6 +1171,24 @@ impl<'f> Space<'f> {
     /// — O(N) but only chunk reads, no decode of values. There is no
     /// count cache: `count` is rarely on a UI hot path.
     pub fn count(&mut self, namespace: Namespace) -> Result<usize> {
+        let exact = self.count_u64(namespace)?;
+        usize::try_from(exact).map_err(|_| {
+            Error::Internal("entry count does not fit this platform's usize; use count_u64")
+        })
+    }
+
+    /// The same count as [`Self::count`], in a width that cannot lose it.
+    ///
+    /// `usize` is 32 bits on armv7 and i686 — both supported targets, one of
+    /// them every 32-bit Android device — and the recursive sum below was
+    /// accumulated in it: a tree holding more than `2^32` entries panicked in
+    /// debug and WRAPPED in release, after which the FFI widened the truncated
+    /// number back to `u64` and could hand a caller zero for a space full of
+    /// data. The format allows it: at four-byte keys and empty values that is
+    /// roughly 10.7M leaves, about 14.2M chunks, inside the 16M-chunk cap
+    /// (report21 HV21-L2). The arithmetic is `u64` and checked now, and the
+    /// narrow API says so rather than truncating.
+    pub fn count_u64(&mut self, namespace: Namespace) -> Result<u64> {
         let root_slot = match self.find_root_slot(namespace)? {
             Some(s) => s,
             None => return Ok(0),
@@ -1489,7 +1521,7 @@ impl<'f> Space<'f> {
         }
     }
 
-    fn count_leaves(&mut self, slot: u64, namespace: Namespace) -> Result<usize> {
+    fn count_leaves(&mut self, slot: u64, namespace: Namespace) -> Result<u64> {
         let mut walk = self.new_tree_walk();
         self.count_leaves_at(slot, namespace, 0, &mut walk)
     }
@@ -1500,15 +1532,20 @@ impl<'f> Space<'f> {
         namespace: Namespace,
         depth: u8,
         walk: &mut TreeWalk,
-    ) -> Result<usize> {
+    ) -> Result<u64> {
         walk.admit(slot, depth)?;
         let node = self.read_index_node_at_expected(slot, namespace)?;
         match node {
-            IndexNode::Leaf(l) => Ok(l.entries.len()),
+            IndexNode::Leaf(l) => Ok(l.entries.len() as u64),
             IndexNode::Internal(i) => {
-                let mut total = 0;
+                // `u64` and CHECKED. This accumulated in `usize`, which is 32
+                // bits on armv7 and i686 (report21 HV21-L2).
+                let mut total: u64 = 0;
                 for c in i.children {
-                    total += self.count_leaves_at(c.child_slot, namespace, depth + 1, walk)?;
+                    let child = self.count_leaves_at(c.child_slot, namespace, depth + 1, walk)?;
+                    total = total.checked_add(child).ok_or(Error::Internal(
+                        "entry count overflowed u64: the index tree is cyclic or corrupt",
+                    ))?;
                 }
                 Ok(total)
             },
@@ -2121,5 +2158,75 @@ mod pagination_cost_tests {
                  first page {first_reads} chunks, page from {start} {far_reads} chunks"
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod entry_count_width_tests {
+    use super::*;
+
+    /// report21 HV21-L2: the total is added up in a width that cannot lose it.
+    ///
+    /// `usize` is 32 bits on armv7 and i686, both supported targets, and this
+    /// sum ran in it. `SpaceStats` is `#[non_exhaustive]`, so only a test
+    /// inside the crate can build one with counts near the edge.
+    #[test]
+    fn a_total_too_large_for_this_platform_saturates_rather_than_wrapping() {
+        let stats = SpaceStats {
+            commit_seq: 0,
+            commit_history_len: 0,
+            owned_chunk_count: 0,
+            total_slot_count: 0,
+            reusable_slot_count: 0,
+            // The 32-bit edge, written so the case is the same shape on a
+            // 64-bit host: two counts whose sum needs one bit more than a
+            // 32-bit `usize` has.
+            namespace_counts: vec![(Namespace(1), u32::MAX as usize), (Namespace(2), 1)],
+        };
+        let exact = u64::from(u32::MAX) + 1;
+        assert_eq!(
+            stats.total_entries_u64(),
+            exact,
+            "the exact total wrapped instead of widening"
+        );
+        // On armv7 that does not fit and must saturate; on a 64-bit host it
+        // fits and must be exact. Either way it is never a small number.
+        assert_eq!(
+            stats.total_entries() as u64,
+            exact.min(usize::MAX as u64),
+            "a total too large for this platform wrapped to a small number \
+             instead of saturating"
+        );
+
+        // AND THE SAME CASE AT THIS HOST'S OWN EDGE, so the guard is not one
+        // that only a 32-bit runner can fail: summing these in `usize` wraps
+        // on any platform, which is a panic under the test profile's overflow
+        // checks and a small number in release.
+        let at_the_edge = SpaceStats {
+            commit_seq: 0,
+            commit_history_len: 0,
+            owned_chunk_count: 0,
+            total_slot_count: 0,
+            reusable_slot_count: 0,
+            namespace_counts: vec![(Namespace(1), usize::MAX), (Namespace(2), 1)],
+        };
+        assert!(
+            at_the_edge.total_entries_u64() >= usize::MAX as u64,
+            "the total came back SMALLER than one of the counts it adds up: \
+             the sum ran in the platform's pointer width and wrapped"
+        );
+        assert_eq!(at_the_edge.total_entries(), usize::MAX);
+
+        // Vacuity: an ordinary total is still the plain sum, in both widths.
+        let ordinary = SpaceStats {
+            commit_seq: 0,
+            commit_history_len: 0,
+            owned_chunk_count: 0,
+            total_slot_count: 0,
+            reusable_slot_count: 0,
+            namespace_counts: vec![(Namespace(1), 3), (Namespace(2), 4)],
+        };
+        assert_eq!(ordinary.total_entries_u64(), 7);
+        assert_eq!(ordinary.total_entries(), 7);
     }
 }

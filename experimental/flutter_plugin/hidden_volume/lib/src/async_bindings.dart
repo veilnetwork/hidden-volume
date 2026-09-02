@@ -767,6 +767,10 @@ class HvAsyncSpace {
   @visibleForTesting
   static Duration closeTimeout = const Duration(seconds: 5);
 
+  /// The same, for the finalizer's grace. Settable for the same reason.
+  @visibleForTesting
+  static Duration reapGrace = const Duration(seconds: 5);
+
   final Isolate _isolate;
   final SendPort _toWorker;
 
@@ -1427,14 +1431,34 @@ class _AbandonedWorker {
   final HvWorkerDeath death;
 
   /// How long the abandoned worker is given to close on its own terms.
-  static const _grace = Duration(seconds: 5);
+  static Duration get _grace => HvAsyncSpace.reapGrace;
 
-  /// Ask first, kill after.
+  /// Nothing the timeout produces, and nothing a worker can send.
+  static final Object _timedOut = Object();
+
+  /// Ask first, kill only where killing is safe.
   ///
   /// Killing alone does not release anything: the container's handle and its
   /// lock belong to the native side, and only a close hands them back. The
   /// kill is what stops the isolate keeping itself alive once the close has
   /// landed — or once it is clear none is coming.
+  ///
+  /// AND A WORKER THAT HAS NOT ANSWERED IS NOT KILLED. This is the same
+  /// decision [HvAsyncSpace.close] documents at length and made in report8;
+  /// the finalizer path kept the old behaviour, so the whole fix could be had
+  /// or lost depending on whether the caller remembered to close (report21
+  /// HV18-M1). A worker still silent after the grace is almost certainly
+  /// parked inside a synchronous FFI call, and an isolate kill cannot
+  /// interrupt or unwind an FFI frame: the native `Drop` never runs, the
+  /// container's flock stays held by THIS process, and every later open fails
+  /// `Busy` until the app restarts — the "correct password but won't unlock"
+  /// trap, arrived at here by garbage collection rather than by anything the
+  /// caller did.
+  ///
+  /// Leaving it alive costs nothing that killing would have saved: the worker
+  /// kills ITSELF the moment it has served the close (see the `_CloseRequest`
+  /// arm), so the isolate goes away as soon as the frame it is stuck in
+  /// returns.
   ///
   /// Nothing here throws or is awaited: a finalizer has no caller to report
   /// to, and an error escaping one would be lost anyway.
@@ -1443,12 +1467,19 @@ class _AbandonedWorker {
     unawaited(
       death
           .race(reply.first)
-          .timeout(_grace, onTimeout: () => null)
+          .then<Object?>((value) => value)
+          .timeout(_grace, onTimeout: () => _timedOut)
+          // An error means the worker is gone, which is one of the two states
+          // where a kill has nothing left to interrupt.
           .catchError((Object _) => null)
-          .whenComplete(() {
+          .then((outcome) {
         reply.close();
         death.dispose();
-        isolate.kill(priority: Isolate.immediate);
+        // The two safe cases: it answered (it is already tearing itself
+        // down), or it died (there is no frame left to unwind).
+        if (!identical(outcome, _timedOut)) {
+          isolate.kill(priority: Isolate.immediate);
+        }
       }),
     );
     try {

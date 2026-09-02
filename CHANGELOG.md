@@ -13,6 +13,44 @@ public Rust + FFI + Dart APIs. The format generation did not move with it
 and no migration tool was required; the 2.0.0 entry says why, and names the
 one direction of container compatibility the release does not keep.
 
+## [2.1.0] — 2026-09-02
+
+Minor rather than patch: two methods are ADDED to the public surface, and the
+tag-to-tag API gate is what said so. Nothing is removed and no signature
+changes, so an existing caller compiles untouched.
+
+### Fixed
+
+- **A finalizer no longer kills a worker that has not answered.** `close()` was
+  taught in report8 that a worker which has gone quiet is almost certainly
+  parked inside a synchronous FFI call, that an isolate kill cannot unwind an
+  FFI frame, and that killing one therefore leaves the native `Drop` unrun and
+  the container's flock held by this process until the app restarts — the
+  "correct password but won't unlock" trap. The FINALIZER path kept the old
+  behaviour: it asked, waited its grace and killed regardless. So the whole fix
+  could be had or lost depending on whether the caller remembered to close —
+  and the path where they did not is exactly the one a finalizer exists for.
+  It now kills only where killing is safe: after the worker answered, or after
+  it died. Leaving it alive costs nothing, because a worker kills itself the
+  moment it has served its close (report21 HV18-M1).
+
+- **The entry count is carried in a width that cannot lose it.** `usize` is 32
+  bits on armv7 and i686 — both supported targets, one of them every 32-bit
+  Android device — and the recursive sum over the index tree ran in it. A space
+  holding more than `2^32` entries panicked in debug and WRAPPED in release,
+  after which the FFI widened the truncated number back to `u64` and could hand
+  a caller zero for a space full of data. The format permits such a tree: at
+  four-byte keys and empty values it is roughly 14.2M chunks, inside the 16M
+  cap. The walk now adds in `u64` with `checked_add` (report21 HV21-L2).
+
+### Added
+
+- `Space::count_u64` and `SpaceStats::total_entries_u64` — the exact answers.
+  The narrow `count` refuses a value it cannot represent rather than
+  truncating, and `total_entries` saturates rather than wrapping; both are
+  unreachable states on a 64-bit host and the reason these exist on a 32-bit
+  one.
+
 ## [2.0.7] — 2026-09-02
 
 ### Fixed

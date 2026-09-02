@@ -40,9 +40,11 @@ void main() {
   setUp(() {
     // The wait is what is under test; five real seconds per case is not.
     HvAsyncSpace.closeTimeout = const Duration(milliseconds: 150);
+    HvAsyncSpace.reapGrace = const Duration(milliseconds: 150);
   });
   tearDown(() {
     HvAsyncSpace.closeTimeout = const Duration(seconds: 5);
+    HvAsyncSpace.reapGrace = const Duration(seconds: 5);
     // A stub deliberately left running must not outlive its test. Stop
     // watching BEFORE the kill, or its exit is reported as a death nobody is
     // listening for, after the test has already finished.
@@ -155,6 +157,50 @@ void main() {
       seen,
       isNot(contains('call')),
       reason: 'the isolate must be gone once its close has landed',
+    );
+  });
+
+  test('a worker nobody holds any more, that does NOT answer, is left alive',
+      () async {
+    // report21 HV18-M1. `close()` was taught in report8 that a worker which
+    // has not answered must not be killed — it is almost certainly parked
+    // inside a synchronous FFI call, an isolate kill cannot unwind an FFI
+    // frame, and the container's flock then stays held by this process until
+    // the app restarts. The FINALIZER path kept the old behaviour: it asked,
+    // waited its grace, and killed regardless. So the whole fix could be had
+    // or lost depending on whether the caller remembered to close — and the
+    // path where they did not is exactly the one the finalizer exists for.
+    //
+    // Leaving it alive costs nothing: the worker kills itself the moment it
+    // has served the close.
+    final events = ReceivePort();
+    final seen = <String>[];
+    events.listen((dynamic m) => seen.add('$m'));
+    addTearDown(events.close);
+
+    final live = await _spawnStubWorker(events.sendPort, answerClose: false);
+
+    HvAsyncSpace.debugReapAbandonedWorker(
+      isolate: live.isolate,
+      toWorker: live.port,
+      watch: live.watch,
+    );
+
+    await _pumpUntil(
+      () => seen.contains('close-requested'),
+      'the abandoned worker being asked to close',
+    );
+
+    // Well past the grace, with no answer ever sent.
+    await Future<void>.delayed(const Duration(milliseconds: 600));
+
+    // It must still be there to finish releasing the container.
+    seen.clear();
+    live.port.send(_Ping(events.sendPort));
+    await _pumpUntil(
+      () => seen.contains('call'),
+      'the worker surviving a reap it never answered — killed mid-FFI, its '
+      'native Drop never runs and every later open answers Busy',
     );
   });
 
