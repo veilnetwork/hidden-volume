@@ -1404,9 +1404,15 @@ impl<'f> Space<'f> {
                 // `into_secret_pairs` scrubs whatever the loop does not take,
                 // including the tail abandoned by the `break` below; the value
                 // taken on each turn is scrubbed here, where it is discarded.
-                for (k, mut value) in l.entries.into_secret_pairs() {
+                for (mut k, mut value) in l.entries.into_secret_pairs() {
                     value.zeroize();
                     if out.len() >= limit {
+                        // The pair in hand has ALREADY been moved out of the
+                        // iterator, so the tail scrub in `SecretItems::drop`
+                        // will never see it: without this the key leaves
+                        // through an ordinary drop, once per leaf the walk
+                        // reaches after the page is full (report21 HV18-L1).
+                        k.zeroize();
                         break;
                     }
                     if let Some(a) = after
@@ -1481,14 +1487,19 @@ impl<'f> Space<'f> {
                 // What it does not keep — everything below the cursor, and the
                 // tail past the limit — is plaintext nobody asked for, and it
                 // used to leave through an ordinary drop (report17 HV17-M6).
-                for (k, value) in l.entries.into_secret_pairs() {
+                for (mut k, mut value) in l.entries.into_secret_pairs() {
                     if out.len() >= limit {
+                        // Same as the keys walk above, and worse here: the
+                        // pair in hand has already been moved out of the
+                        // iterator, so BOTH halves of a full plaintext entry
+                        // left through an ordinary drop (report21 HV18-L1).
+                        k.zeroize();
+                        value.zeroize();
                         break;
                     }
                     if let Some(a) = after
                         && k.as_slice() <= a
                     {
-                        let (mut k, mut value) = (k, value);
                         k.zeroize();
                         value.zeroize();
                         continue;

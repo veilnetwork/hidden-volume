@@ -394,16 +394,21 @@ impl LeafNode {
         if self.entries.len() > u16::MAX as usize {
             return Err(Error::Malformed("too many entries in leaf"));
         }
-        // Audit pass 7 (C2): encoder/decoder symmetry. `decode`
-        // strict-rejects unsorted entries; `encode` previously
-        // accepted them silently, breaking encode→decode bijectivity
-        // if a writer-bug regression produced unsorted input. The
-        // debug-assert fails the regression in tests; release builds
-        // pay nothing.
-        debug_assert!(
-            self.entries.windows(2).all(|w| w[0].0 < w[1].0),
-            "LeafNode::encode requires entries sorted ascending by key"
-        );
+        // Encoder/decoder symmetry, ENFORCED rather than asserted. `decode`
+        // strict-rejects unsorted entries, so encoding them writes a chunk
+        // this very build refuses to read back.
+        //
+        // This was a `debug_assert!`, on the reasoning that it "fails the
+        // regression in tests; release builds pay nothing". Release builds
+        // paid an unreadable chunk, and debug builds paid an abort — a library
+        // taking the process down over an input it could have refused
+        // (report21 HV20-L2). The scan is linear over data this function is
+        // about to iterate anyway.
+        if !self.entries.windows(2).all(|w| w[0].0 < w[1].0) {
+            return Err(Error::Malformed(
+                "leaf entries must be sorted ascending by key, and unique",
+            ));
+        }
         let mut buf = Vec::with_capacity(total);
         buf.push(NODE_TYPE_LEAF);
         buf.push(self.namespace.0);
@@ -558,16 +563,17 @@ impl InternalNode {
         if self.children.len() > u16::MAX as usize {
             return Err(Error::Malformed("too many children in internal node"));
         }
-        // Audit pass 7 (C2): encoder/decoder symmetry — same
-        // rationale as `LeafNode::encode`. `decode` strict-rejects
-        // unsorted children; this debug-assert fails a writer-bug
-        // regression in tests.
-        debug_assert!(
-            self.children
-                .windows(2)
-                .all(|w| *w[0].first_key < *w[1].first_key),
-            "InternalNode::encode requires children sorted ascending by first_key"
-        );
+        // Same rule, same reason as `LeafNode::encode`: `decode` strict-rejects
+        // unsorted children, so this is refused rather than asserted.
+        if !self
+            .children
+            .windows(2)
+            .all(|w| *w[0].first_key < *w[1].first_key)
+        {
+            return Err(Error::Malformed(
+                "internal children must be sorted ascending by first_key, and unique",
+            ));
+        }
         let mut buf = Vec::with_capacity(total);
         buf.push(NODE_TYPE_INTERNAL);
         buf.push(self.namespace.0);
