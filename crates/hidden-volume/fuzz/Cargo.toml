@@ -25,7 +25,7 @@ cargo-fuzz = true
 
 [dependencies]
 # Path + version: cargo-deny requires it on path deps.
-hidden-volume = { path = "..", version = "2.1.2" }
+hidden-volume = { path = "..", version = "2.2.0" }
 libfuzzer-sys = "0.4"
 tempfile = "3.10"
 

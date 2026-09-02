@@ -11,6 +11,8 @@
 #
 # Captures:
 #   - top-level pub fn / struct / enum / trait / const / static / type
+#   - the VARIANTS of a public enum (adding one to a #[non_exhaustive]
+#     enum is a minor bump, and the gate could not see it)
 #     / mod / use lines
 #   - pub fn / pub async fn methods inside impl blocks
 #   - the union of all four workspace crates: hidden-volume,
@@ -165,6 +167,33 @@ for crate in "${CRATES[@]}"; do
             /^[[:space:]]*pub ((unsafe|const|async|extern)[[:space:]]+("[^"]*"[[:space:]]+)?)*(fn|struct|enum|trait|const|static|type|mod|use)/ {
                 sub(/^[[:space:]]+/, "  ")
                 print fname ": " $0
+                # The VARIANTS of a public enum are public API too, and
+                # this saw only the `pub enum` line. Adding, renaming or
+                # removing one
+                # passed the gate in silence — including on a
+                # `#[non_exhaustive]` enum, where adding a variant is a MINOR
+                # bump the version has to reflect. Found by walking through it:
+                # `Error::CreateCleanupFailed` was added, the gate said the
+                # surface was unchanged, and only the SemVer rule caught it
+                # (report21, alongside HV20-L3).
+                if ($0 ~ /enum[[:space:]]/ && $0 ~ /\{/) {
+                    in_enum = 1
+                    enum_depth = gsub(/\{/, "{") - gsub(/\}/, "}")
+                }
+                next
+            }
+            in_enum {
+                # A variant is a CamelCase name at the TOP level of the body.
+                # Struct-variant fields sit a level deeper and are lowercase,
+                # so the depth test and the case test each exclude them; both
+                # are here because either alone would admit something.
+                if (enum_depth == 1 && $0 ~ /^[[:space:]]*[A-Z][A-Za-z0-9_]*[[:space:]]*[({,=]/) {
+                    line = $0
+                    sub(/^[[:space:]]+/, "    variant ", line)
+                    print fname ": " line
+                }
+                enum_depth += gsub(/\{/, "{") - gsub(/\}/, "}")
+                if (enum_depth <= 0) in_enum = 0
                 next
             }
         ' "$file" >>"$TMP"

@@ -228,7 +228,36 @@ impl Container {
             // Drop first: the handle holds the exclusive flock, and unlinking
             // under it is needlessly platform-dependent.
             drop(file);
-            let _ = std::fs::remove_file(path);
+            // THE RESULT IS READ. It used to be discarded, so a cleanup that
+            // failed — a read-only mount, a handle another process holds, a
+            // permission that covers creating but not unlinking — left the
+            // stub AND said nothing about it. The caller learned only why the
+            // create failed, and their obvious retry answered `AlreadyExists`
+            // on a file they never knowingly made: precisely the state this
+            // cleanup exists to prevent, reached silently (report21 HV20-L3).
+            let removed = {
+                #[cfg(test)]
+                if create_cleanup_unlink_should_fail() {
+                    Err(std::io::Error::other("test hook: forced unlink failure"))
+                } else {
+                    std::fs::remove_file(path)
+                }
+                #[cfg(not(test))]
+                std::fs::remove_file(path)
+            };
+            if let Err(cleanup) = removed {
+                return Err(Error::CreateCleanupFailed {
+                    source: Box::new(e),
+                    cleanup,
+                });
+            }
+            // And the unlink is made durable. Without the directory barrier a
+            // power loss right after it brings the stub back, and the retry
+            // after the reboot answers `AlreadyExists` for the same reason.
+            // Best effort: an undurable removal is still a removal, and
+            // failing the create a second way over it would tell the caller
+            // less than the error they are already getting.
+            let _ = fsync_parent_dir(path);
             return Err(e);
         }
         file.padding_policy = options.padding_policy;
@@ -2215,6 +2244,24 @@ fn rename_durable(from: &std::path::Path, to: &std::path::Path) -> std::io::Resu
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only switch that makes the create-cleanup unlink report failure.
+    ///
+    /// The condition it simulates is real — a read-only mount, a handle
+    /// another process holds, a permission that covers creating but not
+    /// unlinking — and none of them can be arranged around ONE call from
+    /// inside a test: revoking write on the parent directory stops the create
+    /// long before the cleanup. Thread-local for the same reason as the
+    /// switches below it.
+    static CREATE_CLEANUP_UNLINK_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn create_cleanup_unlink_should_fail() -> bool {
+    CREATE_CLEANUP_UNLINK_FAILS.with(std::cell::Cell::get)
+}
+
 #[cfg(all(test, unix))]
 thread_local! {
     /// Test-only switch that makes [`fsync_parent_dir`] report failure.
@@ -2338,6 +2385,88 @@ mod post_rename_inode_tests {
         assert!(verify_renamed_inode(&f.0, None).is_ok());
         let missing = f.0.with_extension("does-not-exist");
         assert!(verify_renamed_inode(&missing, Some((0, 0))).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod create_cleanup_tests {
+    use super::*;
+    use crate::padding::PaddingPolicy;
+
+    fn doomed() -> ContainerOptions {
+        ContainerOptions {
+            argon2: Argon2Params::MIN,
+            // Past the write-side budget, so the fill fails on arithmetic
+            // rather than by trying to write tens of gigabytes.
+            initial_garbage_chunks: u64::MAX / 2,
+            padding_policy: PaddingPolicy::None,
+            superblock_replicas: 1,
+        }
+    }
+
+    /// report21 HV20-L3: a cleanup that fails is reported, not swallowed.
+    ///
+    /// The header is durable before the initial garbage is laid down, so a
+    /// failure there leaves a stub, and the unlink that removes it can itself
+    /// fail — a read-only mount, a handle another process holds, a permission
+    /// that covers creating but not unlinking. That result was discarded, so
+    /// the caller was told only why the CREATE failed while the path stayed
+    /// occupied, and the retry they obviously make next answered
+    /// `AlreadyExists` on a file they never knowingly made: the very state the
+    /// cleanup exists to prevent, reached in silence.
+    #[test]
+    fn a_cleanup_that_fails_is_reported_with_both_causes() {
+        let tmp = tempfile::NamedTempFile::new().expect("temp");
+        let path = tmp.path().to_owned();
+        drop(tmp);
+
+        CREATE_CLEANUP_UNLINK_FAILS.with(|c| c.set(true));
+        let err = Container::create_with_options(&path, doomed())
+            .expect_err("the oversized request must be refused");
+        CREATE_CLEANUP_UNLINK_FAILS.with(|c| c.set(false));
+
+        match &err {
+            Error::CreateCleanupFailed { source, cleanup } => {
+                // BOTH causes survive: why the create failed, and why the
+                // leftover is still there.
+                assert!(
+                    matches!(**source, Error::ContainerTooLarge { .. }),
+                    "the create's own cause was lost: {source:?}"
+                );
+                assert!(
+                    cleanup.to_string().contains("forced unlink failure"),
+                    "the cleanup's cause was lost: {cleanup}"
+                );
+            },
+            other => panic!(
+                "a failed cleanup was swallowed and reported as {other:?}; the \
+                 caller cannot tell that the path is now occupied"
+            ),
+        }
+        // And the message says what the caller is about to run into.
+        assert!(format!("{err}").contains("AlreadyExists"), "{err}");
+
+        // The file really is still there — the error is telling the truth.
+        assert!(path.exists(), "premise: the forced failure left the stub");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Vacuity: with the unlink working, the same failure reports the create's
+    /// own cause and leaves nothing behind — otherwise the test above would
+    /// pass on a build that always reports a cleanup failure.
+    #[test]
+    fn a_cleanup_that_works_reports_only_the_create() {
+        let tmp = tempfile::NamedTempFile::new().expect("temp");
+        let path = tmp.path().to_owned();
+        drop(tmp);
+
+        let err = Container::create_with_options(&path, doomed())
+            .expect_err("the oversized request must be refused");
+        assert!(
+            matches!(err, Error::ContainerTooLarge { .. }),
+            "got {err:?}"
+        );
+        assert!(!path.exists(), "a failed create left the path occupied");
     }
 }
 
