@@ -474,6 +474,34 @@ mod tests {
                  above is about nothing"
             );
         }
+
+        // AND THE ITEM IN HAND AT THE BREAK. The tail scrub in
+        // `SecretItems::drop` sees only what is still INSIDE the iterator, and
+        // the pair a loop is holding when it stops has already been moved out
+        // of it: without an explicit wipe that one leaves in the clear, once
+        // per leaf the walk reaches after its page is full (report21 HV18-L1).
+        for (name, expected) in [
+            (
+                "fn collect_leaf_keys_after_at",
+                &["k.zeroize();\n                        break;"][..],
+            ),
+            (
+                "fn collect_leaf_pairs_after_at",
+                &[
+                    "k.zeroize();\n                        value.zeroize();\n                        break;",
+                ][..],
+            ),
+        ] {
+            let body = body(space.as_str(), name);
+            for needle in expected {
+                assert!(
+                    body.contains(needle),
+                    "{name} breaks out of its walk holding a decoded pair and \
+                     drops it in the clear: the tail scrub cannot reach what \
+                     the iterator has already handed over"
+                );
+            }
+        }
     }
 
     /// report17 HV17-M6 — what a consumer does NOT take is still scrubbed.

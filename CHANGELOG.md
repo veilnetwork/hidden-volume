@@ -13,6 +13,26 @@ public Rust + FFI + Dart APIs. The format generation did not move with it
 and no migration tool was required; the 2.0.0 entry says why, and names the
 one direction of container compatibility the release does not keep.
 
+## [2.1.2] — 2026-09-02
+
+### Fixed
+
+- **An index node out of order is refused, not written.** `decode`
+  strict-rejects unsorted entries and unsorted children; `encode` checked the
+  same invariant with a `debug_assert!`, on the reasoning that it "fails the
+  regression in tests; release builds pay nothing". Release builds paid a chunk
+  this very build cannot read back, and debug builds paid an abort — a library
+  taking the process down over an input it could have refused. The fields are
+  public, so a caller can build either shape without going through the tree
+  code that keeps them sorted (report21 HV20-L2).
+
+- **The pair a KV walk is holding when it stops is wiped too.** Consuming a
+  leaf through `SecretItems` scrubs whatever stays INSIDE the iterator — and
+  the pair the loop already has in hand has been moved out of it. So the walk
+  that stops at a full page dropped that one in the clear: a key in the
+  keys-only walk, and both halves of a plaintext entry in the pairs walk, once
+  per leaf reached after the limit (report21 HV18-L1).
+
 ## [2.1.1] — 2026-09-02
 
 ### Fixed

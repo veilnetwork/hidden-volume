@@ -438,3 +438,81 @@ fn argon2_params_decode_short_input_rejected() {
         );
     }
 }
+
+/// report21 HV20-L2: an encoder must not produce what its own decoder refuses.
+///
+/// `decode` strict-rejects unsorted entries and unsorted children; `encode`
+/// checked the same invariant with a `debug_assert!`, on the reasoning that it
+/// "fails the regression in tests; release builds pay nothing". Release builds
+/// paid a chunk this very build cannot read back, and debug builds paid an
+/// abort — a library taking the process down over an input it could refuse.
+///
+/// The fields are public, so a caller can build either shape without going
+/// through the tree code that keeps them sorted.
+#[test]
+fn an_index_node_out_of_order_is_refused_rather_than_written() {
+    // Two keys the wrong way round.
+    let leaf = LeafNode {
+        namespace: Namespace(7),
+        entries: Redacted::new(vec![
+            (b"b".to_vec(), b"1".to_vec()),
+            (b"a".to_vec(), b"2".to_vec()),
+        ]),
+    };
+    let err = leaf.encode().expect_err(
+        "an unsorted leaf was encoded: the bytes it produces are refused by          this build's own decoder",
+    );
+    assert!(format!("{err}").contains("sorted"), "{err}");
+
+    // A duplicate key is the same refusal: `decode` requires STRICTLY
+    // ascending, so equal neighbours are as unreadable as reversed ones.
+    let dup = LeafNode {
+        namespace: Namespace(7),
+        entries: Redacted::new(vec![
+            (b"a".to_vec(), b"1".to_vec()),
+            (b"a".to_vec(), b"2".to_vec()),
+        ]),
+    };
+    assert!(dup.encode().is_err(), "a duplicate key was encoded");
+
+    // Vacuity: the sorted shape still encodes and still round-trips, or this
+    // test would pass on an encoder that refuses everything.
+    let good = LeafNode {
+        namespace: Namespace(7),
+        entries: Redacted::new(vec![
+            (b"a".to_vec(), b"1".to_vec()),
+            (b"b".to_vec(), b"2".to_vec()),
+        ]),
+    };
+    let bytes = good.encode().expect("a sorted leaf encodes");
+    assert_eq!(
+        LeafNode::decode(&bytes)
+            .expect("decodes")
+            .entries
+            .as_inner()
+            .len(),
+        2
+    );
+
+    // The same rule for internal children.
+    let child = |k: &[u8]| hidden_volume::space::index::ChildPointer {
+        first_key: Redacted::new(k.to_vec()),
+        child_slot: 1,
+        child_hash: [0u8; 32],
+    };
+    let unsorted = InternalNode {
+        namespace: Namespace(7),
+        children: vec![child(b"b"), child(b"a")],
+    };
+    let err = unsorted
+        .encode()
+        .expect_err("unsorted children were encoded");
+    assert!(format!("{err}").contains("sorted"), "{err}");
+
+    let sorted = InternalNode {
+        namespace: Namespace(7),
+        children: vec![child(b"a"), child(b"b")],
+    };
+    let bytes = sorted.encode().expect("sorted children encode");
+    assert!(InternalNode::decode(&bytes).is_ok());
+}
