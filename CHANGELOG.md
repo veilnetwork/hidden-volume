@@ -13,6 +13,26 @@ public Rust + FFI + Dart APIs. The format generation did not move with it
 and no migration tool was required; the 2.0.0 entry says why, and names the
 one direction of container compatibility the release does not keep.
 
+## [2.0.7] — 2026-09-02
+
+### Fixed
+
+- **The Argon2 working buffer is asked for, not assumed.** Its size comes from
+  the cleartext header — the one part of a container an adversary can edit
+  without a key — and the ceiling this format accepts is 512 MiB. The crate's
+  ordinary entry point builds that with `vec![Block; n]`, an infallible
+  allocation: where the allocator refuses, the process is gone, taking with it
+  whatever else the caller had open, and the library's own `Result` never gets
+  a chance to say so. The buffer is now reserved with `try_reserve_exact` and
+  handed to `hash_password_into_with_memory`, so a header this build will not
+  honour becomes a value the caller can handle (report21 HV21-M1).
+
+  The CEILING is deliberately unchanged and stays the same on every host. A
+  caller-supplied budget was considered when these constants were last moved
+  and refused for a stated reason — it would make a container that opens on a
+  desktop and refuses on a phone, for a format meant to be carried between
+  them. This changes how the limit is reached, not what it is.
+
 ## [2.0.6] — 2026-08-30
 
 ### Fixed
