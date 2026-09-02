@@ -396,18 +396,36 @@ const MAX_SB_CANDIDATES: usize = 64;
 /// older build may already hold one. Slots are append-only and the reduce is
 /// ordered, so the later entry is the later commit; first-wins silently
 /// reverted to the older one, losing a commit that had already returned Ok. It
-/// also matches `find_latest_superblock_reverse`, which scans backward and so
-/// already kept the highest slot.
+/// also matches the parallel reduce, whose right half holds the higher slots.
+///
+/// A scan that walks BACKWARD reaches the highest slot FIRST, so for it the
+/// same rule means keep the first seen rather than the last — which is why the
+/// direction is a parameter. This paragraph used to say the reverse scan
+/// "already kept the highest slot": it did not. Routing that loop through this
+/// helper, which inserts, made it keep the EARLIER of two same-seq payloads —
+/// the opposite of the rule stated here, in the one loop whose answer a fast
+/// open returns (report21 HV20-L1).
 ///
 /// **Lowest seqs are dropped.** `finalize_scan` walks candidates in descending
 /// seq and stops at the first that decodes, so anything below the top few is
 /// only ever reached if that many consecutive superblocks are
 /// malformed-but-AEAD-valid. The fall-through survives; the unbounded map does
 /// not.
+/// Which way a caller walks the slots, so "the highest slot wins" can be
+/// honoured either way round.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ScanOrder {
+    /// Slots arrive low to high: the LAST payload for a seq is the highest.
+    Ascending,
+    /// Slots arrive high to low: the FIRST payload for a seq is the highest.
+    Descending,
+}
+
 fn push_sb_candidate(
     candidates: &mut std::collections::BTreeMap<u64, Vec<u8>>,
     seq: u64,
     payload: Vec<u8>,
+    order: ScanOrder,
 ) {
     // No `debug_assert!` that same-seq payloads are bit-equal, though the
     // accumulation sites cited one for four audit passes. It cannot exist here:
@@ -417,7 +435,14 @@ fn push_sb_candidate(
     // reading a file this library must read. The condition is a writer-bug
     // signal only for containers THIS build wrote, and this function cannot
     // tell the two apart.
-    candidates.insert(seq, payload);
+    match order {
+        ScanOrder::Ascending => {
+            candidates.insert(seq, payload);
+        },
+        ScanOrder::Descending => {
+            candidates.entry(seq).or_insert(payload);
+        },
+    }
     while candidates.len() > MAX_SB_CANDIDATES {
         candidates.pop_first();
     }
@@ -613,6 +638,7 @@ fn accumulate_owned_slot(acc: &mut ScanAcc, slot: u64, mut pt: Plaintext) {
                 &mut acc.sb_candidates,
                 pt.seq,
                 std::mem::take(&mut pt.payload),
+                ScanOrder::Ascending,
             );
         }
     }
@@ -768,7 +794,14 @@ fn find_latest_superblock_reverse(
             // The cap keeps the highest seqs, which is what this function
             // returns; the D2 fallback depth becomes 64, the same as
             // everywhere else.
-            push_sb_candidate(&mut sb_candidates, pt.seq, std::mem::take(&mut pt.payload));
+            push_sb_candidate(
+                &mut sb_candidates,
+                pt.seq,
+                std::mem::take(&mut pt.payload),
+                // This loop counts DOWN from `total`, so the FIRST payload it
+                // sees for a seq is the one in the highest slot.
+                ScanOrder::Descending,
+            );
         }
     }
     Ok(sb_candidates.iter().rev().find_map(|(chunk_seq, payload)| {
@@ -1230,6 +1263,7 @@ fn scan_and_recover_parallel_inner(
                                 &mut acc.sb_candidates,
                                 pt.seq,
                                 std::mem::take(&mut pt.payload),
+                                ScanOrder::Ascending,
                             );
                         }
                     }
@@ -1255,7 +1289,9 @@ fn scan_and_recover_parallel_inner(
                 // tree of W workers compounds it. Bounding only the workers
                 // would have left the ceiling proportional to thread count.
                 for (seq, payload) in b.sb_candidates {
-                    push_sb_candidate(&mut a.sb_candidates, seq, payload);
+                    // `b` is the RIGHT half of an indexed reduce, so its
+                    // slots are the higher ones and last-wins keeps them.
+                    push_sb_candidate(&mut a.sb_candidates, seq, payload, ScanOrder::Ascending);
                 }
                 Ok(a)
             })
@@ -1470,7 +1506,12 @@ fn scan_and_recover_mmap_inner(
                 note_unparsable_sb(&mut unparsable_sb_seq, pt.seq);
             }
             if Superblock::is_valid_encoded_len(pt.payload.len()) {
-                push_sb_candidate(&mut sb_candidates, pt.seq, std::mem::take(&mut pt.payload));
+                push_sb_candidate(
+                    &mut sb_candidates,
+                    pt.seq,
+                    std::mem::take(&mut pt.payload),
+                    ScanOrder::Ascending,
+                );
             }
         }
     }
@@ -1599,7 +1640,7 @@ mod unreadable_superblock_rule_tests {
 
 #[cfg(test)]
 mod candidate_bound_tests {
-    use super::{MAX_SB_CANDIDATES, push_sb_candidate};
+    use super::{MAX_SB_CANDIDATES, ScanOrder, push_sb_candidate};
     use std::collections::BTreeMap;
 
     /// Audit H-02. The cap existed, but only in the sequential accumulator —
@@ -1610,7 +1651,7 @@ mod candidate_bound_tests {
     fn the_candidate_map_stays_bounded_however_many_arrive() {
         let mut map: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
         for seq in 0..(MAX_SB_CANDIDATES as u64 * 40) {
-            push_sb_candidate(&mut map, seq, vec![0u8; 48]);
+            push_sb_candidate(&mut map, seq, vec![0u8; 48], ScanOrder::Ascending);
             assert!(
                 map.len() <= MAX_SB_CANDIDATES,
                 "map grew to {} at seq {seq}",
@@ -1628,7 +1669,7 @@ mod candidate_bound_tests {
     fn the_highest_seqs_are_the_ones_kept() {
         let mut map: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
         for seq in 0..(MAX_SB_CANDIDATES as u64 * 3) {
-            push_sb_candidate(&mut map, seq, vec![0u8; 48]);
+            push_sb_candidate(&mut map, seq, vec![0u8; 48], ScanOrder::Ascending);
         }
         let lowest_kept = *map.keys().next().expect("non-empty");
         let highest_kept = *map.keys().next_back().expect("non-empty");
@@ -1643,10 +1684,54 @@ mod candidate_bound_tests {
     #[test]
     fn a_repeated_seq_keeps_the_later_payload() {
         let mut map: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
-        push_sb_candidate(&mut map, 7, vec![1u8; 48]);
-        push_sb_candidate(&mut map, 7, vec![2u8; 48]);
+        push_sb_candidate(&mut map, 7, vec![1u8; 48], ScanOrder::Ascending);
+        push_sb_candidate(&mut map, 7, vec![2u8; 48], ScanOrder::Ascending);
         assert_eq!(map.len(), 1);
         assert_eq!(map[&7], vec![2u8; 48]);
+    }
+
+    /// report21 HV20-L1: "the highest slot wins" has to mean that in BOTH
+    /// directions.
+    ///
+    /// The rule is stated once, and three of the four loops that use it walk
+    /// slots low to high — for them the last payload seen is the highest slot.
+    /// The reverse scan walks high to low, so for it the FIRST is; routing it
+    /// through a helper that inserts made it keep the EARLIER of two same-seq
+    /// payloads. That is the loop whose answer a fast open returns, and the
+    /// helper's own documentation claimed it "already kept the highest slot".
+    #[test]
+    fn walking_backward_keeps_the_highest_slot_too() {
+        // A descending walk sees the highest slot first.
+        let mut reverse: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
+        push_sb_candidate(&mut reverse, 7, vec![9u8; 48], ScanOrder::Descending);
+        push_sb_candidate(&mut reverse, 7, vec![1u8; 48], ScanOrder::Descending);
+        assert_eq!(
+            reverse[&7],
+            vec![9u8; 48],
+            "a backward scan kept the payload from the LOWER slot, so a fast \
+             open answers with the superblock that was superseded"
+        );
+
+        // Vacuity: the two orders really do differ on the same input, or one
+        // of them is not being exercised.
+        let mut forward: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
+        push_sb_candidate(&mut forward, 7, vec![9u8; 48], ScanOrder::Ascending);
+        push_sb_candidate(&mut forward, 7, vec![1u8; 48], ScanOrder::Ascending);
+        assert_eq!(forward[&7], vec![1u8; 48]);
+        assert_ne!(forward[&7], reverse[&7]);
+
+        // And the cap still applies whichever way the walk goes.
+        let mut capped: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
+        for seq in (0..(MAX_SB_CANDIDATES as u64 * 2)).rev() {
+            push_sb_candidate(&mut capped, seq, vec![0u8; 48], ScanOrder::Descending);
+        }
+        assert_eq!(capped.len(), MAX_SB_CANDIDATES);
+        assert_eq!(
+            *capped.keys().next_back().expect("non-empty"),
+            MAX_SB_CANDIDATES as u64 * 2 - 1,
+            "the cap dropped the highest seqs, which are the ones this scan \
+             returns"
+        );
     }
 }
 
