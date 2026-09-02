@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-09-02T17:27:30Z
+# Captured: 2026-09-02T18:15:53Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -45,6 +45,11 @@ chunk/format.rs:   pub fn zeroize_payload(&mut self) {
 chunk/format.rs:   pub fn encode(&self) -> Result<[u8; PLAINTEXT_LEN]> {
 chunk/format.rs:   pub fn decode(buf: &[u8]) -> Result<Self> {
 chunk/kind.rs: pub enum ChunkKind {
+chunk/kind.rs:     variant Superblock = 0x01,
+chunk/kind.rs:     variant IndexNode = 0x02,
+chunk/kind.rs:     variant Commit = 0x05,
+chunk/kind.rs:     variant DataBatch = 0x06,
+chunk/kind.rs:     variant Checkpoint = 0x07,
 chunk/kind.rs:   pub fn from_u8(b: u8) -> Result<Self> {
 chunk/mod.rs: pub mod format;
 chunk/mod.rs: pub mod kind;
@@ -52,6 +57,9 @@ chunk/mod.rs: pub use format::Plaintext;
 chunk/mod.rs: pub use kind::ChunkKind;
 container/file.rs: pub const DEFAULT_SUPERBLOCK_REPLICAS: u8 = 3;
 container/file.rs: pub enum LockMode {
+container/file.rs:     variant Exclusive,
+container/file.rs:     variant ExclusiveReadOnly,
+container/file.rs:     variant Shared,
 container/file.rs:   pub fn allows_writes(self) -> bool {
 container/file.rs: pub struct ContainerFile {
 container/file.rs:   pub fn create<P: AsRef<Path>>(path: P, params: Argon2Params) -> Result<Self> {
@@ -149,6 +157,33 @@ crypto/rng.rs: pub fn fill(buf: &mut [u8]) -> Result<()> {
 crypto/rng.rs: pub fn random_array<const N: usize>() -> Result<[u8; N]> {
 error.rs: pub type Result<T, E = Error> = core::result::Result<T, E>;
 error.rs: pub enum Error {
+error.rs:     variant Io(#[from] std::io::Error),
+error.rs:     variant AuthFailed,
+error.rs:     variant UnreadableNewerState,
+error.rs:     variant SpaceAlreadyExists,
+error.rs:     variant Busy,
+error.rs:     variant ReadOnly,
+error.rs:     variant RenameVisibleDurabilityUncertain(&'static str),
+error.rs:     variant RenameVisibleContentUnverified(&'static str),
+error.rs:     variant SourceIsNotARegularFile(&'static str),
+error.rs:     variant RenameVisibleAliasesNotRevoked(u64),
+error.rs:     variant RenameVisibleAliasesUnknown,
+error.rs:     variant RenameVisibleAliasesAndDurabilityUncertain {
+error.rs:     variant PublishUncertain(&'static str),
+error.rs:     variant Malformed(&'static str),
+error.rs:     variant Kdf(&'static str),
+error.rs:     variant CreateCleanupFailed {
+error.rs:     variant Internal(&'static str),
+error.rs:     variant PayloadTooLarge,
+error.rs:     variant IndexFull,
+error.rs:     variant Compression(&'static str),
+error.rs:     variant Cancelled,
+error.rs:     variant ReentrantRun,
+error.rs:     variant WouldBlock,
+error.rs:     variant WrongNamespaceKind(&'static str),
+error.rs:     variant TooManyNamespaces {
+error.rs:     variant ContainerTooLarge {
+error.rs:     variant IntegrityFailure {
 lib.rs: pub mod cancel;
 lib.rs: pub mod chunk;
 lib.rs: pub mod container;
@@ -190,6 +225,9 @@ open/mod.rs:   pub fn hits() -> u64 {
 open/mod.rs:   pub fn reset_hits() {
 open/mod.rs: pub const MAX_OPEN_SCAN_CHUNKS: u64 = 16 * 1024 * 1024;
 padding/mod.rs: pub enum PaddingPolicy {
+padding/mod.rs:     variant None,
+padding/mod.rs:     variant BucketGrowth {
+padding/mod.rs:     variant FixedRatio {
 padding/mod.rs:   pub const DEFAULT: Self = Self::BucketGrowth { bucket_chunks: 256 };
 padding/mod.rs:   pub fn from_persisted_index(idx: u8) -> Self {
 padding/mod.rs:   pub fn to_persisted_index(&self) -> Option<u8> {
@@ -217,6 +255,8 @@ space/index.rs: pub struct ChildPointer {
 space/index.rs: pub struct LeafNode {
 space/index.rs: pub struct InternalNode {
 space/index.rs: pub enum IndexNode {
+space/index.rs:     variant Leaf(LeafNode),
+space/index.rs:     variant Internal(InternalNode),
 space/index.rs:   pub fn encode(&self) -> Result<Vec<u8>> {
 space/index.rs:   pub fn decode(bytes: &[u8]) -> Result<Self> {
 space/index.rs:   pub fn new(namespace: Namespace) -> Self {
@@ -260,6 +300,9 @@ space/mod.rs: pub mod hardening_hooks {
 space/mod.rs:   pub fn set_sync_fails(v: bool) {
 space/mod.rs: pub struct HardeningFailure {
 space/mod.rs: pub enum HardeningStep {
+space/mod.rs:     variant Padding,
+space/mod.rs:     variant Churn,
+space/mod.rs:     variant Sync,
 space/mod.rs: pub struct SpaceStats {
 space/mod.rs:   pub fn total_entries(&self) -> usize {
 space/mod.rs:   pub fn total_entries_u64(&self) -> u64 {
@@ -300,6 +343,8 @@ space/vacuum.rs:   pub fn vacuum_after_open(&mut self) -> Result<usize> {
 space/vacuum.rs:   pub fn vacuum_data_batches(&mut self) -> Result<usize> {
 tx/commit.rs: pub const MAX_NAMESPACES_PER_TX: usize = (PAYLOAD_CAP - 2 - 32) / (1 + 1 + 8 + 32);
 tx/commit.rs: pub enum NamespaceKind {
+tx/commit.rs:     variant Kv = 0,
+tx/commit.rs:     variant Log = 1,
 tx/commit.rs:   pub fn as_u8(self) -> u8 {
 tx/commit.rs:   pub fn from_u8(b: u8) -> Result<Self> {
 tx/commit.rs: pub struct IndexRoot {
@@ -332,9 +377,18 @@ lib.rs:   pub fn wrap_open_constant_time(
 lib.rs:   pub fn wrap_open_with_keys_constant_time(
 lib.rs:   pub fn with_space_mut<R>(&mut self, f: impl for<'a> FnOnce(&mut Space<'a>) -> R) -> R {
 lib.rs: pub enum BlockingFailure {
+lib.rs:     variant Panicked,
+lib.rs:     variant Cancelled,
+lib.rs:     variant NotStarted,
 lib.rs: pub async fn run_blocking<F, T, E>(
 lib.rs: pub struct OpId(pub u64);
 lib.rs: pub enum OpOutcome {
+lib.rs:     variant Queued,
+lib.rs:     variant Running,
+lib.rs:     variant NeverStarted,
+lib.rs:     variant Succeeded,
+lib.rs:     variant Failed,
+lib.rs:     variant Lost,
 lib.rs:   pub fn is_settled(self) -> bool {
 lib.rs:   pub fn may_have_mutated(self) -> bool {
 lib.rs: pub struct AbandonedOp {
@@ -381,21 +435,67 @@ crate: hidden-volume-ffi
 ==========================================
 
 lib.rs: pub enum HvError {
+lib.rs:     variant Io(String),
+lib.rs:     variant AuthFailed,
+lib.rs:     variant SpaceAlreadyExists,
+lib.rs:     variant Busy,
+lib.rs:     variant ReadOnly,
+lib.rs:     variant Malformed(String),
+lib.rs:     variant Kdf(String),
+lib.rs:     variant Internal(String),
+lib.rs:     variant PayloadTooLarge,
+lib.rs:     variant IndexFull,
+lib.rs:     variant Compression(String),
+lib.rs:     variant Cancelled,
+lib.rs:     variant WrongNamespaceKind(String),
+lib.rs:     variant TooManyNamespaces {
+lib.rs:     variant IntegrityFailure {
+lib.rs:     variant ContainerTooLarge {
+lib.rs:     variant UnreadableNewerState,
+lib.rs:     variant RenameVisibleDurabilityUncertain(String),
+lib.rs:     variant RenameVisibleContentUnverified(String),
+lib.rs:     variant PublishUncertain(String),
+lib.rs:     variant SourceIsNotARegularFile(String),
+lib.rs:     variant RenameVisibleAliasesNotRevoked {
+lib.rs:     variant WouldBlock,
+lib.rs:     variant RenameVisibleAliasesUnknown,
+lib.rs:     variant RenameVisibleAliasesAndDurabilityUncertain {
 lib.rs: pub enum ArgonPreset {
+lib.rs:     variant Min,
+lib.rs:     variant Light,
+lib.rs:     variant Default,
+lib.rs:     variant Heavy,
 lib.rs: pub enum PaddingPreset {
+lib.rs:     variant None,
+lib.rs:     variant Bucket256Kib,
+lib.rs:     variant Bucket1Mib,
+lib.rs:     variant Bucket16Mib,
 lib.rs: pub struct HeaderInfo {
 lib.rs: pub fn header_info(path: String) -> HvResult<HeaderInfo> {
 lib.rs: pub struct PasswordRotation {
 lib.rs: pub fn compact_known(path: String, passwords: Vec<Vec<u8>>) -> HvResult<()> {
 lib.rs: pub fn change_passwords(path: String, rotations: Vec<PasswordRotation>) -> HvResult<()> {
 lib.rs: pub enum WriteOp {
+lib.rs:     variant Put {
+lib.rs:     variant Delete {
+lib.rs:     variant AppendLog {
+lib.rs:     variant DeleteLog {
 lib.rs: pub struct LogEntry {
 lib.rs: pub enum HardeningStepKind {
+lib.rs:     variant Padding,
+lib.rs:     variant Churn,
+lib.rs:     variant Sync,
 lib.rs: pub struct HardeningFailureInfo {
 lib.rs: pub struct StatsInfo {
 lib.rs:   pub fn utilization_ratio(&self) -> f64 {
 lib.rs: pub struct NamespaceCount {
 lib.rs: pub enum OperationOutcome {
+lib.rs:     variant Queued,
+lib.rs:     variant Running,
+lib.rs:     variant NeverStarted,
+lib.rs:     variant Succeeded,
+lib.rs:     variant Failed,
+lib.rs:     variant Lost,
 lib.rs: pub struct AbandonedOperation {
 lib.rs: pub struct IntegrityResult {
 lib.rs: pub struct SpaceHandle {

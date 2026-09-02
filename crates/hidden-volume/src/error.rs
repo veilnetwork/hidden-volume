@@ -235,6 +235,33 @@ pub enum Error {
     #[error("kdf: {0}")]
     Kdf(&'static str),
 
+    /// A `create` failed, AND the partly-made container it left behind could
+    /// not be removed.
+    ///
+    /// The header is durable before the initial garbage is laid down, so a
+    /// failure there leaves a stub, and the cleanup that removes it can itself
+    /// fail — a read-only mount, a handle another process still holds, a
+    /// permission the caller has for creating but not for unlinking. That
+    /// result used to be discarded, so the caller was told only why the create
+    /// failed and their obvious retry answered `AlreadyExists` on a file they
+    /// never knowingly made (report21 HV20-L3).
+    ///
+    /// Both causes are carried: `source` is why the create failed, `cleanup`
+    /// is why the leftover is still there. The path is not named — the caller
+    /// passed it and a container's existence is not this library's to
+    /// announce.
+    #[error(
+        "the container could not be created ({source}), and the partial file \
+         left behind could not be removed ({cleanup}) — a retry at this path \
+         will answer AlreadyExists"
+    )]
+    CreateCleanupFailed {
+        /// Why the create failed.
+        source: Box<Error>,
+        /// Why the leftover could not be removed.
+        cleanup: std::io::Error,
+    },
+
     /// Internal invariant violated. Indicates a bug in the crate; should
     /// never trigger for any input from disk.
     #[error("internal invariant: {0}")]

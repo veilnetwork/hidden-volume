@@ -13,6 +13,36 @@ public Rust + FFI + Dart APIs. The format generation did not move with it
 and no migration tool was required; the 2.0.0 entry says why, and names the
 one direction of container compatibility the release does not keep.
 
+## [2.2.0] — 2026-09-02
+
+Minor rather than patch: a variant is ADDED to the public `Error` enum. It is
+`#[non_exhaustive]`, so no downstream match breaks, but the surface grew.
+
+### Fixed
+
+- **A cleanup that fails is reported, not swallowed.** The header is durable
+  before a container's initial garbage is laid down, so a failure there leaves a
+  stub, and the unlink that removes it can itself fail — a read-only mount, a
+  handle another process holds, a permission that covers creating but not
+  unlinking. That result was discarded: the caller learned only why the CREATE
+  failed while the path stayed occupied, and the retry they obviously make next
+  answered `AlreadyExists` on a file they never knowingly made. Both causes are
+  carried now. The successful unlink is also followed by a parent-directory
+  fsync, so a power loss cannot bring the stub back (report21 HV20-L3).
+
+- **The API gate can see enum variants.** It could not, and this release is how
+  that was found: the variant above was added, the snapshot reported the surface
+  unchanged, and only the SemVer rule caught it. Adding a variant to a
+  `#[non_exhaustive]` enum is a minor bump the gate is supposed to make visible.
+  The extractor's own header claimed "top-level pub fn / struct / enum / …" and
+  meant the enum's DECLARATION line alone. It now captures the variants, which
+  is why this release's snapshot grows by a hundred lines that were always
+  public and never watched.
+
+### Added
+
+- `Error::CreateCleanupFailed { source, cleanup }`.
+
 ## [2.1.2] — 2026-09-02
 
 ### Fixed
