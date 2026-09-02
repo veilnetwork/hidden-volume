@@ -13,6 +13,25 @@ public Rust + FFI + Dart APIs. The format generation did not move with it
 and no migration tool was required; the 2.0.0 entry says why, and names the
 one direction of container compatibility the release does not keep.
 
+## [2.1.1] — 2026-09-02
+
+### Fixed
+
+- **"The highest slot wins" now means that in both directions.** The rule is
+  stated once and shared by four scan loops, three of which walk slots low to
+  high — for them the LAST payload seen under a seq is the one in the highest
+  slot, which is what the shared helper implemented. The reverse scan walks
+  high to low, so for it the FIRST is; routing it through a helper that inserts
+  made it keep the EARLIER of two same-seq payloads. That is the one loop whose
+  answer a fast open returns, and the helper's own documentation claimed it
+  "already kept the highest slot" — it did not.
+
+  Same-seq collisions are only reachable in a container an older build wrote,
+  and the full scan still corrects the answer, so this degrades the fast path
+  rather than rolling anything back. The direction is a parameter now, so each
+  loop states which way it walks and the rule is honoured either way round
+  (report21 HV20-L1).
+
 ## [2.1.0] — 2026-09-02
 
 Minor rather than patch: two methods are ADDED to the public surface, and the
