@@ -1093,13 +1093,23 @@ fn check_namespace(byte: u8) -> Result<(), HvError> {
 /// used to be read off disk, carried through the whole walk and then dropped
 /// here (report5 HV-04). `Space::list_keys` never builds them now, and this
 /// signature is what keeps a future caller from reintroducing the pair.
-fn frame_kv_keys(keys: &[Vec<u8>]) -> Vec<u8> {
+fn frame_kv_keys(keys: Vec<Vec<u8>>) -> Vec<u8> {
+    use zeroize::Zeroize as _;
     let total: usize = keys.iter().map(|k| 4 + k.len()).sum();
     let mut out = Vec::with_capacity(4 + total);
     out.extend_from_slice(&(keys.len() as u32).to_le_bytes());
-    for k in keys {
+    // BY VALUE, and each source erased once it has been copied.
+    //
+    // These are decrypted keys. Framing them borrowed the caller's vector and
+    // copied every one into `out`, and the originals then went out through an
+    // ordinary drop — so each key existed twice and only one of the two was
+    // ever handed anywhere. The frame is the caller's to hold; the copy this
+    // function read from is nobody's, and it stayed in the allocator
+    // (report21 HV18-L4).
+    for mut k in keys {
         out.extend_from_slice(&(k.len() as u32).to_le_bytes());
-        out.extend_from_slice(k);
+        out.extend_from_slice(&k);
+        k.zeroize();
     }
     out
 }
@@ -1371,7 +1381,7 @@ impl SpaceHandle {
         check_namespace(namespace)?;
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
         let keys = g.with_space_mut(|s| s.list_keys(Namespace(namespace)))?;
-        Ok(frame_kv_keys(&keys))
+        Ok(frame_kv_keys(keys))
     }
 
     /// One page of [`Self::kv_keys`]: up to `limit` keys strictly greater
@@ -1399,7 +1409,7 @@ impl SpaceHandle {
         let keys = g.with_space_mut(|s| {
             s.list_keys_after(Namespace(namespace), after.as_deref(), limit as usize)
         })?;
-        Ok(frame_kv_keys(&keys))
+        Ok(frame_kv_keys(keys))
     }
 
     /// Read one KV value. Returns `None` if the key is absent.
@@ -1907,7 +1917,7 @@ impl AsyncSpaceHandle {
         check_namespace(namespace)?;
         self.run_op(move |s, _cancel| -> HvResult<Vec<u8>> {
             let keys = s.list_keys(Namespace(namespace))?;
-            Ok(frame_kv_keys(&keys))
+            Ok(frame_kv_keys(keys))
         })
         .await
     }
@@ -1924,7 +1934,7 @@ impl AsyncSpaceHandle {
         check_namespace(namespace)?;
         self.run_op(move |s, _cancel| -> HvResult<Vec<u8>> {
             let keys = s.list_keys_after(Namespace(namespace), after.as_deref(), limit as usize)?;
-            Ok(frame_kv_keys(&keys))
+            Ok(frame_kv_keys(keys))
         })
         .await
     }
@@ -2408,7 +2418,7 @@ impl MultiSpaceHandle {
         check_namespace(namespace)?;
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
         let keys = g.with_space(id as usize, |s| s.list_keys(Namespace(namespace)))??;
-        Ok(frame_kv_keys(&keys))
+        Ok(frame_kv_keys(keys))
     }
 
     /// One page of [`Self::kv_keys`] for space `id`: up to `limit` keys
@@ -2426,7 +2436,7 @@ impl MultiSpaceHandle {
         let keys = g.with_space(id as usize, |s| {
             s.list_keys_after(Namespace(namespace), after.as_deref(), limit as usize)
         })??;
-        Ok(frame_kv_keys(&keys))
+        Ok(frame_kv_keys(keys))
     }
 
     /// Current commit sequence of space `id`.

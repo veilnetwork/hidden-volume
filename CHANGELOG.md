@@ -13,6 +13,34 @@ public Rust + FFI + Dart APIs. The format generation did not move with it
 and no migration tool was required; the 2.0.0 entry says why, and names the
 one direction of container compatibility the release does not keep.
 
+## [2.2.1] — 2026-09-02
+
+### Fixed
+
+- **Framing decrypted keys for the FFI erases the copy it read from.** The
+  framer borrowed the caller's vector and copied every key into the output, and
+  the originals then left through an ordinary drop — so each key existed twice
+  and only one of the two was ever handed anywhere. The frame is the caller's
+  to hold; the vector this read from was nobody's, and it stayed in the
+  allocator. It is taken by value now and each source wiped once copied
+  (report21 HV18-L4).
+
+Two findings from the same registry were checked and NOT taken, both because
+the fix as proposed cannot be had:
+
+`HV18-L2` asks for a non-async outer wrapper so an async entry point's secret
+argument is guarded before the future is created — a real gap, since an
+`async fn` body does not run until the first poll and a future dropped unpolled
+frees its captured `Vec<u8>` in the clear. uniffi decides what is async from
+the `async` keyword itself (`sig.asyncness.is_some()`), so a
+`fn -> impl Future` is not exportable and the wrapper cannot exist. The shape
+that would work is a custom type whose lift produces a `Zeroizing`, which
+changes the type surface every generated binding is built against — a piece of
+work to plan, not to slip into a patch.
+
+`HV18-L3` asks the same of the Dart side's `SendPort` framing, where the copies
+are made by the isolate boundary itself and are not ours to erase.
+
 ## [2.2.0] — 2026-09-02
 
 Minor rather than patch: a variant is ADDED to the public `Error` enum. It is
