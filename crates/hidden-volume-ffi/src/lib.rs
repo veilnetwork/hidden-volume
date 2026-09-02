@@ -1340,8 +1340,11 @@ impl SpaceHandle {
     pub fn count(&self, namespace: u8) -> HvResult<u64> {
         check_namespace(namespace)?;
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
-        let n = g.with_space_mut(|s| s.count(Namespace(namespace)))?;
-        Ok(n as u64)
+        // `count_u64`, not `count as u64`: on a 32-bit host the narrow one
+        // refuses a count it cannot hold, and widening a truncated number back
+        // to 64 bits is how a full space reported zero (report21 HV21-L2).
+        let n = g.with_space_mut(|s| s.count_u64(Namespace(namespace)))?;
+        Ok(n)
     }
 
     /// Keys of every KV entry in `namespace`, framed into one byte buffer:
@@ -1886,8 +1889,8 @@ impl AsyncSpaceHandle {
     pub async fn count(&self, namespace: u8) -> HvResult<u64> {
         check_namespace(namespace)?;
         self.run_op(move |s, _cancel| -> HvResult<u64> {
-            let n = s.count(Namespace(namespace))?;
-            Ok(n as u64)
+            let n = s.count_u64(Namespace(namespace))?;
+            Ok(n)
         })
         .await
     }
@@ -2392,8 +2395,8 @@ impl MultiSpaceHandle {
     pub fn count(&self, id: u32, namespace: u8) -> HvResult<u64> {
         check_namespace(namespace)?;
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
-        let n = g.with_space(id as usize, |s| s.count(Namespace(namespace)))??;
-        Ok(n as u64)
+        let n = g.with_space(id as usize, |s| s.count_u64(Namespace(namespace)))??;
+        Ok(n)
     }
 
     /// Keys of every KV entry in `namespace` of space `id`, framed as in

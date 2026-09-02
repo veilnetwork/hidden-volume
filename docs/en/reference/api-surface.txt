@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-08-28T05:40:45Z
+# Captured: 2026-09-02T14:47:46Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -262,6 +262,7 @@ space/mod.rs: pub struct HardeningFailure {
 space/mod.rs: pub enum HardeningStep {
 space/mod.rs: pub struct SpaceStats {
 space/mod.rs:   pub fn total_entries(&self) -> usize {
+space/mod.rs:   pub fn total_entries_u64(&self) -> u64 {
 space/mod.rs:   pub fn utilization_ratio(&self) -> f64 {
 space/mod.rs: pub struct IntegrityReport {
 space/mod.rs: pub struct Space<'f> {
@@ -282,6 +283,7 @@ space/mod.rs:   pub fn list_keys(&mut self, namespace: Namespace) -> Result<Vec<
 space/mod.rs:   pub fn list_keys_after(
 space/mod.rs:   pub fn list_after(
 space/mod.rs:   pub fn count(&mut self, namespace: Namespace) -> Result<usize> {
+space/mod.rs:   pub fn count_u64(&mut self, namespace: Namespace) -> Result<u64> {
 space/mod.rs:   pub fn erase_namespace(&mut self, namespace: Namespace) -> Result<usize> {
 space/mod.rs:   pub fn list_namespaces(&mut self) -> Result<Vec<Namespace>> {
 space/mod.rs:   pub fn list_namespaces_with_kind(
@@ -545,6 +547,7 @@ src/async_bindings.dart: class HvAsyncSpace {
 src/async_bindings.dart:   static HvAsyncSpace debugOverWorker({
 src/async_bindings.dart:   static void debugReapAbandonedWorker({
 src/async_bindings.dart:   static Duration closeTimeout = const Duration(seconds: 5);
+src/async_bindings.dart:   static Duration reapGrace = const Duration(seconds: 5);
 src/async_bindings.dart:   HvOpOutcome outcomeOf(int opId) =>
 src/async_bindings.dart:   static Future<HvAsyncSpace> create({
 src/async_bindings.dart:   static Future<HvAsyncSpace> open({
