@@ -349,8 +349,30 @@ fn derive_master_key_unvalidated(
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, a2_params);
 
     let mut argon_out = Zeroizing::new([0u8; 32]);
+    // The working buffer, allocated FALLIBLY.
+    //
+    // `hash_password_into` builds it with `vec![Block::default(); n]`, and an
+    // infallible allocation of a size taken from a CLEARTEXT header is a
+    // process abort waiting for the right file: the ceiling this format
+    // accepts is 512 MiB, so a container an adversary edited — or one that
+    // merely came off a larger machine — turns "this file will not open" into
+    // "the process is gone", on a library whose caller is holding other
+    // people's data open (report21 HV21-M1). `try_reserve_exact` makes the
+    // refusal a value the caller can handle.
+    //
+    // The CEILING itself is deliberately not host-selectable: see
+    // `MAX_M_COST_KIB`, where a caller-supplied budget was considered and
+    // refused because it would make a container open on a desktop and refuse
+    // on a phone. This changes how the limit is reached, not what it is.
+    let blocks = argon.params().block_count();
+    let mut memory: Vec<argon2::Block> = Vec::new();
+    memory
+        .try_reserve_exact(blocks)
+        .map_err(|_| Error::Kdf("not enough memory for this header's argon2 parameters"))?;
+    // Cannot reallocate: the capacity is already there.
+    memory.resize(blocks, argon2::Block::default());
     argon
-        .hash_password_into(password, salt, argon_out.as_mut_slice())
+        .hash_password_into_with_memory(password, salt, argon_out.as_mut_slice(), &mut memory)
         .map_err(|_| Error::Kdf("argon2 hash failed"))?;
 
     // v3 #9: BLAKE3-keyed step binding `version` into the master key.
@@ -390,6 +412,59 @@ mod tests {
 
     fn base() -> Argon2Params {
         Argon2Params::DEFAULT
+    }
+
+    /// report21 HV21-M1: the working buffer is asked for, not assumed.
+    ///
+    /// The size comes from a CLEARTEXT header — the one part of a container an
+    /// adversary can edit without a key — and the ceiling this format accepts
+    /// is 512 MiB. `hash_password_into` builds that with `vec![Block; n]`, an
+    /// infallible allocation: where the allocator refuses, the process is
+    /// gone, taking with it whatever else the caller had open. A library owes
+    /// its caller a value it can handle.
+    ///
+    /// Asserted on the SOURCE rather than by exhausting memory: a test that
+    /// really claims half a gigabyte on a developer's machine is a test nobody
+    /// runs twice, and the failure it would prove is the allocator's, not
+    /// ours.
+    #[test]
+    fn the_argon2_working_buffer_is_reserved_fallibly() {
+        let src = include_str!("kdf.rs");
+        let derive = src
+            .split("fn derive_master_key_unvalidated")
+            .nth(1)
+            .and_then(|t| t.split("#[cfg(test)]").next())
+            .expect("the derivation");
+        assert!(
+            derive.contains("try_reserve_exact(blocks)"),
+            "the argon2 memory is allocated infallibly again: a header this \
+             library refuses to honour can abort the process that read it"
+        );
+        assert!(
+            derive.contains("hash_password_into_with_memory("),
+            "the reserved buffer is not the one argon2 uses, so the fallible \
+             reservation proves nothing"
+        );
+        assert!(
+            !derive.contains(".hash_password_into(password"),
+            "the infallible entry point is back, and it allocates the buffer \
+             itself"
+        );
+
+        // The ceiling is unchanged and stays the same on every host: a
+        // caller-supplied budget was considered and refused, because it makes
+        // a container that opens on a desktop and refuses on a phone.
+        assert_eq!(Argon2Params::MAX_M_COST_KIB, 512 * 1024);
+        assert_eq!(Argon2Params::MAX_T_COST, 8);
+        assert_eq!(Argon2Params::MAX_P_COST, 16);
+
+        // And a derivation at the DEFAULT cost still works through the new
+        // path, or the reservation has broken the only thing it touches.
+        let key = derive_master_key(b"password", &[7u8; crate::HEADER_SALT_LEN], base())
+            .expect("a default-cost derivation");
+        let again = derive_master_key(b"password", &[7u8; crate::HEADER_SALT_LEN], base())
+            .expect("deterministic");
+        assert_eq!(key.as_slice(), again.as_slice());
     }
 
     /// Round-trip `with_padding_policy_index(idx)` →
