@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.2.2 — 2026-09-03
+
+**Argon2's working matrix is wiped, by something that actually runs.**
+
+The matrix is the password's expansion — 64 MiB at the defaults, up to 512 MiB
+— and the master key is derivable from what is left in it. It was handed back
+to the allocator exactly as it stood, on the success path, the error path and
+an unwind alike, while the memory audit listed it under "key material,
+zeroized".
+
+Enabling the `argon2` crate's `zeroize` feature is what made that claim look
+true. It is not what the feature does: it gives `Block` an inherent
+`zeroize()` and NO `Drop`, and `hash_password_into_with_memory` never touches
+the caller's buffer. So the row credited a wipe that no code performed, and
+the test guarding it only checked that the feature appeared in `Cargo.toml` —
+a string in a manifest standing in for a behaviour (report22 HV-KDF-WIPE).
+
+The matrix is now held in a `Zeroizing`, which runs the wipe however the
+function leaves. The guard beside it proves three things instead of one: that
+the wipe exists for the type held, that it really clears the bytes, and that
+the derivation's buffer is inside something that runs it. The audit row now
+says what performs the wipe rather than what makes it expressible.
+
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).

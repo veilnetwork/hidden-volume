@@ -371,6 +371,20 @@ fn derive_master_key_unvalidated(
         .map_err(|_| Error::Kdf("not enough memory for this header's argon2 parameters"))?;
     // Cannot reallocate: the capacity is already there.
     memory.resize(blocks, argon2::Block::default());
+    // WIPED on the way out, by every path.
+    //
+    // This buffer is Argon2's working matrix: 64 MiB by default and up to 512
+    // MiB, and the master key is derivable from what is left in it. It used to
+    // be a plain `Vec` handed back to the allocator as it stood — through the
+    // success path, the error path and an unwind alike — while the memory
+    // audit listed it under "key material, zeroized" (report22 HV-KDF-WIPE).
+    //
+    // Enabling argon2's `zeroize` feature is what made that claim look true.
+    // It is not: the feature gives `Block` an inherent `zeroize()` and NO
+    // `Drop`, and `hash_password_into_with_memory` never touches the caller's
+    // buffer. Nothing was scrubbing this. `Zeroizing` is what actually runs a
+    // wipe when the value goes, whichever way it goes.
+    let mut memory = zeroize::Zeroizing::new(memory);
     argon
         .hash_password_into_with_memory(password, salt, argon_out.as_mut_slice(), &mut memory)
         .map_err(|_| Error::Kdf("argon2 hash failed"))?;
@@ -412,6 +426,72 @@ mod tests {
 
     fn base() -> Argon2Params {
         Argon2Params::DEFAULT
+    }
+
+    /// report22 HV-KDF-WIPE: the working matrix is wiped, and by something
+    /// that actually runs.
+    ///
+    /// Argon2's matrix is the password's expansion — 64 MiB by default, up to
+    /// 512 MiB — and the master key is derivable from what is left in it. It
+    /// was handed back to the allocator as it stood while the memory audit
+    /// listed it as zeroized, because enabling argon2's `zeroize` feature
+    /// looks like it does that. It does not: the feature gives `Block` an
+    /// inherent `zeroize()` and no `Drop` at all.
+    ///
+    /// Three things, because each alone is satisfiable without the wipe: that
+    /// the wipe EXISTS for this type, that it really clears the bytes, and
+    /// that the buffer in the derivation is inside something that runs it.
+    #[test]
+    fn the_argon_matrix_is_wiped_on_the_way_out() {
+        // 1. The trait is there for the exact type held. Without argon2's
+        //    `zeroize` feature this does not compile, which is the only way
+        //    the manifest guard in `derive.rs` can matter.
+        fn assert_zeroize<T: zeroize::Zeroize>() {}
+        assert_zeroize::<Vec<argon2::Block>>();
+
+        // 2. And it does the work. A `Block` is 1 KiB of u64 lanes; filling
+        //    one and zeroizing must leave nothing.
+        let mut blocks = vec![argon2::Block::default(); 2];
+        for b in blocks.iter_mut() {
+            for lane in AsMut::<[u64]>::as_mut(b) {
+                *lane = 0xA5A5_A5A5_A5A5_A5A5;
+            }
+        }
+        let any_set = |bs: &[argon2::Block]| {
+            bs.iter()
+                .any(|b| AsRef::<[u64]>::as_ref(b).iter().any(|l| *l != 0))
+        };
+        assert!(
+            any_set(&blocks),
+            "the fixture wrote nothing, so the assertion below is vacuous",
+        );
+        zeroize::Zeroize::zeroize(&mut blocks);
+        assert!(
+            !any_set(&blocks),
+            "zeroizing the matrix type left bytes behind",
+        );
+
+        // 3. The derivation puts its matrix inside one. Structural because
+        //    the alternative is reading freed memory, which is exactly the
+        //    thing no test can do honestly.
+        let source = include_str!("kdf.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let at = production
+            .find("fn derive_master_key_unvalidated")
+            .expect("the derivation moved; re-aim this guard");
+        let body = &production[at..];
+        let end = body.find("\n}\n").expect("no end of function");
+        let body = &body[..end];
+        assert!(
+            body.contains("let mut memory = zeroize::Zeroizing::new(memory);"),
+            "the argon2 matrix is no longer wrapped, so it goes back to the \
+             allocator holding the password's expansion",
+        );
+        assert!(
+            body.contains("hash_password_into_with_memory"),
+            "vacuity: the derivation no longer feeds a caller-owned matrix, \
+             so this guard is about nothing",
+        );
     }
 
     /// report21 HV21-M1: the working buffer is asked for, not assumed.
