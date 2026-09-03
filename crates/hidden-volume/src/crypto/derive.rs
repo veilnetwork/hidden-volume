@@ -250,7 +250,11 @@ mod hv15_wipe_reach_tests {
             (
                 "argon2",
                 "Argon2's working memory is the password's expansion, tens of \
-                 mebibytes of it, and without this feature it is freed as-is",
+                 mebibytes of it. NOTE what this feature does and does not \
+                 buy: it gives `Block` an inherent `zeroize()` and NO `Drop`, \
+                 so the feature alone wipes nothing — it only makes the wipe \
+                 expressible. What runs it is the `Zeroizing` around the \
+                 matrix in `kdf.rs`, guarded there (report22 HV-KDF-WIPE)",
             ),
             (
                 "blake3",
