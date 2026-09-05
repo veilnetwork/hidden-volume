@@ -411,6 +411,26 @@ pub(crate) struct SpaceState {
     /// new seq. Exposed via [`Space::commit_history`] for host-app
     /// rollback / multi-device anchor logic.
     pub commit_history: Vec<u64>,
+    /// The eras this space can still IDENTIFY: `(seq, root_hash)`, ascending.
+    ///
+    /// A seq alone cannot tell two branches apart. Both sides of a fork count
+    /// commits the same way, so "the anchored seq is in the history" — the
+    /// check the multi-device guide describes — says only that this space
+    /// reached that number, not that it is the same space that left it. The
+    /// root is what makes the pair unique to a branch: it is what that
+    /// commit published, and a different branch that reached the same seq
+    /// published something else (report22 HV-FORK-SEQ).
+    ///
+    /// A SUBSET of [`Self::commit_history`], and deliberately so. That list is
+    /// every seq whose Superblock chunk decrypted; this one is every era whose
+    /// Superblock also DECODED, because an era we cannot read is an era we
+    /// cannot identify, and offering it with a placeholder root would be a
+    /// claim rather than a record.
+    ///
+    /// Pairs rather than a second vector indexed alongside the first: two
+    /// lists that must stay the same length are two lists that will one day
+    /// not be.
+    pub commit_eras: Vec<(u64, [u8; 32])>,
     /// Audit M1 (2026-05-10). Last failure in the post-commit hardening
     /// steps (DESIGN §8, §9.1). Does NOT affect durability of the commit
     /// itself — see [`commit_tx`](crate::space::Space::commit_tx) docs.
@@ -592,6 +612,7 @@ impl SpaceState {
             },
             owned_slots: OwnedSet::default(),
             commit_history: Vec::new(),
+            commit_eras: Vec::new(),
             last_hardening_error: None,
             last_publish_error: None,
             roots_payload_cache: None,
@@ -762,6 +783,10 @@ impl<'f> Space<'f> {
         space.file.fsync()?;
         space.state.superblock = initial;
         space.state.commit_history.push(1);
+        space
+            .state
+            .commit_eras
+            .push((1, space.state.superblock.root_hash));
         Ok(space)
     }
 
@@ -857,6 +882,26 @@ impl<'f> Space<'f> {
     #[must_use]
     pub fn commit_history(&self) -> &[u64] {
         &self.state.commit_history
+    }
+
+    /// Every commit era this space can still recognise, as `(seq, root_hash)`.
+    ///
+    /// The pair, and not the seq, is what identifies a branch. Both sides of a
+    /// fork count commits the same way, so an anchor holding only a seq cannot
+    /// tell "this is the space I left" from "this is a copy that has since
+    /// been written to independently" — the two reach the same numbers and the
+    /// guide's `clean continuation` verdict is unsound on them. Matching the
+    /// PAIR is exact: a different branch that reached the same seq published a
+    /// different root (report22 HV-FORK-SEQ).
+    ///
+    /// **Privacy contract.** As [`Space::commit_history`]: do NOT publish this
+    /// for a decoy or duress space. The shape of the list is metadata about
+    /// activity, and the roots make each entry unique — an anchor kept for a
+    /// space belongs beside that space's own profile, never in a shared place
+    /// where its presence would say a second space exists.
+    #[must_use]
+    pub fn commit_history_with_roots(&self) -> &[(u64, [u8; 32])] {
+        &self.state.commit_eras
     }
 
     /// Set the post-commit padding policy on the underlying

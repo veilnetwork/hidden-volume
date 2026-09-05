@@ -558,6 +558,9 @@ impl<'f> Space<'f> {
         // cp_seq is strictly greater than every prior entry (bumped from
         // the max), so push preserves sort + uniqueness.
         self.state.commit_history.push(cp_seq);
+        self.state
+            .commit_eras
+            .push((cp_seq, self.state.superblock.root_hash));
         Ok(())
     }
 
