@@ -859,6 +859,23 @@ pub struct HardeningFailureInfo {
     pub message: String,
 }
 
+/// One commit era: the seq, and the root that era published.
+///
+/// The pair is what identifies a BRANCH. A seq alone cannot — both sides of a
+/// fork count commits the same way — so a host anchoring only a number cannot
+/// tell the space it left from a copy that has been written to since
+/// (report22 HV-FORK-SEQ).
+///
+/// `root_hash` is 32 bytes. It is a fingerprint of container state and belongs
+/// wherever that space's own anchor lives, never anywhere shared.
+#[derive(uniffi::Record, Debug, Clone)]
+pub struct CommitEra {
+    /// The commit sequence number this era published under.
+    pub seq: u64,
+    /// The Superblock root that commit published: 32 bytes.
+    pub root_hash: Vec<u8>,
+}
+
 /// Aggregated per-space stats. Parallels [`hidden_volume::space::SpaceStats`]
 /// but flattened for FFI.
 #[derive(uniffi::Record, Debug, Clone)]
@@ -1320,6 +1337,37 @@ impl SpaceHandle {
     pub fn commit_history(&self) -> HvResult<Vec<u64>> {
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
         Ok(g.with_space_mut(|s| s.commit_history().to_vec()))
+    }
+
+    /// The same history, with each era's `root_hash` — the pair a host needs
+    /// to tell two branches apart.
+    ///
+    /// A seq on its own cannot: both sides of a fork count commits the same
+    /// way, so an anchor holding only a number cannot distinguish "this is the
+    /// space I left" from "this is a copy that has been written to since". The
+    /// membership test the guide describes is unsound on exactly that case,
+    /// and a host had no way to make it sound because the root was never
+    /// exported (report22 HV-FORK-SEQ). Anchor the PAIR and match it exactly.
+    ///
+    /// A SUBSET of [`Self::commit_history`]: an era whose Superblock decrypted
+    /// but did not decode is a seq we saw and an era we cannot identify, and
+    /// it is left out rather than given a stand-in root.
+    ///
+    /// Same privacy contract as [`Self::commit_history`], and one more
+    /// besides: an anchor for a space belongs beside THAT space's own
+    /// profile. A shared place holding one entry per space would announce how
+    /// many exist, which is the thing the container is built to deny.
+    pub fn commit_history_with_roots(&self) -> HvResult<Vec<CommitEra>> {
+        let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
+        Ok(g.with_space_mut(|s| {
+            s.commit_history_with_roots()
+                .iter()
+                .map(|(seq, root)| CommitEra {
+                    seq: *seq,
+                    root_hash: root.to_vec(),
+                })
+                .collect()
+        }))
     }
 
     /// Override the post-commit padding policy on the open handle.
@@ -1873,6 +1921,21 @@ impl AsyncSpaceHandle {
     pub async fn commit_history(&self) -> HvResult<Vec<u64>> {
         self.run_op(move |s, _cancel| -> HvResult<Vec<u64>> { Ok(s.commit_history().to_vec()) })
             .await
+    }
+
+    /// The same history with each era's root — see
+    /// [`SpaceHandle::commit_history_with_roots`].
+    pub async fn commit_history_with_roots(&self) -> HvResult<Vec<CommitEra>> {
+        self.run_op(move |s, _cancel| -> HvResult<Vec<CommitEra>> {
+            Ok(s.commit_history_with_roots()
+                .iter()
+                .map(|(seq, root)| CommitEra {
+                    seq: *seq,
+                    root_hash: root.to_vec(),
+                })
+                .collect())
+        })
+        .await
     }
 
     /// Set the post-commit padding policy — see

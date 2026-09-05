@@ -417,6 +417,11 @@ impl<'f> Space<'f> {
         // monotonically increments seq), so push preserves sort order
         // and uniqueness of `commit_history` without re-sorting.
         self.state.commit_history.push(new_seq);
+        // The era, identified: the seq alone cannot tell this branch from one
+        // that reached the same number (report22 HV-FORK-SEQ).
+        self.state
+            .commit_eras
+            .push((new_seq, self.state.superblock.root_hash));
 
         // Post-commit padding (DESIGN §8): mask per-commit file size
         // growth from a multi-snapshot adversary. Garbage chunks are

@@ -2,7 +2,7 @@
 
 🇬🇧 **English** · [🇷🇺 Русский](../../ru/security/threat-model.md)
 
-**Status.** Working document, current as of crate v2.2.x. The shape
+**Status.** Working document, current as of crate v2.3.x. The shape
 does not change between releases — only specific findings are filled in.
 This line described the project as pre-release long after v2 shipped,
 which reads as a document nobody has revisited (report16 HV16-L1). No

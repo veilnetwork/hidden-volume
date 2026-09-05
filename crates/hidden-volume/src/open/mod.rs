@@ -699,6 +699,21 @@ fn finalize_scan_at(keys: SpaceKeys, acc: ScanAcc, total: u64) -> Result<SpaceSt
     // settled on is superseded history, not a writer that got ahead of us.
     let unreadable_newer_superblock = newer_unreadable_sb(undecodable_seq, superblock.seq);
 
+    // The eras this scan can IDENTIFY, from the same candidates the winner was
+    // chosen from — so the two can never disagree about what an era was. Every
+    // seq whose Superblock also decoded contributes its root; one that did not
+    // is left out rather than given a placeholder, because an era we cannot
+    // read is an era we cannot identify and a stand-in root would be a claim
+    // rather than a record (report22 HV-FORK-SEQ).
+    let commit_eras: Vec<(u64, [u8; 32])> = commit_history
+        .iter()
+        .filter_map(|seq| {
+            let payload = sb_candidates.get(seq)?;
+            let sb = Superblock::decode(payload).ok()?;
+            (sb.seq == *seq).then_some((*seq, sb.root_hash))
+        })
+        .collect();
+
     // The pool as recorded, MINUS everything this scan found we own. This
     // subtraction is what lets the recorded pool be as stale as the
     // checkpoint refresh policy allows: a slot a later commit reused
@@ -716,6 +731,7 @@ fn finalize_scan_at(keys: SpaceKeys, acc: ScanAcc, total: u64) -> Result<SpaceSt
         keys,
         superblock,
         owned_slots,
+        commit_eras,
         pool,
         pool_recovered: read_the_record,
         reuse_count: 0,

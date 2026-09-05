@@ -1,5 +1,37 @@
 # Changelog
 
+## 2.3.0 — 2026-09-05
+
+### Added
+
+- `Space::commit_history_with_roots()` and the FFI's `CommitEra` — every
+  commit era a space can still identify, as `(seq, root_hash)`.
+
+  A seq on its own does not identify a BRANCH. Both sides of a fork count
+  commits the same way, so a host anchoring only a number cannot tell "this is
+  the space I left" from "this is a copy that has been written to since": both
+  reach seq N and both pass a membership test on the number. The fork check the
+  multi-device guide describes was unsound on exactly the case it exists for,
+  and no host could make it sound, because the root was never exported. The
+  test that should have caught it said so itself — "our history is contiguous
+  so no gap exists; the fork detection logic *would* fire if a future repack
+  thinned history" (report22 HV-FORK-SEQ).
+
+  The new list is a SUBSET of `commit_history()`: an era whose Superblock
+  decrypted but did not decode is a seq we saw and an era we cannot identify,
+  and it is left out rather than handed a stand-in root.
+
+  Additive. `commit_history()` is unchanged, and nothing that used it has to
+  move.
+
+### Fixed
+
+- The multi-device guide described anchoring "optionally a fingerprint (e.g.
+  BLAKE3 over the Superblock seq and root_hash bytes — both already stored in
+  `Space`'s state)". `SpaceState` is `pub(crate)` and the root was not exported,
+  so that described an API which did not exist. Both language versions now
+  describe the pair, and say why the seq alone is not enough.
+
 ## 2.2.2 — 2026-09-03
 
 **Argon2's working matrix is wiped, by something that actually runs.**

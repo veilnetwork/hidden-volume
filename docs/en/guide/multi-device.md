@@ -152,10 +152,22 @@ committed". The host-app provides external anchors.
 
 ### Anchor primitive
 
-After every successful commit, the host-app records `commit_seq()`
-plus optionally a fingerprint (e.g., BLAKE3 over the Superblock seq
-and root_hash bytes — both already stored in `Space`'s state) to a
-location the adversary cannot rewrite:
+After every successful commit, the host-app records the era it just
+published — the PAIR `(seq, root_hash)`, from the last entry of
+`space.commit_history_with_roots()` — to a location the adversary
+cannot rewrite.
+
+**The pair, and not the seq alone.** Both sides of a fork count commits
+the same way, so an anchor holding only a number cannot tell "this is
+the space I left" from "this is a copy that has been written to since":
+both reach seq N and both pass a membership test on the number. The
+root is what a commit actually published, and a different branch that
+reached the same seq published something else. Until 2.3 the root was
+not exported at all, so this check could not be made soundly by any
+host — the version of this section that described a fingerprint over
+"the Superblock seq and root_hash bytes — both already stored in
+`Space`'s state" described an API that did not exist (report22
+HV-FORK-SEQ).
 
 | Storage | Pros | Cons |
 |---|---|---|
@@ -168,25 +180,29 @@ location the adversary cannot rewrite:
 
 On `Container::open_space`:
 
-1. Read external anchor `(anchor_seq, anchor_fp)`.
+1. Read external anchor `(anchor_seq, anchor_root)`.
 2. Compute current `current_seq = space.commit_seq()`.
 3. Compare:
    - `current_seq < anchor_seq` → **rollback**. Refuse to proceed; the
      file has been replaced with an older version. Surface to the user;
      do NOT silently accept new writes (you would lose anchored data).
-   - `current_seq >= anchor_seq` AND `anchor_seq` is in
-     `space.commit_history()` → **clean continuation**. Accept.
+   - `current_seq >= anchor_seq` AND `(anchor_seq, anchor_root)` is in
+     `space.commit_history_with_roots()` → **clean continuation**.
+     Accept. Match the PAIR: `anchor_seq` alone being present is what
+     both branches of a fork can say.
    - `current_seq - anchor_seq > hidden_volume::ANCHOR_HORIZON` →
      **out of range**. The anchor is older than the window the file
      keeps; its absence from `commit_history()` says nothing either
      way. Re-anchor from the current state and, if the host has another
      way to check (a server counter, a second device), use that. Do NOT
      treat this as a fork.
-   - `current_seq >= anchor_seq`, within the horizon, AND `anchor_seq`
-     is NOT in `space.commit_history()` → **fork**. The file's timeline
-     diverges from your anchor. Treat as adversarial.
+   - `current_seq >= anchor_seq`, within the horizon, AND the pair is
+     NOT in `space.commit_history_with_roots()` → **fork**. The file's
+     timeline diverges from your anchor. Treat as adversarial. This
+     covers the case the seq test could not: the anchored NUMBER is
+     there and the era it names is somebody else's.
 
-The `commit_history()` membership test is the part that distinguishes
+The membership test is the part that distinguishes
 "someone reset the file to an even *newer* state I never committed"
 from "I just opened a file I haven't touched in a while".
 

@@ -272,3 +272,65 @@ fn readonly_exposes_history() {
     assert_eq!(s.commit_history(), &[1, 2]);
     assert_eq!(s.commit_seq(), 2);
 }
+
+/// A seq is not a branch: the pair is (report22 HV-FORK-SEQ).
+///
+/// The guide's fork test — "is the anchored seq in `commit_history()`" — is
+/// unsound on the case it exists for. Two branches of one container count
+/// commits the same way, so both reach seq N and both answer yes. The test
+/// that should have caught it says so itself: "Our history is contiguous
+/// [1..=4] so no gap exists; the fork detection logic *would* fire if a future
+/// repack thinned history."
+///
+/// What tells them apart is what each commit PUBLISHED, and that is the root.
+#[test]
+fn an_era_is_identified_by_its_root_and_not_only_its_seq() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_owned();
+    drop(tmp);
+    let mut c = Container::create(&path, fast_params()).unwrap();
+    let mut space = c.create_space(b"pw").unwrap();
+
+    let mut anchors: Vec<(u64, [u8; 32])> = Vec::new();
+    for i in 0..4u8 {
+        let mut tx = space.begin_tx();
+        tx.put(Namespace::SETTINGS, format!("k{i}").as_bytes(), b"v")
+            .unwrap();
+        tx.commit().unwrap();
+        let eras = space.commit_history_with_roots();
+        anchors.push(*eras.last().expect("an era for the commit just made"));
+    }
+
+    // Every era is identified exactly once, and no two eras share a root.
+    let seqs: std::collections::BTreeSet<u64> = anchors.iter().map(|(s, _)| *s).collect();
+    assert_eq!(seqs.len(), anchors.len(), "two eras reported the same seq");
+    let roots: std::collections::BTreeSet<[u8; 32]> = anchors.iter().map(|(_, r)| *r).collect();
+    assert_eq!(
+        roots.len(),
+        anchors.len(),
+        "two eras published the same root, so the pair identifies nothing"
+    );
+
+    // The pair an anchor would hold is present, exactly.
+    let eras = space.commit_history_with_roots();
+    for anchor in &anchors {
+        assert!(
+            eras.contains(anchor),
+            "an era this space published is not in its own history: {anchor:?}"
+        );
+    }
+
+    // And the thing the old check could not do: a pair whose SEQ is present
+    // but whose root is somebody else's is refused, while the seq alone still
+    // says yes — which is the whole defect.
+    let (seq, mut other_root) = anchors[2];
+    other_root[0] ^= 0xff;
+    assert!(
+        space.commit_history().contains(&seq),
+        "the seq test cannot tell the branches apart — it is why this exists"
+    );
+    assert!(
+        !eras.contains(&(seq, other_root)),
+        "a different branch reaching the same seq was accepted as this one"
+    );
+}

@@ -235,6 +235,7 @@ impl<'f> Space<'f> {
             // and a host comparing the two reads a fork where there is none.
             if threshold > 0 {
                 self.state.commit_history.retain(|seq| *seq >= threshold);
+                self.state.commit_eras.retain(|(seq, _)| *seq >= threshold);
             }
         }
         Ok(scrubbed)
