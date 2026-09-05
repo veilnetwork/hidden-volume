@@ -46,6 +46,7 @@ export 'src/deferred_vacuum.dart' show DeferredVacuumWindow;
 export 'src/bindings.dart'
     show
         ArgonPreset,
+        HvCommitEra,
         HvException,
         HvHardeningFailure,
         HvHardeningStep,
@@ -248,6 +249,11 @@ class HvSpace {
   /// Recoverable commit-anchor history. Used by host-app sync layer to
   /// detect rollback (see [`docs/en/guide/multi-device.md`](../../../docs/en/guide/multi-device.md)).
   List<int> commitHistory() => _inner.commitHistory();
+
+  /// The commit history with each era's root — the pair that identifies a
+  /// branch. See `HvCommitEra`.
+  List<ffi.HvCommitEra> commitHistoryWithRoots() =>
+      _inner.commitHistoryWithRoots();
 
   /// Number of KV entries in [namespace]. O(N) — walks the index.
   int count(int namespace) => _inner.count(namespace);

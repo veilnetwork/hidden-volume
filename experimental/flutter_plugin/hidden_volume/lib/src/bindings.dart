@@ -966,6 +966,34 @@ List<HvLogEntry> _readLogEntries(Uint8List bytes) {
   ];
 }
 
+/// One commit era: the seq, and the root that commit published.
+///
+/// The PAIR is what identifies a branch. A seq alone cannot — both sides of a
+/// fork count commits the same way — so an anchor holding only a number cannot
+/// tell the space it left from a copy that has been written to since
+/// (report22 HV-FORK-SEQ).
+class HvCommitEra {
+  const HvCommitEra({required this.seq, required this.rootHash});
+
+  final int seq;
+
+  /// 32 bytes. A fingerprint of container state: it belongs wherever THAT
+  /// space's own anchor lives, never anywhere shared.
+  final Uint8List rootHash;
+}
+
+/// Wire layout mirrors `CommitEra` in `crates/hidden-volume-ffi/src/lib.rs`:
+/// `seq (u64) ‖ root_hash (byte vec)`, preceded by an i32 count.
+List<HvCommitEra> _readCommitEraSequence(Uint8List bytes) {
+  final r = _Reader(bytes);
+  final n = r.readI32();
+  if (n < 0) throw StateError('negative sequence length');
+  return [
+    for (var i = 0; i < n; i++)
+      HvCommitEra(seq: r.readU64(), rootHash: r.readByteVec()),
+  ];
+}
+
 List<int> _readU64Sequence(Uint8List bytes) {
   final r = _Reader(bytes);
   final n = r.readI32();
@@ -1521,6 +1549,11 @@ final _spCommitHistory = _dylib.lookupFunction<
         RustBuffer Function(int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_spacehandle_commit_history');
 
+final _spCommitHistoryWithRoots = _dylib.lookupFunction<
+        RustBuffer Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
+        RustBuffer Function(int, ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_method_spacehandle_commit_history_with_roots');
+
 final _spCount = _dylib.lookupFunction<
         ffi.Uint64 Function(ffi.Uint64, ffi.Uint8, ffi.Pointer<RustCallStatus>),
         int Function(int, int, ffi.Pointer<RustCallStatus>)>(
@@ -1815,6 +1848,17 @@ class SpaceHandleBindings {
     final h = _cloneHandle();
     final out = rustCall<RustBuffer>((s) => _spCommitHistory(h, s));
     return _readU64Sequence(_bufferToBytes(out));
+  }
+
+  /// The same history with each era's root — the pair an anchor must hold.
+  ///
+  /// A SUBSET of [commitHistory]: an era whose Superblock decrypted but did
+  /// not decode is a seq this space saw and an era it cannot identify.
+  List<HvCommitEra> commitHistoryWithRoots() {
+    _ensureOpen();
+    final h = _cloneHandle();
+    final out = rustCall<RustBuffer>((s) => _spCommitHistoryWithRoots(h, s));
+    return _readCommitEraSequence(_bufferToBytes(out));
   }
 
   /// Number of KV entries in [namespace]. O(N) — walks the index.
