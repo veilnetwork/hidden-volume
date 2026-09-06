@@ -1349,10 +1349,24 @@ fn scan_and_recover_parallel_inner(
         ))?;
     let unreadable_newer_superblock = newer_unreadable_sb(undecodable_seq, superblock.seq);
 
+    // The eras this scan can identify, built from the same candidates the
+    // winner was chosen from — the same rule as the sequential scan, because a
+    // backend that answered differently would let a fork check pass on one
+    // host and fail on another for the same file (report22 HV-FORK-SEQ).
+    let commit_eras: Vec<(u64, [u8; 32])> = commit_history
+        .iter()
+        .filter_map(|seq| {
+            let payload = sb_candidates.get(seq)?;
+            let sb = Superblock::decode(payload).ok()?;
+            (sb.seq == *seq).then_some((*seq, sb.root_hash))
+        })
+        .collect();
+
     Ok(crate::space::SpaceState {
         keys,
         superblock,
         owned_slots,
+        commit_eras,
         // The parallel / mmap backends are full scans by construction —
         // they read no checkpoint, so there is no recorded pool to
         // recover and this session writes append-only. A cost, not a
@@ -1556,10 +1570,24 @@ fn scan_and_recover_mmap_inner(
         ))?;
     let unreadable_newer_superblock = newer_unreadable_sb(undecodable_seq, superblock.seq);
 
+    // The eras this scan can identify, built from the same candidates the
+    // winner was chosen from — the same rule as the sequential scan, because a
+    // backend that answered differently would let a fork check pass on one
+    // host and fail on another for the same file (report22 HV-FORK-SEQ).
+    let commit_eras: Vec<(u64, [u8; 32])> = commit_history
+        .iter()
+        .filter_map(|seq| {
+            let payload = sb_candidates.get(seq)?;
+            let sb = Superblock::decode(payload).ok()?;
+            (sb.seq == *seq).then_some((*seq, sb.root_hash))
+        })
+        .collect();
+
     Ok(crate::space::SpaceState {
         keys,
         superblock,
         owned_slots,
+        commit_eras,
         // The parallel / mmap backends are full scans by construction —
         // they read no checkpoint, so there is no recorded pool to
         // recover and this session writes append-only. A cost, not a

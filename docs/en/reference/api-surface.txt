@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-09-02T18:31:04Z
+# Captured: 2026-09-06T19:11:18Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -312,6 +312,7 @@ space/mod.rs: pub struct Space<'f> {
 space/mod.rs:   pub fn commit_seq(&self) -> u64 {
 space/mod.rs:   pub fn space_keys(&self) -> SpaceKeys {
 space/mod.rs:   pub fn commit_history(&self) -> &[u64] {
+space/mod.rs:   pub fn commit_history_with_roots(&self) -> &[(u64, [u8; 32])] {
 space/mod.rs:   pub fn set_padding_policy(&mut self, policy: crate::padding::PaddingPolicy) -> Result<()> {
 space/mod.rs:   pub fn padding_policy(&self) -> crate::padding::PaddingPolicy {
 space/mod.rs:   pub fn last_hardening_error(&self) -> Option<&HardeningFailure> {
@@ -486,6 +487,7 @@ lib.rs:     variant Padding,
 lib.rs:     variant Churn,
 lib.rs:     variant Sync,
 lib.rs: pub struct HardeningFailureInfo {
+lib.rs: pub struct CommitEra {
 lib.rs: pub struct StatsInfo {
 lib.rs:   pub fn utilization_ratio(&self) -> f64 {
 lib.rs: pub struct NamespaceCount {
@@ -506,6 +508,7 @@ lib.rs:   pub fn space_keys(&self) -> HvResult<Vec<u8>> {
 lib.rs:   pub fn open(path: String, password: Vec<u8>) -> HvResult<std::sync::Arc<Self>> {
 lib.rs:   pub fn commit_seq(&self) -> HvResult<u64> {
 lib.rs:   pub fn commit_history(&self) -> HvResult<Vec<u64>> {
+lib.rs:   pub fn commit_history_with_roots(&self) -> HvResult<Vec<CommitEra>> {
 lib.rs:   pub fn set_padding_policy(&self, preset: PaddingPreset) -> HvResult<()> {
 lib.rs:   pub fn list_namespaces(&self) -> HvResult<Vec<u8>> {
 lib.rs:   pub fn count(&self, namespace: u8) -> HvResult<u64> {
@@ -529,6 +532,7 @@ lib.rs:   pub async fn open_with_keys(path: String, keys: Vec<u8>) -> HvResult<A
 lib.rs:   pub async fn space_keys(&self) -> HvResult<Vec<u8>> {
 lib.rs:   pub async fn commit_seq(&self) -> HvResult<u64> {
 lib.rs:   pub async fn commit_history(&self) -> HvResult<Vec<u64>> {
+lib.rs:   pub async fn commit_history_with_roots(&self) -> HvResult<Vec<CommitEra>> {
 lib.rs:   pub async fn set_padding_policy(&self, preset: PaddingPreset) -> HvResult<()> {
 lib.rs:   pub async fn list_namespaces(&self) -> HvResult<Vec<u8>> {
 lib.rs:   pub async fn count(&self, namespace: u8) -> HvResult<u64> {
@@ -761,6 +765,10 @@ src/bindings.dart: class HvLogEntry {
 src/bindings.dart:   final int logId;
 src/bindings.dart:   final Uint8List payload;
 src/bindings.dart:   final n = r.readI32();
+src/bindings.dart: class HvCommitEra {
+src/bindings.dart:   final int seq;
+src/bindings.dart:   final Uint8List rootHash;
+src/bindings.dart:   final n = r.readI32();
 src/bindings.dart:   final n = r.readI32();
 src/bindings.dart: class HvIntegrityResult {
 src/bindings.dart:   final int namespacesVerified;
@@ -827,6 +835,7 @@ src/bindings.dart:   Uint8List? get(int namespace, Uint8List key) {
 src/bindings.dart:   List<HvLogEntry> iterLogRange({
 src/bindings.dart:   int commitSeq() {
 src/bindings.dart:   List<int> commitHistory() {
+src/bindings.dart:   List<HvCommitEra> commitHistoryWithRoots() {
 src/bindings.dart:   int count(int namespace) {
 src/bindings.dart:   List<Uint8List> kvKeys(int namespace) {
 src/bindings.dart:   List<Uint8List> kvKeysPage(int namespace, Uint8List? after, int limit) {

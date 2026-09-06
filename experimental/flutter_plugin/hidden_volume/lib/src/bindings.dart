@@ -334,6 +334,8 @@ const Map<String, int> _methodChecksums = <String, int>{
       23895,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_commit': 59696,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_commit_history': 53412,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_commit_history_with_roots':
+      32008,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_commit_seq': 53179,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_count': 3982,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_erase_namespace': 7530,
