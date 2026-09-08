@@ -131,7 +131,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-      - run: cargo install --locked cargo-audit
+      - run: cargo install --locked cargo-audit --version "^0.22"
       - run: cargo audit
 
   deny:
@@ -186,7 +186,7 @@ jobs:
           link-to-sdk: true
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: install cargo-ndk
-        run: cargo install cargo-ndk --locked
+        run: cargo install cargo-ndk --version "^4.1" --locked
       - name: cargo-ndk build --target aarch64
         # `cargo-ndk` wraps `cargo build` with the NDK CC env vars
         # (CC_aarch64_linux_android=...) that the cc-rs build of

@@ -64,7 +64,7 @@ jobs:
           link-to-sdk: true
 
       - name: install cargo-ndk
-        run: cargo install cargo-ndk --locked
+        run: cargo install cargo-ndk --version "^4.1" --locked
 
       - name: build cdylib for ${{ matrix.abi }}
         env:

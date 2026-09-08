@@ -34,6 +34,12 @@
 //! Stdin is also bounded: `MAX_PASSWORD_LINE` per line and
 //! `MAX_PASSWORDS` in total, so a file redirected here by mistake is
 //! refused rather than buffered.
+//!
+//! A **blank line is an empty password**, at the single-password prompts and
+//! in the list `repack` reads alike. It is a strange password and this program
+//! does not refuse it; what it must not do is accept one at `create-space` and
+//! then quietly ignore the same keystroke at `repack`, which is how a space
+//! came to be missing from a repacked container without anything being said.
 
 use std::io::{BufRead, Read as _, Write};
 use std::path::PathBuf;
@@ -208,30 +214,18 @@ fn run(cmd: Cmd) -> Result<()> {
 /// of in that case, and changing behaviour there would break scripts
 /// for no privacy gain.
 fn read_password(prompt: &str) -> Result<zeroize::Zeroizing<Vec<u8>>> {
-    use std::io::IsTerminal as _;
-
     eprint!("{prompt}");
     std::io::stderr().flush().ok();
 
-    let interactive = std::io::stdin().is_terminal();
-    let echo_off = if interactive { EchoOff::engage() } else { None };
-
-    let stdin = std::io::stdin();
+    // ONE echo policy for both secrets this program reads from stdin. It used
+    // to live only here, which is how `--value-stdin` came to read a secret in
+    // the clear — see [read_secret_line].
+    //
     // Bounded: `read_line` here grew a `String` until a newline arrived, so a
     // pipe that never sent one allocated without limit — and left every
     // intermediate buffer, password inside, on the heap (report14 HV14-M4).
     // The repack path two functions down has always read this way.
-    let read = read_capped_line(&mut stdin.lock(), MAX_PASSWORD_LINE, "password from stdin");
-    // Restore the terminal BEFORE anything can return early, so a read
-    // error does not leave the user's shell with echo off.
-    drop(echo_off);
-    let line = read?;
-    if interactive {
-        // The Enter that ended the line was not echoed either, so
-        // without this the next thing written lands on the prompt's
-        // own line.
-        eprintln!();
-    }
+    let line = read_secret_line(MAX_PASSWORD_LINE, "password from stdin", true)?;
     // EOF is NOT a blank line. `read_capped_line` already tells the two apart
     // — `None` for "the stream ended without a byte", `Some([])` for "somebody
     // pressed Enter" — and collapsing them here undid that: `hv create-space
@@ -306,7 +300,7 @@ impl EchoOff {
     /// caller then reads with echo on, which is what it did before, and
     /// is a better outcome than refusing to read at all.
     #[cfg(unix)]
-    fn engage() -> Option<Self> {
+    fn engage(discard_typeahead: bool) -> Option<Self> {
         use std::os::fd::AsRawFd as _;
         let fd = std::io::stdin().as_raw_fd();
         // SAFETY: `fd` is stdin, open for the process's lifetime.
@@ -319,10 +313,23 @@ impl EchoOff {
         }
         let saved = term;
         term.c_lflag &= !libc::ECHO;
-        // TCSAFLUSH, not TCSANOW: it discards input typed but not yet
-        // read, so characters entered before the prompt appeared are
-        // not silently taken as part of the password.
-        if unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &raw const term) } != 0 {
+        // TCSAFLUSH for the FIRST secret: it discards input typed but not yet
+        // read, so characters entered before the prompt appeared are not
+        // silently taken as part of the password.
+        //
+        // TCSANOW for a SECOND one on the same terminal, because there the
+        // same flush is a data loss rather than a guard. Everything in the
+        // queue by then was typed deliberately, after the program asked — and
+        // one obvious way to run `hv put --value-stdin` is to paste both lines
+        // at once, which the flush swallows, leaving the command waiting
+        // forever for a value the terminal has already thrown away. Found by
+        // the test written for the echo, which pasted exactly that way.
+        let when = if discard_typeahead {
+            libc::TCSAFLUSH
+        } else {
+            libc::TCSANOW
+        };
+        if unsafe { libc::tcsetattr(fd, when, &raw const term) } != 0 {
             return None;
         }
         Some(Self { saved })
@@ -335,8 +342,11 @@ impl EchoOff {
     /// pipe or a redirected file, and the caller then reads exactly as
     /// it did before. That path is the one CI exercises, since a
     /// GitHub-hosted runner gives the test process a pipe.
+    /// [discard_typeahead] is accepted for one signature on both platforms and
+    /// ignored here: `SetConsoleMode` changes the mode without touching the
+    /// input queue, so a console has no equivalent of TCSAFLUSH to choose.
     #[cfg(windows)]
-    fn engage() -> Option<Self> {
+    fn engage(_discard_typeahead: bool) -> Option<Self> {
         use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
         use windows_sys::Win32::System::Console::{
             GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE, SetConsoleMode,
@@ -376,10 +386,19 @@ impl Drop for EchoOff {
         {
             use std::os::fd::AsRawFd as _;
             let fd = std::io::stdin().as_raw_fd();
-            // SAFETY: same fd, and `saved` is the exact struct
-            // `tcgetattr` produced for it.
+            // TCSANOW, not TCSAFLUSH. Restoring the previous mode has no
+            // reason to discard input: the guard against keystrokes typed
+            // before a prompt appeared belongs to `engage`, where the program
+            // is about to treat what it reads as a secret. On the way OUT the
+            // same flush throws away whatever the person typed next — which,
+            // once a command reads two secrets in a row, is the second one.
+            // Measured: `hv put --value-stdin` with both lines pasted at once
+            // waited forever for a value the terminal had already dropped.
+            //
+            // SAFETY: same fd, and `saved` is the exact struct `tcgetattr`
+            // produced for it.
             unsafe {
-                libc::tcsetattr(fd, libc::TCSAFLUSH, &raw const self.saved);
+                libc::tcsetattr(fd, libc::TCSANOW, &raw const self.saved);
             }
         }
         #[cfg(windows)]
@@ -427,7 +446,11 @@ fn read_all_passwords() -> Result<Vec<zeroize::Zeroizing<Vec<u8>>>> {
     use std::io::IsTerminal as _;
 
     let interactive = std::io::stdin().is_terminal();
-    let echo_off = if interactive { EchoOff::engage() } else { None };
+    let echo_off = if interactive {
+        EchoOff::engage(true)
+    } else {
+        None
+    };
 
     let stdin = std::io::stdin();
     let out = read_passwords_from(stdin.lock());
@@ -462,6 +485,43 @@ fn read_all_passwords() -> Result<Vec<zeroize::Zeroizing<Vec<u8>>>> {
 ///
 /// `what` names the input in the error, because "a line is too long" is not
 /// an answer anybody can act on.
+/// Read one line of a SECRET from stdin, with the terminal's echo off while
+/// it is being typed.
+///
+/// Extracted because the echo was on one of the two paths and not the other:
+/// `read_password` engaged it, and `--value-stdin` — the flag whose whole
+/// purpose is to keep a secret off argv, where `ps -e` would show it — read
+/// the value in the clear and left it in the operator's scrollback. Keeping a
+/// secret out of the process table and putting it on the screen is not a
+/// trade, it is a different leak (report8 M8-10).
+///
+/// The echo guard is dropped BEFORE the result is inspected, so a read error
+/// cannot leave the caller's shell with `ECHO` cleared.
+fn read_secret_line(
+    cap: usize,
+    what: &str,
+    discard_typeahead: bool,
+) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>> {
+    use std::io::IsTerminal as _;
+
+    let interactive = std::io::stdin().is_terminal();
+    let echo_off = if interactive {
+        EchoOff::engage(discard_typeahead)
+    } else {
+        None
+    };
+    let stdin = std::io::stdin();
+    let read = read_capped_line(&mut stdin.lock(), cap, what);
+    drop(echo_off);
+    let line = read?;
+    if interactive {
+        // The Enter that ended the line was not echoed either, so without this
+        // the next thing written lands on the same line as what was typed.
+        eprintln!();
+    }
+    Ok(line)
+}
+
 fn read_capped_line(
     reader: &mut impl BufRead,
     cap: usize,
@@ -523,9 +583,22 @@ fn read_passwords_from(mut reader: impl BufRead) -> Result<Vec<zeroize::Zeroizin
         if buf.last() == Some(&b'\r') {
             buf.pop();
         }
-        if buf.is_empty() {
-            continue;
-        }
+        // A BLANK LINE IS AN EMPTY PASSWORD, the same as at the prompt.
+        //
+        // This used to `continue`, and the prompt one function up does not:
+        // `read_password` keeps an explicit blank line, deliberately, because
+        // refusing it would be this program deciding what a password may be.
+        // So the two readers disagreed about the same keystroke, and `repack`
+        // — which drops every space it cannot open — silently left an
+        // empty-password space out of the destination while its operator
+        // believed they had listed it (report8 M8-09, report1 R1-HV14). The
+        // source is untouched, so nothing is destroyed until they discard it,
+        // which is exactly what somebody does after a repack that reported
+        // success.
+        //
+        // A file that ends in a newline does NOT produce one of these:
+        // `read_until` returns the last line without a following empty read.
+        // Two newlines in a row are something the operator typed.
         if out.len() == MAX_PASSWORDS {
             return Err(hidden_volume::Error::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -686,11 +759,14 @@ fn cmd_put(
         // `MAX_VALUE_LEN` is refused by `tx.put`, so reading gigabytes to
         // find that out is pure loss — and it is the caller's secret being
         // grown across the heap while it happens (report14 HV14-M4).
-        let stdin = std::io::stdin();
-        let line = read_capped_line(
-            &mut stdin.lock(),
+        // Echo OFF while it is typed: this flag exists so the value stays out
+        // of argv, and a secret read in the clear at a prompt is in the
+        // scrollback of the same terminal instead (report8 M8-10).
+        let line = read_secret_line(
             hidden_volume::space::index::MAX_VALUE_LEN,
             "value from stdin",
+            // Keep what is already typed: see [EchoOff::engage].
+            false,
         )?;
         line.map(|b| b.to_vec()).unwrap_or_default()
     } else {
@@ -791,6 +867,36 @@ mod tests {
             .collect())
     }
 
+    /// A blank line is an empty password, in the LIST as at the prompt.
+    ///
+    /// The two readers disagreed: `read_password` keeps an explicit blank
+    /// line, and this one used to skip it. `repack` drops every space it
+    /// cannot open, so a space created with an empty password was quietly
+    /// absent from the destination while its operator believed they had
+    /// listed it — and the source is only discarded after a repack that
+    /// reported success (report8 M8-09, report1 R1-HV14).
+    #[test]
+    fn a_blank_line_is_an_empty_password_not_a_skipped_one() {
+        assert_eq!(collect(b"a\n\nb\n").unwrap(), vec!["a", "", "b"]);
+        // On its own, too: a container with one empty-password space is
+        // repacked by giving exactly one blank line.
+        assert_eq!(collect(b"\n").unwrap(), vec![""]);
+        // CRLF the same way, since the line ending is stripped before this.
+        assert_eq!(collect(b"a\r\n\r\nb\r\n").unwrap(), vec!["a", "", "b"]);
+    }
+
+    /// And a file that merely ENDS with a newline does not gain one.
+    ///
+    /// This is the reason the old code gave for skipping, and it does not
+    /// need skipping: `read_until` returns the last line and then reports
+    /// end-of-stream, so there is no empty read to mistake for a keystroke.
+    #[test]
+    fn a_trailing_newline_does_not_add_an_empty_password() {
+        assert_eq!(collect(b"a\nb\n").unwrap(), vec!["a", "b"]);
+        assert_eq!(collect(b"a\nb").unwrap(), vec!["a", "b"]);
+        assert!(collect(b"").unwrap().is_empty());
+    }
+
     /// A line that is too long is DETECTED, not buffered.
     ///
     /// `read_line` grows its buffer until a newline arrives, so a pipe that
@@ -862,13 +968,23 @@ mod tests {
 
     #[test]
     fn ordinary_input_is_unchanged() {
-        // The shape every script and every test uses must keep working
-        // byte-for-byte: blank lines skipped, CRLF tolerated, no
-        // trailing-newline required.
+        // The shape every script and every test uses keeps working
+        // byte-for-byte: CRLF tolerated, no trailing newline required.
         assert_eq!(collect(b"a\nb\n").unwrap(), vec!["a", "b"]);
         assert_eq!(collect(b"a\r\nb\r\n").unwrap(), vec!["a", "b"]);
-        assert_eq!(collect(b"a\n\n\nb").unwrap(), vec!["a", "b"]);
         assert_eq!(collect(b"").unwrap(), Vec::<String>::new());
+
+        // BLANK LINES ARE NO LONGER SKIPPED, and this line used to say they
+        // were. That was written for compatibility rather than as a decision
+        // about what a blank line means, and the compatibility cost the thing
+        // it was protecting: `create-space` accepts an explicit blank line as
+        // an empty password and `repack` dropped it, so such a space could not
+        // be carried and its absence was never mentioned (report8 M8-09).
+        //
+        // The price of the change, stated so it is not a surprise: a script
+        // that feeds stray blank lines now spends one Argon2 derivation on
+        // each, and counts them against MAX_PASSWORDS.
+        assert_eq!(collect(b"a\n\n\nb").unwrap(), vec!["a", "", "", "b"]);
     }
 
     /// The caps are BOUNDS, and a bound has to be an absolute number.
@@ -1008,7 +1124,7 @@ mod tests {
             // attached; this test has nothing to say about that case.
             return;
         }
-        let guard = EchoOff::engage();
+        let guard = EchoOff::engage(true);
         assert!(
             guard.is_none(),
             "engaged echo suppression on a stdin that is not a terminal"
