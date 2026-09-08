@@ -149,11 +149,16 @@ const CANCEL_POLL_PERIOD: u64 = 64;
 /// container that reached this cap by holding DATA rather than history has
 /// more slots per commit and a lower figure still.
 ///
-/// **Override is intentionally not in the v1.0 public surface.**
-/// Integrators with use cases beyond 64 GiB per container should
-/// either partition into multiple containers (one per
-/// conversation / per device) or wait for the v1.x opt-in
-/// `OpenOptions::max_scan_chunks` knob (post-1.0 roadmap).
+/// **There is no override, and none is planned.** This used to point at an
+/// opt-in `OpenOptions::max_scan_chunks` "in v1.x, post-1.0 roadmap" — a knob
+/// that was never written, in a version that has since passed twice over.
+/// Documentation that promises a way out is worse than documentation that
+/// states a limit: somebody plans around it.
+///
+/// An integrator whose use case runs past 64 GiB per container partitions into
+/// several containers — one per conversation, or per device — which is what
+/// this cap is for. The scan is the whole cost being bounded here, so raising
+/// it would move a wait somebody cannot interrupt, not remove one.
 pub const MAX_OPEN_SCAN_CHUNKS: u64 = 16 * 1024 * 1024;
 
 /// Reject if the slot count exceeds [`MAX_OPEN_SCAN_CHUNKS`]. Called
