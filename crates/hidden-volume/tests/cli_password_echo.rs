@@ -219,6 +219,28 @@ impl Session {
         self.master.flush().ok();
     }
 
+    /// Block until the child has finished reading the password.
+    ///
+    /// `read_secret_line` prints a newline once the line is in, because the
+    /// Enter that ended it was not echoed. That newline is the only signal on
+    /// this side that the terminal is back in echoing mode and the NEXT thing
+    /// typed is read by the next reader.
+    fn wait_for_password_to_be_read(&self) {
+        let deadline = std::time::Instant::now() + STEP_TIMEOUT;
+        loop {
+            let got = self.transcript();
+            if got.contains('\n') {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the password was never consumed within {STEP_TIMEOUT:?}; \
+                 transcript so far: {got:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     /// Reap the child, killing it rather than waiting forever.
     fn wait_for_exit(&mut self) {
         let deadline = std::time::Instant::now() + STEP_TIMEOUT;
@@ -278,6 +300,75 @@ fn a_password_typed_at_a_terminal_is_not_echoed() {
     assert!(
         !transcript.contains(SECRET),
         "the password was echoed to the terminal: {transcript:?}"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A SECRET VALUE typed at a terminal must not be echoed either.
+///
+/// `--value-stdin` exists for exactly one reason: to keep a value out of argv,
+/// where `ps -e` shows it to every other UID. It read that value with echo ON,
+/// so using the flag as documented moved the secret from the process table
+/// into the operator's scrollback — a different leak, not a smaller one
+/// (report8 M8-10). Nothing covered the flag at all.
+#[test]
+fn a_secret_value_typed_at_a_terminal_is_not_echoed() {
+    let path = scratch_path();
+    let path_str = path.to_str().unwrap().to_owned();
+
+    let status = Command::new(env!("CARGO_BIN_EXE_hv"))
+        .args(["create", &path_str, "--params", "min", "--replicas", "1"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("hv create");
+    assert!(status.success(), "hv create failed");
+
+    const PASSWORD: &str = "spacepw-for-the-value-test";
+    const SECRET_VALUE: &str = "zzUNMISTAKABLEvalue77";
+
+    // The space this value goes into, over a pipe: no terminal involved yet.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_hv"))
+        .args(["create-space", &path_str])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("hv create-space");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(format!("{PASSWORD}\n").as_bytes())
+        .expect("write password");
+    assert!(child.wait().expect("wait").success(), "create-space failed");
+
+    // Two lines at the terminal: the password, then the value.
+    let mut session = Session::start(&["put", &path_str, "1", "k", "--value-stdin"]);
+    session.wait_for_prompt();
+    session.type_line(PASSWORD);
+    // WAIT for the password to be consumed before typing the value, which is
+    // what a person does. Typing both at once proves nothing about the second
+    // read: a pty echoes on ARRIVAL, so two lines pasted while the password
+    // guard is up are both unechoed however the value is read afterwards —
+    // the first version of this test passed with the fix removed.
+    session.wait_for_password_to_be_read();
+    session.type_line(SECRET_VALUE);
+    session.wait_for_exit();
+    let transcript = session.transcript();
+
+    // Calibration: the prompt reached the terminal, so this is a real
+    // transcript rather than an empty read that would satisfy any absence.
+    assert!(
+        transcript.to_lowercase().contains("password"),
+        "no prompt in the transcript ({transcript:?}) — this test captured \
+         nothing, so its main assertion proves nothing"
+    );
+    assert!(
+        !transcript.contains(SECRET_VALUE),
+        "the secret value was echoed to the terminal: {transcript:?}"
     );
 
     let _ = std::fs::remove_file(&path);
