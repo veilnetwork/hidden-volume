@@ -1,5 +1,42 @@
 # Changelog
 
+## 2.4.0 — 2026-09-08
+
+### Fixed
+
+- `hv put --value-stdin` echoed the value it was given. The flag exists to keep
+  a secret out of `argv`, where `ps -e` shows it to every other user, and it
+  read that value with echo ON — so using it as documented moved the secret
+  from the process table into the terminal's scrollback. A different leak, not
+  a smaller one. Both secrets the CLI reads now go through one reader, because
+  the echo policy living on one of two paths is how this happened.
+
+- Restoring the terminal discarded whatever had been typed since. That guard
+  belongs to switching echo OFF, where the next thing read is treated as a
+  secret; on the way out it threw away the next line — which, once a command
+  reads two secrets in a row, is the second one. `hv put --value-stdin` with
+  both lines pasted at once waited forever for a value the terminal had already
+  dropped.
+
+### Changed
+
+- **A blank line is an empty password in the `repack` list, as it already was
+  at the prompt.** It used to be skipped there, and `repack` drops every space
+  it cannot open — so a space created with an empty password was quietly absent
+  from the destination while its operator believed they had listed it. The
+  source is untouched, so nothing is lost until they discard it, which is what
+  one does after a repack that reported success.
+
+  The cost, stated rather than discovered: a script feeding stray blank lines
+  now spends one Argon2 derivation on each and counts them against the password
+  limit.
+
+- Every `cargo install` in the workflows is pinned to a version range and
+  `--locked`, with a gate that keeps it that way.
+
+- The scan cap no longer promises an `OpenOptions::max_scan_chunks` knob "in
+  v1.x": it was never written, and this crate is well past that.
+
 ## 2.3.0 — 2026-09-05
 
 ### Added
