@@ -49,36 +49,36 @@ decisions. Update on every change to crypto / space / tx modules.
 | AEAD nonces (`[u8; 24]`) | Random per-write; OK to retain |
 | AEAD AAD (`[u8; 40]`) | `container_id \|\| slot`. NOT public since v3 — see §A. The AAD is written to disk beside every chunk regardless, so it is not a retention question; it is listed here only so the table accounts for it. |
 
-### C. User-secret data — NOT zeroized (deferred)
+### C. User-secret data — who owns it, and what clears it
 
-**See also `docs/en/security/audits/plaintext.md`** for the dedicated audit pass on
-plaintext temp buffers (bytes that briefly exist between AEAD seal/open
-and the next handoff). That audit complements §C below: the *transient*
-pre/post-encryption plaintext buffers ARE wrapped in `Zeroizing` (e.g.
-`aead.open` return, `log::encode_batch`/`decode_batch` raw, encoded leaf
-bytes before seal); the *user-owned* Vecs listed below remain deferred.
+**See also `docs/en/security/audits/plaintext.md`** for the dedicated audit pass
+on plaintext temp buffers (bytes that briefly exist between AEAD seal/open and
+the next handoff). That audit is about the transient buffers; this section is
+the inventory of the OWNERS.
 
-| Item | Risk | Decision |
+This section used to be titled "NOT zeroized (deferred)" and listed the four
+owners below as open decisions. They were closed one at a time, and the table
+was not updated with them — so the document told a reader the library leaves
+user plaintext in the heap when it had not done so for some time
+(report24 HV24-D1). What is written here now is the current contract; the
+history of how it got here is in the audit table at the end of this file.
+
+| Owner | What it holds | How it is cleared |
 |---|---|---|
-| `Tx.pending_kv: BTreeMap<u8, Vec<KvOp>>` value bytes | KV values held in memory until commit | **Deferred:** wrapping every `Vec<u8>` in `Zeroizing<Vec<u8>>` is invasive across the entire stack. The bytes get encrypted into a chunk plaintext and the original `Vec<u8>` is dropped without scrubbing. |
-| `Tx.pending_log` payloads | Same | Same |
-| `Plaintext.payload: Vec<u8>` | Decoded chunk plaintext on read; lives until function-scope drop | **Deferred:** same. |
-| Compressed batch `raw` in `log::encode_batch` | Pre-zstd plaintext | ✅ **Fixed:** wrapped in `Zeroizing<Vec<u8>>` (`space/log.rs:106`). |
-| Decompressed batch `raw` in `log::decode_batch` | Decoded log records | ✅ **Fixed (audit pass 11 M5):** streaming `zstd::Decoder` + `Read::take(MAX_DECODED_BATCH_LEN)` + `Zeroizing<Vec<u8>>` (`space/log.rs:205-219`). |
-| Encoded `IndexNode` payload before encryption | `Vec<u8>` | ✅ **Fixed:** wrapped in `Zeroizing<Vec<u8>>` at all 3 call sites (`space/commit.rs:265, 282, 296`). |
-| `IndexNodePayload.entries` `Vec<(Vec<u8>, Vec<u8>)>` | Decoded KV entries | **Deferred.** Same rationale as `Tx.pending_kv` values: invasive across many call sites; entries flow into the rendering path of the host-app where the same exposure exists. |
+| `Tx::pending_kv` | KV keys and values, until commit | `Redacted<PendingKv>` (`tx/mod.rs`), whose `scrub_secret` zeroizes every key and value before clearing the map |
+| `Tx::pending_log` | Log payloads, until commit | `Redacted<PendingLog>` (`tx/mod.rs`), same rule; `commit_tx` re-wraps what it drains so the drained copy is scrubbed too |
+| `Plaintext::payload` | A decoded chunk on read — a message, an index node, a key/value pair | `Drop` zeroizes it (`chunk/format.rs`), so the bytes do not outlive the struct that decoded them |
+| `LeafNode::entries` | The decoded `(key, value)` pairs of a leaf — the densest concentration of user plaintext in the format | `Redacted<Vec<(Vec<u8>, Vec<u8>)>>` (`space/index.rs`) |
+| Compressed batch `raw` in `log::encode_batch` | Pre-zstd plaintext | Returned as `Zeroizing<Vec<u8>>` (`space/log.rs`) |
+| Decompressed batch `raw` in `log::decode_batch` | Decoded log records | `Zeroizing<Vec<u8>>` **before the first read into it**, so the two error exits between hand back a scrubbed buffer as well (`space/log.rs`) |
+| Encoded index node before encryption | `Vec<u8>` | `Zeroizing<Vec<u8>>` at both build sites (`space/tree.rs`) |
 
-**Rationale for deferring user-data zeroize.** Adding `Zeroizing<Vec<u8>>`
-or a `SecretVec` newtype across all KV/log paths touches ~40 call
-sites. The threat it addresses (memory-disclosure attacker who reads
-freed heap pages) is real but secondary — the same attacker could
-read plaintext while the Tx is still alive in memory, or read it from
-the rendering path in the host-app. Mitigation has high invasiveness
-and modest benefit; tracked as v0.5.x candidate.
-
-For host-apps that NEED memory-disclosure resistance, the recommended
-approach is OS-level mlock + private memory mapping for the entire
-app process, which protects everything including UI state.
+**What this does NOT claim.** Clearing an owner is about the heap AFTER it is
+done with — a crash dump, a swap file or a core taken later. It says nothing
+about plaintext that is still live: an attacker who can read this process's
+memory while a `Tx` is open, or read the host-app's rendering path, sees the
+same bytes either way. A host that needs resistance to that wants OS-level
+mlock and a private mapping for the whole process, which covers UI state too.
 
 ## Verification
 
@@ -114,3 +114,4 @@ implementation, which the compiler does not optimize away (`#[inline(never)]`
 | Date | Change | Reviewer |
 |---|---|---|
 | Initial v0.5 | First pass. Fixed `derive_chunk_key` and `derive_subkey` to return `Zeroizing<[u8; 32]>`. Documented deferred user-data zeroize. | Self-audit |
+| 2026-09-09 | §C rewritten as an inventory of owners. The four deferrals it listed had each been closed — `Redacted` on the transaction's pending maps and on a leaf's entries, `Drop` on `Plaintext` — and the table was never updated with them, so the document claimed an exposure the library did not have (report24 HV24-D1). | Self-audit |
