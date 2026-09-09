@@ -50,38 +50,35 @@ space / tx.
 | AEAD nonce (`[u8; 24]`) | Random per-write; OK хранить |
 | AEAD AAD (`[u8; 40]`) | `container_id \|\| slot`. С v3 НЕ публичен — см. §A. AAD всё равно пишется на диск рядом с каждым чанком, поэтому это не вопрос удержания в памяти; строка оставлена, чтобы таблица была полной. |
 
-### C. User-secret data — НЕ zeroized (отложено)
+### C. User-secret data — кто ими владеет и что их стирает
 
-**См. также `docs/en/security/audits/plaintext.md`** — отдельный проход
-аудита по transient plaintext-буферам (байты, кратковременно
-существующие между AEAD seal/open и следующей передачей). Тот аудит
-дополняет §C ниже: *transient* pre/post-encryption plaintext-буферы
-ОБЁРНУТЫ в `Zeroizing` (например, return `aead.open`,
-`log::encode_batch`/`decode_batch` raw, encoded leaf bytes до seal);
-*user-owned* Vec'и, перечисленные ниже, остаются отложены.
+**См. также `docs/ru/security/audits/plaintext.md`** — отдельный проход аудита
+по transient plaintext-буферам (байты, кратковременно существующие между AEAD
+seal/open и следующей передачей). Тот аудит — про временные буферы; этот раздел
+— инвентарь ВЛАДЕЛЬЦЕВ.
 
-| Объект | Риск | Решение |
+Раздел назывался «НЕ zeroized (отложено)» и перечислял владельцев ниже как
+открытые решения. Их закрывали по одному, а таблицу с ними не обновляли — и
+документ сообщал читателю, что библиотека оставляет user plaintext в куче,
+когда это давно было не так (report24 HV24-D1). Ниже — текущий контракт;
+история того, как к нему пришли, — в таблице аудита в конце файла.
+
+| Владелец | Что держит | Чем стирается |
 |---|---|---|
-| `Tx.pending_kv: BTreeMap<u8, Vec<KvOp>>` value bytes | KV-значения держатся в памяти до commit | **Отложено:** обернуть каждый `Vec<u8>` в `Zeroizing<Vec<u8>>` инвазивно через весь stack. Байты шифруются в chunk-plaintext, и оригинальный `Vec<u8>` drop'ается без scrub'а. |
-| `Tx.pending_log` payload'ы | То же | То же |
-| `Plaintext.payload: Vec<u8>` | Декодированный chunk-plaintext при чтении; живёт до function-scope drop | **Отложено:** то же. |
-| Compressed batch `raw` буфер в `log::encode_batch` | Pre-zstd plaintext | **Отложено.** `Vec<u8>` drop'ается без scrub'а. |
-| Decompressed batch `raw` в `log::decode_batch` | То же | **Отложено.** |
-| Encoded `IndexNode` payload до шифрования | `Vec<u8>` | **Отложено.** |
-| `IndexNodePayload.entries` `Vec<(Vec<u8>, Vec<u8>)>` | Декодированные KV-записи | **Отложено.** |
+| `Tx::pending_kv` | KV-ключи и значения до commit | `Redacted<PendingKv>` (`tx/mod.rs`): его `scrub_secret` зануляет каждый ключ и значение перед очисткой map |
+| `Tx::pending_log` | Log-payload'ы до commit | `Redacted<PendingLog>` (`tx/mod.rs`), то же правило; `commit_tx` переоборачивает то, что выгребает, поэтому выгребленная копия тоже скрабится |
+| `Plaintext::payload` | Декодированный chunk при чтении — сообщение, index-узел, пара ключ/значение | `Drop` зануляет (`chunk/format.rs`): байты не переживают структуру, которая их декодировала |
+| `LeafNode::entries` | Декодированные пары `(ключ, значение)` листа — самая плотная концентрация user plaintext в формате | `Redacted<Vec<(Vec<u8>, Vec<u8>)>>` (`space/index.rs`) |
+| Compressed batch `raw` в `log::encode_batch` | Pre-zstd plaintext | Возвращается как `Zeroizing<Vec<u8>>` (`space/log.rs`) |
+| Decompressed batch `raw` в `log::decode_batch` | Декодированные log-записи | `Zeroizing<Vec<u8>>` **до первого чтения в него**, поэтому два выхода по ошибке между ними тоже отдают скрабленный буфер (`space/log.rs`) |
+| Encoded index-узел до шифрования | `Vec<u8>` | `Zeroizing<Vec<u8>>` на обоих местах сборки (`space/tree.rs`) |
 
-**Обоснование откладывания zeroize для user-data.** Добавление
-`Zeroizing<Vec<u8>>` или newtype `SecretVec` через все KV/log пути
-затрагивает ~40 call site'ов. Угроза, которую это адресует
-(memory-disclosure атакующий, читающий освобождённые heap-страницы),
-реальна, но вторична — тот же атакующий мог бы прочитать plaintext,
-пока Tx ещё жив в памяти, или прочитать его из render-пути в host-app.
-Митигация имеет высокую инвазивность и скромную выгоду; tracking
-как кандидат v0.5.x.
-
-Для host-apps, которым НУЖНА устойчивость к memory-disclosure,
-рекомендуемый подход — OS-level mlock + private memory mapping для
-всего процесса app, что защищает всё, включая UI state.
+**Чего это НЕ утверждает.** Стирание владельца — про кучу ПОСЛЕ того, как с ним
+закончили: crash dump, swap-файл, core, снятый позже. Оно ничего не говорит о
+plaintext, который ещё жив: атакующий, способный читать память этого процесса
+при открытом `Tx` или читать render-путь host-app, видит те же байты в любом
+случае. Хосту, которому нужна устойчивость к этому, нужен OS-level mlock и
+приватное отображение на весь процесс — это покрывает и UI-состояние.
 
 ## Верификация
 
@@ -118,3 +115,4 @@ writes).
 | Дата | Изменение | Ревьюер |
 |---|---|---|
 | Initial v0.5 | Первый проход. Исправлены `derive_chunk_key` и `derive_subkey` для возврата `Zeroizing<[u8; 32]>`. Задокументирован отложенный zeroize для user-data. | Self-audit |
+| 2026-09-09 | §C переписан как инвентарь владельцев. Все четыре отложенных решения из него были закрыты — `Redacted` на pending-картах транзакции и на entries листа, `Drop` у `Plaintext`, — а таблицу с ними не обновляли, и документ заявлял уязвимость, которой у библиотеки нет (report24 HV24-D1). | Self-audit |
