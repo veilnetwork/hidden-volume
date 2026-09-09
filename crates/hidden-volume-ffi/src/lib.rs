@@ -402,6 +402,29 @@ impl From<hidden_volume::Error> for HvError {
             // this comment used to promise `from_maps_*` tests that were
             // never written, and four variants sat in the catch-all
             // behind that promise (report7 P1).
+            // Both of these arrived after the guard below was written, and
+            // the guard enumerates variants BY HAND — so they sat in the
+            // catch-all, described to every caller as "unknown error
+            // variant" (report24 HV24-04, plus `ReentrantRun`, which the
+            // report did not name and which was in the same state).
+            //
+            // `CreateCleanupFailed` says two things at once — creation
+            // failed AND the half-made file is still there — and the second
+            // half is the one a caller has to act on, because a retry at the
+            // same path will answer AlreadyExists.
+            E::CreateCleanupFailed { source, cleanup } => HvError::Io(format!(
+                "create failed ({source}); the partial file could not be \
+                 removed ({cleanup}) — a retry at this path will answer \
+                 AlreadyExists"
+            )),
+            // A caller that called back INTO the handle from inside a run
+            // closure. Nothing ran, and it is a programming error rather than
+            // a state of the container.
+            E::ReentrantRun => HvError::Internal(
+                "reentrant run: this closure already holds the handle's \
+                 operation permit"
+                    .into(),
+            ),
             _ => HvError::Internal("unknown error variant".into()),
         }
     }
@@ -3581,10 +3604,16 @@ mod tests {
         // catch-all behind that claim.
         //
         // This is that test. `hidden_volume::Error` is `#[non_exhaustive]`
-        // so it cannot be enumerated by the compiler; the list is written
-        // out instead, and adding a core variant without an arm in
-        // `From` fails here with the variant named. Weaker than an
-        // exhaustive match and stronger than a comment.
+        // so it cannot be enumerated by the compiler HERE — but it can be
+        // in the crate that defines it, and now is: `Error::variant_name`
+        // matches exhaustively and `Error::ALL_VARIANT_NAMES` lists what
+        // that match produced. This test walks that list and demands a
+        // sample for every name, so a variant added upstream fails here by
+        // NAME even before anybody thinks about mapping it.
+        //
+        // Written by hand, the list missed three variants and two of them
+        // were unmapped: `CreateCleanupFailed` and `ReentrantRun` reached
+        // every caller as "unknown error variant" (report24 HV24-04).
         let core: Vec<hidden_volume::Error> = vec![
             hidden_volume::Error::Io(std::io::Error::other("x")),
             hidden_volume::Error::AuthFailed,
@@ -3613,7 +3642,27 @@ mod tests {
                 detail: "d",
                 slot: 7,
             },
+            hidden_volume::Error::RenameVisibleAliasesAndDurabilityUncertain {
+                other_names: Some(1),
+            },
+            hidden_volume::Error::CreateCleanupFailed {
+                source: Box::new(hidden_volume::Error::AuthFailed),
+                cleanup: std::io::Error::other("cleanup"),
+            },
+            hidden_volume::Error::ReentrantRun,
         ];
+
+        // Every NAME the core knows must have a sample above. This is the
+        // half a hand-written list cannot promise on its own.
+        let sampled: std::collections::HashSet<&'static str> =
+            core.iter().map(|e| e.variant_name()).collect();
+        for name in hidden_volume::Error::ALL_VARIANT_NAMES {
+            assert!(
+                sampled.contains(name),
+                "core variant {name} has no sample here, so nothing checks \
+                 whether it survives the FFI boundary"
+            );
+        }
 
         // `Error::Internal` legitimately maps to `HvError::Internal`, so
         // the catch-all is identified by its message, not by its kind.

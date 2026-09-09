@@ -4,6 +4,7 @@
 pub mod file;
 pub mod header;
 
+use zeroize::{Zeroize, Zeroizing};
 use std::path::Path;
 
 pub use file::{ContainerFile, DEFAULT_SUPERBLOCK_REPLICAS};
@@ -156,6 +157,90 @@ impl Default for RepackOptions {
 #[derive(Debug)]
 pub struct Container {
     pub(crate) file: ContainerFile,
+}
+
+/// A page of KV pairs that clears itself when it goes.
+///
+/// `Vec<(Vec<u8>, Vec<u8>)>` freed by an ordinary drop leaves the plaintext in
+/// the allocator's hands. Draining moves most entries out — this covers the
+/// rest, which is what an error or a cancel in the middle of a page leaves
+/// behind (report24 HV24-03).
+struct WipedPairs(Vec<(Vec<u8>, Vec<u8>)>);
+
+impl WipedPairs {
+    /// Clear every byte still held. Separate from [`Drop`] so a test can watch
+    /// it work on LIVE memory — reading a buffer back after it has been freed
+    /// is undefined behaviour, which makes "did the drop wipe it" a question
+    /// no safe test can ask directly.
+    fn wipe(&mut self) {
+        for (key, value) in self.0.iter_mut() {
+            key.zeroize();
+            value.zeroize();
+        }
+    }
+}
+
+impl Drop for WipedPairs {
+    fn drop(&mut self) {
+        self.wipe();
+    }
+}
+
+/// The same for a page of log payloads, which are read by reference and so are
+/// never drained.
+struct WipedLogPage(Vec<(u64, Vec<u8>)>);
+
+impl WipedLogPage {
+    /// See [`WipedPairs::wipe`].
+    fn wipe(&mut self) {
+        for (_, payload) in self.0.iter_mut() {
+            payload.zeroize();
+        }
+    }
+}
+
+impl Drop for WipedLogPage {
+    fn drop(&mut self) {
+        self.wipe();
+    }
+}
+
+#[cfg(test)]
+mod repack_wipe_tests {
+    use super::{WipedLogPage, WipedPairs};
+
+    #[test]
+    fn a_kv_page_clears_every_byte_it_still_holds() {
+        let mut page = WipedPairs(vec![
+            (b"key-one".to_vec(), b"secret-value".to_vec()),
+            (b"key-two".to_vec(), b"another-secret".to_vec()),
+        ]);
+
+        page.wipe();
+
+        for (key, value) in &page.0 {
+            assert!(key.iter().all(|b| *b == 0), "key survived: {key:?}");
+            assert!(value.iter().all(|b| *b == 0), "value survived: {value:?}");
+        }
+    }
+
+    #[test]
+    fn a_log_page_clears_its_payloads() {
+        let mut page = WipedLogPage(vec![
+            (1, b"a message body".to_vec()),
+            (2, b"another one".to_vec()),
+        ]);
+
+        page.wipe();
+
+        for (id, payload) in &page.0 {
+            assert!(*id > 0, "ids are not secret and are left alone");
+            assert!(
+                payload.iter().all(|b| *b == 0),
+                "payload survived: {payload:?}"
+            );
+        }
+    }
 }
 
 impl Container {
@@ -1345,17 +1430,29 @@ impl Container {
                         // last key of the previous page (audit HV-02).
                         // Each page is its own Tx, so the pairs a page
                         // read are dropped before the next page is.
-                        let mut cursor: Option<Vec<u8>> = None;
+                        // Every plaintext this loop owns is wiped when it is
+                        // dropped: the cursor, the page, and each pair taken
+                        // out of it. `Tx::put` makes its own protected copy,
+                        // but the SOURCE was an ordinary `Vec` freed as it
+                        // fell out of scope — this library's own rule is that
+                        // it clears what it owns, and repack was the caller
+                        // (report24 HV24-03).
+                        let mut cursor: Option<Zeroizing<Vec<u8>>> = None;
                         loop {
                             check(cancel)?;
-                            let mut page =
-                                src_space.list_after(ns, cursor.as_deref(), kv_page_size)?;
-                            if page.is_empty() {
+                            let mut page = WipedPairs(src_space.list_after(
+                                ns,
+                                cursor.as_ref().map(|c| c.as_slice()),
+                                kv_page_size,
+                            )?);
+                            if page.0.is_empty() {
                                 break;
                             }
                             // Advance the cursor BEFORE the Tx — the
                             // page's entries are drained below.
-                            cursor = Some(page.last().expect("non-empty by check above").0.clone());
+                            cursor = Some(Zeroizing::new(
+                                page.0.last().expect("non-empty by check above").0.clone(),
+                            ));
                             let mut tx = dst_space.begin_tx();
                             // `drain`, not `&page`: `Tx::put` copies, so
                             // iterating by reference would hold the page
@@ -1363,7 +1460,9 @@ impl Container {
                             // Draining frees each entry as the Tx takes
                             // it, and the peak stays one page rather
                             // than two.
-                            for (key, value) in page.drain(..) {
+                            for (key, value) in page.0.drain(..) {
+                                let key = Zeroizing::new(key);
+                                let value = Zeroizing::new(value);
                                 tx.put(ns, &key, &value)?;
                             }
                             tx.commit()?;
@@ -1378,16 +1477,21 @@ impl Container {
                         let mut cursor: Option<u64> = None;
                         loop {
                             check(cancel)?;
-                            let page = src_space.iter_log_after(ns, cursor, log_page_size)?;
-                            if page.is_empty() {
+                            // Same ownership rule as the KV branch above: the
+                            // payloads are this function's, so this function
+                            // clears them.
+                            let page = WipedLogPage(
+                                src_space.iter_log_after(ns, cursor, log_page_size)?,
+                            );
+                            if page.0.is_empty() {
                                 break;
                             }
                             // Advance cursor BEFORE the dest Tx
                             // — `page.last()` is moved into the
                             // Tx loop below.
-                            let last_id = page.last().expect("non-empty by check above").0;
+                            let last_id = page.0.last().expect("non-empty by check above").0;
                             let mut tx = dst_space.begin_tx();
-                            for (log_id, payload) in &page {
+                            for (log_id, payload) in &page.0 {
                                 tx.append_log(ns, *log_id, payload)?;
                             }
                             tx.commit()?;
