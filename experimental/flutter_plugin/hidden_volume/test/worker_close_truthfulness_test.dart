@@ -321,6 +321,49 @@ void main() {
     expect(() => space.commitSeq(), throwsA(isA<StateError>()));
   });
 
+  test('a close that timed out and THEN lost its worker still lets go',
+      () async {
+    // The gap between the two waits. The first race gives up on the timeout
+    // and hands the caller `Busy`, which is right — a worker inside the FFI is
+    // not one to kill. The background drain then waited on the REPLY alone,
+    // and a worker that dies afterwards sends none: a receive port does not
+    // close because its sender is gone, so that future never completes and the
+    // port and the death watcher are held for the life of the host process
+    // (report24 HV24-05).
+    //
+    // The existing tests cover death BEFORE the timeout, a silent worker that
+    // stays alive, and a late reply. None of them is this one.
+    HvAsyncSpace.closeTimeout = const Duration(milliseconds: 100);
+    final events = ReceivePort();
+    addTearDown(events.close);
+
+    final live = await _spawnStubWorker(
+      events.sendPort,
+      answerClose: false,
+      dieAfterCloseMs: 300,
+    );
+    final space = HvAsyncSpace.debugOverWorker(
+      isolate: live.isolate,
+      toWorker: live.port,
+      watch: live.watch,
+    );
+
+    await expectLater(
+      space.close(),
+      throwsA(isA<HvException>().having((e) => e.kind, 'kind', 'Busy')),
+      reason: 'premise: the close times out rather than answering',
+    );
+    final drain = space.debugCloseDrain;
+    expect(drain, isNotNull, reason: 'the timeout left nothing draining');
+    await drain!.timeout(
+      const Duration(seconds: 5),
+      onTimeout: () => fail(
+        'the drain is still waiting for a reply the dead worker can never '
+        'send, so its port and death watcher are never released',
+      ),
+    );
+  });
+
   test('close stays idempotent, and a failed close still closes the handle',
       () async {
     // The second call must not re-send, re-wait or re-throw: a caller that
@@ -355,12 +398,13 @@ Future<({Isolate isolate, SendPort port, HvWorkerDeath watch})>
   required bool answerClose,
   bool dieOnClose = false,
   bool failClose = false,
+  int dieAfterCloseMs = 0,
 }) async {
   final boot = ReceivePort();
   final death = HvWorkerDeath();
   final isolate = await Isolate.spawn<List<Object>>(
     _stubWorkerEntry,
-    [boot.sendPort, events, answerClose, dieOnClose, failClose],
+    [boot.sendPort, events, answerClose, dieOnClose, failClose, dieAfterCloseMs],
     errorsAreFatal: true,
     onExit: death.exitPort.sendPort,
     onError: death.errorPort.sendPort,
@@ -377,6 +421,7 @@ void _stubWorkerEntry(List<Object> args) {
   final answerClose = args[2] as bool;
   final dieOnClose = args[3] as bool;
   final failClose = args[4] as bool;
+  final dieAfterCloseMs = args[5] as int;
   final rx = ReceivePort();
   boot.send(rx.sendPort);
   rx.listen((dynamic msg) {
@@ -389,6 +434,15 @@ void _stubWorkerEntry(List<Object> args) {
         // A worker that faults on the way out: quietly gone, no reply ever.
         rx.close();
         Isolate.current.kill(priority: Isolate.immediate);
+        return;
+      }
+      if (dieAfterCloseMs > 0) {
+        // Busy past the caller's grace, and then gone without a word: an FFI
+        // fault, or an `errorsAreFatal` death. No reply is ever sent.
+        Timer(Duration(milliseconds: dieAfterCloseMs), () {
+          rx.close();
+          Isolate.current.kill(priority: Isolate.immediate);
+        });
         return;
       }
       if (!answerClose) return; // still inside the FFI, like the real thing

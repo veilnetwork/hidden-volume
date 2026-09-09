@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-09-09T07:32:31Z
+# Captured: 2026-09-09T10:31:53Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -691,6 +691,7 @@ src/async_bindings.dart:   Future<HvIntegrityResult> verifyIntegrity() => _call<
 src/async_bindings.dart:   static Object debugCloseOk() => const _OkReply(null);
 src/async_bindings.dart:   static Object debugCloseError(String kind, String message) =>
 src/async_bindings.dart:   void debugKillWorker() => _isolate.kill(priority: Isolate.immediate);
+src/async_bindings.dart:   Future<void>? get debugCloseDrain => _closeDrain;
 src/async_bindings.dart:   Future<void> close() async {
 src/async_bindings.dart:   return headerInfo(path);
 src/async_bindings.dart: Future<HvHeaderInfo> headerInfoAsync(String path, {String? dylibPath}) {

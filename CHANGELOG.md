@@ -43,6 +43,16 @@
   history-bounded window as a per-slot cost and extrapolated 754 MiB from
   40 KiB. Its fixtures vary the owned set now, with the commit count held equal.
 
+- **A close that timed out and then lost its worker let go of its ports.**
+  (Flutter plugin.) The first wait races the worker's reply against its death,
+  because a dead worker never answers; the background drain that a timeout
+  leaves running waited on the reply alone. A worker that dies after that point
+  sends none — a receive port does not close because its sender is gone — so
+  the port and the death watcher were held for the life of the host process,
+  and ports keep a Dart event loop alive. The drain waits for the same terminal
+  outcome the first wait did. A silent worker is still not killed: it may be
+  busy inside the FFI, which is why that branch exists (report24 HV24-05).
+
 - **A decompressed log batch is cleared on the paths that fail, too.** The
   wiping wrapper was put around the buffer after the reads returned, so the two
   error exits between — a decoder that fails mid-frame, a batch over the size
