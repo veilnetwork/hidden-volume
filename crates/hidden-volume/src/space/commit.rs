@@ -285,11 +285,17 @@ impl<'f> Space<'f> {
 
             let kv_ops = pending.entry(ns_byte).or_default();
             for (log_ids, batch_bytes) in batches {
+                // The batch's own hash goes into every index value pointing at
+                // it, so the namespace root — and the commit root through it —
+                // describes WHAT was appended and not merely where it landed
+                // (report24 HV24-01). Taken from the encoded batch, which is
+                // exactly the bytes the slot receives.
+                let batch_hash = *blake3::hash(&batch_bytes).as_bytes();
                 let batch_slot = self.place_chunk(ChunkKind::DataBatch, new_seq, &batch_bytes)?;
                 for log_id in log_ids {
                     kv_ops.push(KvOp::Put {
                         key: log::log_id_key(log_id).to_vec(),
-                        value: log::encode_batch_slot_value(batch_slot).to_vec(),
+                        value: log::encode_batch_slot_value_v2(batch_slot, &batch_hash).to_vec(),
                     });
                 }
             }

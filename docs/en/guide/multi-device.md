@@ -178,6 +178,17 @@ HV-FORK-SEQ).
 
 ### Rollback / fork-detection algorithm
 
+> **Version note.** Matching the PAIR only tells two branches apart if the
+> root actually depends on what was written. Until hidden-volume 2.5.0 the log
+> namespace's index held the batch's SLOT and nothing else, so two copies of one
+> container appending records of the same shape produced the same
+> `(seq, root_hash)` while holding different messages — a fork that read as a
+> clean continuation (report24 HV24-01). From 2.5.0 the index value carries the
+> batch's content hash as well.
+>
+> The cost is one-directional: a container written by 2.5.0 or later is read by
+> older builds as "namespace is not a log". Newer builds read both layouts.
+
 On `Container::open_space`:
 
 1. Read external anchor `(anchor_seq, anchor_root)`.

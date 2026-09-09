@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-09-06T19:11:18Z
+# Captured: 2026-09-09T07:32:31Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -184,6 +184,8 @@ error.rs:     variant WrongNamespaceKind(&'static str),
 error.rs:     variant TooManyNamespaces {
 error.rs:     variant ContainerTooLarge {
 error.rs:     variant IntegrityFailure {
+error.rs:   pub fn variant_name(&self) -> &'static str {
+error.rs:   pub const ALL_VARIANT_NAMES: &'static [&'static str] = &[
 lib.rs: pub mod cancel;
 lib.rs: pub mod chunk;
 lib.rs: pub mod container;
@@ -287,6 +289,10 @@ space/log.rs: pub fn find_in_batch(records: &[(u64, LogPayload)], log_id: u64) -
 space/log.rs: pub fn log_id_key(log_id: u64) -> [u8; 8] {
 space/log.rs: pub fn parse_log_id_key(key: &[u8]) -> Result<u64> {
 space/log.rs: pub fn parse_batch_slot_value(value: &[u8]) -> Result<u64> {
+space/log.rs: pub fn parse_batch_content_hash(value: &[u8]) -> Option<[u8; 32]> {
+space/log.rs: pub const BATCH_SLOT_VALUE_V1_LEN: usize = 8;
+space/log.rs: pub const BATCH_SLOT_VALUE_LEN: usize = 40;
+space/log.rs: pub fn encode_batch_slot_value_v2(
 space/log.rs: pub fn encode_batch_slot_value(batch_slot: u64) -> [u8; 8] {
 space/log_iter.rs:   pub fn iter_log(&mut self, namespace: Namespace) -> Result<Vec<(u64, Vec<u8>)>> {
 space/log_iter.rs:   pub fn iter_log_after(

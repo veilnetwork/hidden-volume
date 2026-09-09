@@ -438,16 +438,10 @@ impl Error {
             Self::SpaceAlreadyExists => "SpaceAlreadyExists",
             Self::Busy => "Busy",
             Self::ReadOnly => "ReadOnly",
-            Self::RenameVisibleDurabilityUncertain(_) => {
-                "RenameVisibleDurabilityUncertain"
-            },
-            Self::RenameVisibleContentUnverified(_) => {
-                "RenameVisibleContentUnverified"
-            },
+            Self::RenameVisibleDurabilityUncertain(_) => "RenameVisibleDurabilityUncertain",
+            Self::RenameVisibleContentUnverified(_) => "RenameVisibleContentUnverified",
             Self::SourceIsNotARegularFile(_) => "SourceIsNotARegularFile",
-            Self::RenameVisibleAliasesNotRevoked(_) => {
-                "RenameVisibleAliasesNotRevoked"
-            },
+            Self::RenameVisibleAliasesNotRevoked(_) => "RenameVisibleAliasesNotRevoked",
             Self::RenameVisibleAliasesUnknown => "RenameVisibleAliasesUnknown",
             Self::RenameVisibleAliasesAndDurabilityUncertain { .. } => {
                 "RenameVisibleAliasesAndDurabilityUncertain"
@@ -506,4 +500,3 @@ impl Error {
         "IntegrityFailure",
     ];
 }
-
