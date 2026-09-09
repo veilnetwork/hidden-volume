@@ -13,7 +13,10 @@
 //! iteration. Across the whole scan we accumulate only:
 //!
 //! - `owned_slots` — one BIT per slot in the file ([`crate::space::slots`]).
-//! - up to [`MAX_SB_CANDIDATES`] Superblock payloads (≈48 bytes each).
+//! - up to [`MAX_SB_CANDIDATES`] Superblock payloads (≈48 bytes each),
+//!   and up to [`MAX_ERA_ANCHORS`] `(seq, root_hash)` era anchors (40 bytes
+//!   each) — the recovery fallback and the published history window, bounded
+//!   separately because they are bounded for different reasons.
 //! - `commit_history: Vec<u64>` — 8 bytes per distinct commit seq, with
 //!   replicas collapsed before the list doubles.
 //!
@@ -376,9 +379,23 @@ fn scan_and_recover_inner(
 /// How many distinct-seq Superblock payloads that fallback may hold at once.
 /// Audit pass 20 bounded each entry to a canonical superblock length; the
 /// COUNT stayed open, so a key-holder could forge one distinct-seq Superblock
-/// per scanned chunk and have us hold all of them. Reaching the Nth candidate
+/// per scanned chunk and have us hold all of them.
+///
+/// Reaching the Nth candidate
 /// means N consecutive superblocks were forged or corrupt, and 64 is far past
 /// any state a writer produces.
+///
+/// **A recovery cache, and nothing else reads it.** It was briefly the source
+/// of `commit_eras` too, and the two want opposite numbers: a fallback depth
+/// is a handful, while the identifiable history is the window the multi-device
+/// guide publishes. At 64 a reopen could name only the newest 64 eras, so an
+/// anchor 65 commits old went missing from a history the guide tells a host to
+/// read as a FORK when a pair inside the window is absent (report24 HV24-02).
+/// Raising THIS number to the horizon instead bought the window in retained
+/// superblock PAYLOADS — a couple of hundred bytes per era, in a map per scan
+/// backend, held while the scan runs — which `open_peak_memory.rs` measured at
+/// 47 bytes per owned slot. The eras have their own store now
+/// ([`EraAnchors`], forty bytes each) and this stays a fallback depth.
 const MAX_SB_CANDIDATES: usize = 64;
 
 /// Insert one AEAD-passing Superblock payload into a candidate map, keeping the
@@ -453,6 +470,104 @@ fn push_sb_candidate(
     }
 }
 
+/// How many `(seq, root_hash)` era anchors an open keeps.
+///
+/// [`ANCHOR_HORIZON`], because that is the window the multi-device guide
+/// publishes: a host is told that an anchor within this many commits of the
+/// current seq is inside the window, and that a pair missing from
+/// `Space::commit_history_with_roots` inside the window means a fork. A
+/// retention shorter than the window turns "this device has not opened the
+/// container for a few hundred commits" into "somebody forked it" — which is
+/// what a 64-entry recovery cache was quietly doing (report24 HV24-02).
+///
+/// Bounded all the same, and for the reason [`MAX_SB_CANDIDATES`] is: every
+/// entry comes from a chunk that AEAD-passed, so a key-holder decides how many
+/// there are. Forty bytes each puts the ceiling at 40 KiB, and the collapse
+/// below keeps the allocation a step of the history's SIZE rather than a cost
+/// per owned slot.
+const MAX_ERA_ANCHORS: usize = crate::ANCHOR_HORIZON as usize;
+
+/// One era as a scan holds it: `(seq, slot, root_hash)`.
+///
+/// The SLOT is carried rather than inferred from traversal order, and that is
+/// the whole tie rule: two payloads under one seq can only come from an older
+/// build, and the one in the higher slot is the later write — the same answer
+/// [`push_sb_candidate`] reaches, by a route that does not depend on which way
+/// the backend walks the file. Its rule is a parameter, and a loop that walked
+/// backward silently got the opposite of the documented answer for four audit
+/// passes (report21 HV20-L1); this one cannot.
+type EraEntry = (u64, u64, [u8; 32]);
+
+/// The eras a scan can IDENTIFY: `(seq, root_hash)` for every owned Superblock
+/// that also decoded.
+///
+/// The seq alone does not identify a branch — both sides of a fork count
+/// commits the same way — so the root travels beside it (report22
+/// HV-FORK-SEQ). Held as pushed and collapsed when the vector fills, exactly
+/// as [`push_commit_anchor`] collapses the numeric history: a commit publishes
+/// several replicas of one superblock, so the list inflates several-fold over
+/// the eras it ends up holding.
+#[derive(Default)]
+struct EraAnchors {
+    entries: Vec<EraEntry>,
+}
+
+impl EraAnchors {
+    /// Record one identified era.
+    fn push(&mut self, seq: u64, slot: u64, root_hash: [u8; 32]) {
+        if self.entries.len() == self.entries.capacity()
+            && self.entries.capacity() >= MAX_ERA_ANCHORS
+        {
+            self.collapse();
+        }
+        self.entries.push((seq, slot, root_hash));
+    }
+
+    /// Fold another scan's anchors in — the parallel reduce's join, and the
+    /// one place `push` cannot reach, exactly as for the numeric history.
+    #[cfg(any(all(feature = "parallel-scan", unix), test))]
+    fn merge(&mut self, other: EraAnchors) {
+        self.entries.extend(other.entries);
+        if self.entries.len() >= MAX_ERA_ANCHORS {
+            self.collapse();
+        }
+    }
+
+    /// One entry per seq, ascending, the highest [`MAX_ERA_ANCHORS`] of them.
+    fn collapse(&mut self) {
+        // UNSTABLE, and it can be: the key is `(seq, slot)` and a slot appears
+        // once, so there is no tie left for stability to break. It also has to
+        // be — the stable sort allocates a scratch buffer the size of the list,
+        // and a buffer that grows with the container's history is exactly the
+        // open cost `open_peak_memory.rs` measures. Descending, so the highest
+        // slot leads its seq's run and the oldest eras sit at the end where
+        // `truncate` can take them.
+        self.entries
+            .sort_unstable_by_key(|e| std::cmp::Reverse((e.0, e.1)));
+        // Keeps the FIRST of each run: the highest slot, per the tie rule.
+        self.entries.dedup_by_key(|(seq, _, _)| *seq);
+        // The lowest seqs go. The window is the NEWEST eras: an anchor older
+        // than the horizon is outside the guide's window anyway, and dropping
+        // the newest would drop the ones a host actually asks about.
+        self.entries.truncate(MAX_ERA_ANCHORS);
+        // Ascending, like `commit_history`, which this is a subset of.
+        self.entries.reverse();
+    }
+
+    /// The window, ready for `SpaceState::commit_eras`.
+    fn finish(mut self) -> Vec<(u64, [u8; 32])> {
+        self.collapse();
+        // Sized to what was found, not to the bound: a container with three
+        // eras should not carry the horizon's 40 KiB for the life of the
+        // handle. `commit_tx` pushes onto this afterwards and `vacuum` trims
+        // it, so it is a live list, not a snapshot of the scan.
+        self.entries
+            .iter()
+            .map(|(seq, _, root)| (*seq, *root))
+            .collect()
+    }
+}
+
 /// Fold one owned-but-unparsable Superblock `seq` into the running maximum.
 ///
 /// The three scan backends (sequential, parallel, mmap) each keep their own
@@ -524,6 +639,10 @@ struct ScanAcc {
     owned_slots: crate::space::slots::OwnedSet,
     commit_history: Vec<u64>,
     sb_candidates: std::collections::BTreeMap<u64, Vec<u8>>,
+    /// The eras this scan identified. Its own store rather than a read of
+    /// `sb_candidates`, because the two are bounded for different reasons and
+    /// by different numbers — see [`MAX_ERA_ANCHORS`].
+    sb_eras: EraAnchors,
     /// Highest `seq` of an owned Superblock chunk whose payload this build
     /// could not parse. See `SpaceState::unreadable_newer_superblock` — a
     /// chunk that AEAD-passed is ours, so failing to parse it means a writer
@@ -639,6 +758,7 @@ fn accumulate_owned_slot(acc: &mut ScanAcc, slot: u64, mut pt: Plaintext) {
             note_unparsable_sb(&mut acc.unparsable_sb_seq, pt.seq);
         }
         if Superblock::is_valid_encoded_len(pt.payload.len()) {
+            note_era(&mut acc.sb_eras, pt.seq, slot, &pt.payload);
             push_sb_candidate(
                 &mut acc.sb_candidates,
                 pt.seq,
@@ -646,6 +766,25 @@ fn accumulate_owned_slot(acc: &mut ScanAcc, slot: u64, mut pt: Plaintext) {
                 ScanOrder::Ascending,
             );
         }
+    }
+}
+
+/// Identify one era from the payload the candidate map is about to take.
+///
+/// Here rather than at the end of the scan because the candidate map is a
+/// fallback DEPTH: an era whose payload it evicted is still an era this scan
+/// read, and reading the history back out of that cache is what capped it at
+/// 64 (report24 HV24-02).
+///
+/// The `sb.seq == seq` cross-check is audit pass 14's, applied to the same
+/// payload and with the same answer the winner search will reach — a mismatch
+/// means a writer bug or a post-AEAD tamper, and an era we cannot trust the
+/// number of is not one to record.
+fn note_era(eras: &mut EraAnchors, seq: u64, slot: u64, payload: &[u8]) {
+    if let Ok(sb) = Superblock::decode(payload)
+        && sb.seq == seq
+    {
+        eras.push(seq, slot, sb.root_hash);
     }
 }
 
@@ -664,6 +803,7 @@ fn finalize_scan_at(keys: SpaceKeys, acc: ScanAcc, total: u64) -> Result<SpaceSt
         owned_slots,
         mut commit_history,
         sb_candidates,
+        sb_eras,
         unparsable_sb_seq,
         recorded_pool,
         read_the_record,
@@ -704,20 +844,13 @@ fn finalize_scan_at(keys: SpaceKeys, acc: ScanAcc, total: u64) -> Result<SpaceSt
     // settled on is superseded history, not a writer that got ahead of us.
     let unreadable_newer_superblock = newer_unreadable_sb(undecodable_seq, superblock.seq);
 
-    // The eras this scan can IDENTIFY, from the same candidates the winner was
-    // chosen from — so the two can never disagree about what an era was. Every
-    // seq whose Superblock also decoded contributes its root; one that did not
+    // The eras this scan can IDENTIFY, collected as the slots were read. Every
+    // seq whose Superblock also decoded contributed its root; one that did not
     // is left out rather than given a placeholder, because an era we cannot
     // read is an era we cannot identify and a stand-in root would be a claim
-    // rather than a record (report22 HV-FORK-SEQ).
-    let commit_eras: Vec<(u64, [u8; 32])> = commit_history
-        .iter()
-        .filter_map(|seq| {
-            let payload = sb_candidates.get(seq)?;
-            let sb = Superblock::decode(payload).ok()?;
-            (sb.seq == *seq).then_some((*seq, sb.root_hash))
-        })
-        .collect();
+    // rather than a record (report22 HV-FORK-SEQ). A SUBSET of
+    // `commit_history` by construction: the same call site pushes both.
+    let commit_eras = sb_eras.finish();
 
     // The pool as recorded, MINUS everything this scan found we own. This
     // subtraction is what lets the recorded pool be as stale as the
@@ -1200,6 +1333,8 @@ fn scan_and_recover_parallel_inner(
         owned_slots: crate::space::slots::OwnedSet,
         commit_history: Vec<u64>,
         sb_candidates: std::collections::BTreeMap<u64, Vec<u8>>,
+        /// Mirrors `ScanAcc`'s field, for the reason the one below states.
+        sb_eras: EraAnchors,
         /// Mirrors `ScanAcc`'s field. The parallel backend keeps its own
         /// accumulator, and a guard that lands in only one backend is exactly
         /// how the audit's candidate cap ended up half-applied.
@@ -1280,6 +1415,7 @@ fn scan_and_recover_parallel_inner(
                             note_unparsable_sb(&mut acc.unparsable_sb_seq, pt.seq);
                         }
                         if Superblock::is_valid_encoded_len(pt.payload.len()) {
+                            note_era(&mut acc.sb_eras, pt.seq, slot, &pt.payload);
                             push_sb_candidate(
                                 &mut acc.sb_candidates,
                                 pt.seq,
@@ -1294,6 +1430,10 @@ fn scan_and_recover_parallel_inner(
             .try_reduce(Acc::default, |mut a, b| -> Result<Acc> {
                 a.owned_slots.union_from(&b.owned_slots);
                 merge_commit_anchors(&mut a.commit_history, b.commit_history);
+                // No order to pass: an era carries the slot it was read
+                // from, so which half held the higher slots is a fact about
+                // the entries rather than about the reduce.
+                a.sb_eras.merge(b.sb_eras);
                 // Without this the flag survives only if the unreadable
                 // superblock happened to land in the accumulator that won the
                 // reduce — i.e. it would hold on some runs and not others.
@@ -1322,6 +1462,7 @@ fn scan_and_recover_parallel_inner(
         owned_slots,
         mut commit_history,
         sb_candidates,
+        sb_eras,
         unparsable_sb_seq,
     } = acc;
 
@@ -1354,18 +1495,10 @@ fn scan_and_recover_parallel_inner(
         ))?;
     let unreadable_newer_superblock = newer_unreadable_sb(undecodable_seq, superblock.seq);
 
-    // The eras this scan can identify, built from the same candidates the
-    // winner was chosen from — the same rule as the sequential scan, because a
-    // backend that answered differently would let a fork check pass on one
+    // The eras this scan can identify, by the same rule as the sequential scan
+    // — a backend that answered differently would let a fork check pass on one
     // host and fail on another for the same file (report22 HV-FORK-SEQ).
-    let commit_eras: Vec<(u64, [u8; 32])> = commit_history
-        .iter()
-        .filter_map(|seq| {
-            let payload = sb_candidates.get(seq)?;
-            let sb = Superblock::decode(payload).ok()?;
-            (sb.seq == *seq).then_some((*seq, sb.root_hash))
-        })
-        .collect();
+    let commit_eras = sb_eras.finish();
 
     Ok(crate::space::SpaceState {
         keys,
@@ -1500,6 +1633,9 @@ fn scan_and_recover_mmap_inner(
     // order at the end with fallback. See `scan_and_recover` doc.
     let mut sb_candidates: std::collections::BTreeMap<u64, Vec<u8>> =
         std::collections::BTreeMap::new();
+    // The eras this backend identified — see `MAX_ERA_ANCHORS` for why they do
+    // not come out of the candidate map.
+    let mut sb_eras = EraAnchors::default();
     // Highest seq of an owned Superblock this build could not parse — see
     // `SpaceState::unreadable_newer_superblock`.
     let mut unparsable_sb_seq: Option<u64> = None;
@@ -1541,6 +1677,7 @@ fn scan_and_recover_mmap_inner(
                 note_unparsable_sb(&mut unparsable_sb_seq, pt.seq);
             }
             if Superblock::is_valid_encoded_len(pt.payload.len()) {
+                note_era(&mut sb_eras, pt.seq, slot, &pt.payload);
                 push_sb_candidate(
                     &mut sb_candidates,
                     pt.seq,
@@ -1575,18 +1712,10 @@ fn scan_and_recover_mmap_inner(
         ))?;
     let unreadable_newer_superblock = newer_unreadable_sb(undecodable_seq, superblock.seq);
 
-    // The eras this scan can identify, built from the same candidates the
-    // winner was chosen from — the same rule as the sequential scan, because a
-    // backend that answered differently would let a fork check pass on one
+    // The eras this scan can identify, by the same rule as the sequential scan
+    // — a backend that answered differently would let a fork check pass on one
     // host and fail on another for the same file (report22 HV-FORK-SEQ).
-    let commit_eras: Vec<(u64, [u8; 32])> = commit_history
-        .iter()
-        .filter_map(|seq| {
-            let payload = sb_candidates.get(seq)?;
-            let sb = Superblock::decode(payload).ok()?;
-            (sb.seq == *seq).then_some((*seq, sb.root_hash))
-        })
-        .collect();
+    let commit_eras = sb_eras.finish();
 
     Ok(crate::space::SpaceState {
         keys,
@@ -1780,6 +1909,87 @@ mod candidate_bound_tests {
             MAX_SB_CANDIDATES as u64 * 2 - 1,
             "the cap dropped the highest seqs, which are the ones this scan \
              returns"
+        );
+    }
+}
+
+#[cfg(test)]
+mod era_anchor_tests {
+    use super::{EraAnchors, MAX_ERA_ANCHORS};
+
+    fn root(n: u8) -> [u8; 32] {
+        [n; 32]
+    }
+
+    /// The tie rule, and the reason the slot is carried at all.
+    ///
+    /// Two payloads under one seq only exist in a container an older build
+    /// wrote, and the one in the higher SLOT is the later write — the answer
+    /// `push_sb_candidate` reaches for the same pair. Asserted from both
+    /// arrival orders because that is the failure this shape rules out: the
+    /// rule used to be "whichever came last", which is the right answer only
+    /// for a backend that walks the file forward.
+    #[test]
+    fn the_higher_slot_wins_whichever_arrives_first() {
+        for (first, second) in [
+            ((7u64, root(1)), (9u64, root(2))),
+            ((9, root(2)), (7, root(1))),
+        ] {
+            let mut eras = EraAnchors::default();
+            eras.push(42, first.0, first.1);
+            eras.push(42, second.0, second.1);
+            assert_eq!(
+                eras.finish(),
+                vec![(42, root(2))],
+                "slot 9 wrote later than slot 7, so its root is era 42"
+            );
+        }
+    }
+
+    /// Past the bound, the NEWEST eras are the ones kept.
+    #[test]
+    fn the_window_keeps_the_highest_seqs() {
+        let mut eras = EraAnchors::default();
+        let total = MAX_ERA_ANCHORS as u64 * 3;
+        for seq in 0..total {
+            eras.push(seq, seq, root(0));
+        }
+        let kept = eras.finish();
+        assert_eq!(kept.len(), MAX_ERA_ANCHORS);
+        assert_eq!(kept.first().unwrap().0, total - MAX_ERA_ANCHORS as u64);
+        assert_eq!(kept.last().unwrap().0, total - 1);
+        assert!(
+            kept.windows(2).all(|w| w[0].0 < w[1].0),
+            "ascending and distinct, like the history this is a subset of"
+        );
+    }
+
+    /// Replicas collapse rather than accumulate: a commit publishes the same
+    /// superblock several times, and the window is eras, not chunks.
+    #[test]
+    fn replicas_of_one_commit_are_one_era() {
+        let mut eras = EraAnchors::default();
+        for slot in 0..(MAX_ERA_ANCHORS as u64 * 4) {
+            eras.push(5, slot, root(7));
+        }
+        assert_eq!(eras.finish(), vec![(5, root(7))]);
+    }
+
+    /// The parallel reduce's join answers as one scan would have.
+    #[test]
+    fn a_merged_window_holds_the_same_rule() {
+        let mut left = EraAnchors::default();
+        let mut right = EraAnchors::default();
+        left.push(1, 10, root(1));
+        left.push(2, 11, root(2));
+        // The same era, from the replica in a higher slot: the right half of
+        // an indexed reduce holds the higher slots.
+        right.push(2, 20, root(3));
+        right.push(3, 21, root(4));
+        left.merge(right);
+        assert_eq!(
+            left.finish(),
+            vec![(1, root(1)), (2, root(3)), (3, root(4))]
         );
     }
 }

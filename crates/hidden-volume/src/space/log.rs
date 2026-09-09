@@ -318,7 +318,14 @@ pub fn decode_batch(compressed: &[u8]) -> Result<Vec<(u64, LogPayload)>> {
             zstd::Decoder::new(compressed).map_err(|_| Error::Compression("zstd decode failed"))?;
         // `take` enforces the cap at the byte level. We read up to
         // cap+1 so we can distinguish "fits" from "overflowed cap".
-        let mut buf = Vec::new();
+        // WRAPPED BEFORE THE FIRST BYTE LANDS IN IT, not after the reads
+        // succeed. The decoder fills this buffer and can then fail — a bad
+        // checksum at the end of a frame is exactly that — and the cap check
+        // below returns as well. Both of those exits used to happen while the
+        // plaintext was still an ordinary `Vec`, which the allocator got back
+        // unwiped; the wrapper was created afterwards, on the path where
+        // nothing had gone wrong (report24 HV24-06).
+        let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
         let cap = MAX_DECODED_BATCH_LEN as u64;
         let read = std::io::Read::take(&mut decoder, cap + 1)
             .read_to_end(&mut buf)
@@ -326,7 +333,7 @@ pub fn decode_batch(compressed: &[u8]) -> Result<Vec<(u64, LogPayload)>> {
         if read as u64 > cap {
             return Err(Error::Malformed("batch decompressed size exceeds cap"));
         }
-        Zeroizing::new(buf)
+        buf
     };
     if raw.len() < 4 {
         return Err(Error::Malformed("batch raw too short"));
@@ -570,6 +577,39 @@ mod scrub_order_tests {
         assert!(
             body[bound..refuse].contains("zstd::encode_all"),
             "the compressor no longer runs inside the wrapper"
+        );
+    }
+}
+
+#[cfg(test)]
+mod decode_buffer_ownership_tests {
+    /// The decompression buffer must be a wiping one BEFORE anything is read
+    /// into it.
+    ///
+    /// A source check, and deliberately so: whether a `Drop` wiped a buffer can
+    /// only be observed by reading the memory after it was freed, which is
+    /// undefined behaviour — the kind of measurement that reports whatever the
+    /// allocator did next. What CAN be checked exactly is the thing that went
+    /// wrong: the wrapper was constructed after the fallible reads, so the two
+    /// error exits gave the plaintext back as an ordinary `Vec`
+    /// (report24 HV24-06).
+    #[test]
+    fn the_decompression_buffer_is_wrapped_before_it_is_filled() {
+        let src = include_str!("log.rs");
+        let decode = src
+            .find("pub fn decode_batch")
+            .expect("decode_batch is in this file");
+        let body = &src[decode..];
+        let wrap = body
+            .find("Zeroizing::new(Vec::new())")
+            .expect("the buffer is created through Zeroizing");
+        let read = body
+            .find("read_to_end(&mut buf)")
+            .expect("the decoder reads into the buffer");
+        assert!(
+            wrap < read,
+            "the buffer is wrapped after it is filled, so the error exits \
+             between the two hand plaintext back unwiped"
         );
     }
 }

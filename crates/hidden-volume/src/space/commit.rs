@@ -5,6 +5,7 @@
 //! self-contained ~280-LOC chunk.
 
 use std::collections::BTreeMap;
+use zeroize::Zeroize as _;
 
 use crate::chunk::ChunkKind;
 use crate::redact::Redacted;
@@ -318,14 +319,31 @@ impl<'f> Space<'f> {
             // tree update is a merge against the entry stream rather
             // than a sequence of point edits (audit HV-16).
             let mut keyed = KeyOps::default();
+            // Coalescing REPLACES: a key written twice in one Tx, or written
+            // and then deleted, displaces the earlier value. `BTreeMap::insert`
+            // hands that value back and it used to be dropped on the spot — an
+            // ordinary `Vec` the allocator got unwiped, no longer owned by the
+            // protected map that would have cleared it. Ordinary documented use
+            // is enough to reach it, and the displaced value is precisely the
+            // secret somebody replaced or deleted (report24 HV24-07).
+            //
+            // The key is handled by not cloning it: `BTreeMap` keeps the key it
+            // already has and drops the one passed in, so the replace path goes
+            // through `get_mut` and never makes the copy that would be dropped.
+            let mut replace = |key: &Vec<u8>, value: Option<Vec<u8>>| {
+                if let Some(slot) = keyed.get_mut(key) {
+                    let mut displaced = std::mem::replace(slot, value);
+                    if let Some(bytes) = displaced.as_mut() {
+                        bytes.zeroize();
+                    }
+                } else {
+                    keyed.insert(key.clone(), value);
+                }
+            };
             for op in ops {
                 match op {
-                    KvOp::Put { key, value } => {
-                        keyed.insert(key.clone(), Some(value.clone()));
-                    },
-                    KvOp::Delete { key } => {
-                        keyed.insert(key.clone(), None);
-                    },
+                    KvOp::Put { key, value } => replace(key, Some(value.clone())),
+                    KvOp::Delete { key } => replace(key, None),
                 }
             }
 
