@@ -413,3 +413,97 @@ pub enum Error {
         slot: u64,
     },
 }
+
+impl Error {
+    /// The variant's own name.
+    ///
+    /// The match below is EXHAUSTIVE and lives in the defining crate, where
+    /// `#[non_exhaustive]` does not apply — so adding a variant without naming
+    /// it here does not compile. That is the point: everything downstream that
+    /// has to keep up with this enum is guarded by hand-written lists, and a
+    /// hand-written list is a promise somebody will remember. Two variants had
+    /// already slipped past one (report24 HV24-04): `CreateCleanupFailed` and
+    /// `ReentrantRun` were described to every FFI caller as "unknown error
+    /// variant".
+    ///
+    /// Downstream guards enumerate [`Self::ALL_VARIANT_NAMES`] and fail on a
+    /// name they do not handle, so the chain is: the compiler makes you name a
+    /// new variant, and the name then makes the guards fail until it is
+    /// handled.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            Self::Io(_) => "Io",
+            Self::AuthFailed => "AuthFailed",
+            Self::UnreadableNewerState => "UnreadableNewerState",
+            Self::SpaceAlreadyExists => "SpaceAlreadyExists",
+            Self::Busy => "Busy",
+            Self::ReadOnly => "ReadOnly",
+            Self::RenameVisibleDurabilityUncertain(_) => {
+                "RenameVisibleDurabilityUncertain"
+            },
+            Self::RenameVisibleContentUnverified(_) => {
+                "RenameVisibleContentUnverified"
+            },
+            Self::SourceIsNotARegularFile(_) => "SourceIsNotARegularFile",
+            Self::RenameVisibleAliasesNotRevoked(_) => {
+                "RenameVisibleAliasesNotRevoked"
+            },
+            Self::RenameVisibleAliasesUnknown => "RenameVisibleAliasesUnknown",
+            Self::RenameVisibleAliasesAndDurabilityUncertain { .. } => {
+                "RenameVisibleAliasesAndDurabilityUncertain"
+            },
+            Self::PublishUncertain(_) => "PublishUncertain",
+            Self::Malformed(_) => "Malformed",
+            Self::Kdf(_) => "Kdf",
+            Self::CreateCleanupFailed { .. } => "CreateCleanupFailed",
+            Self::Internal(_) => "Internal",
+            Self::PayloadTooLarge => "PayloadTooLarge",
+            Self::IndexFull => "IndexFull",
+            Self::Compression(_) => "Compression",
+            Self::Cancelled => "Cancelled",
+            Self::ReentrantRun => "ReentrantRun",
+            Self::WouldBlock => "WouldBlock",
+            Self::WrongNamespaceKind(_) => "WrongNamespaceKind",
+            Self::TooManyNamespaces { .. } => "TooManyNamespaces",
+            Self::ContainerTooLarge { .. } => "ContainerTooLarge",
+            Self::IntegrityFailure { .. } => "IntegrityFailure",
+        }
+    }
+
+    /// Every variant's name, for guards that cannot match exhaustively because
+    /// this enum is `#[non_exhaustive]` to them.
+    ///
+    /// Kept beside [`Self::variant_name`] deliberately: the compiler forces a
+    /// new variant into that match, and the reviewer adding it there has this
+    /// list under their cursor.
+    pub const ALL_VARIANT_NAMES: &'static [&'static str] = &[
+        "Io",
+        "AuthFailed",
+        "UnreadableNewerState",
+        "SpaceAlreadyExists",
+        "Busy",
+        "ReadOnly",
+        "RenameVisibleDurabilityUncertain",
+        "RenameVisibleContentUnverified",
+        "SourceIsNotARegularFile",
+        "RenameVisibleAliasesNotRevoked",
+        "RenameVisibleAliasesUnknown",
+        "RenameVisibleAliasesAndDurabilityUncertain",
+        "PublishUncertain",
+        "Malformed",
+        "Kdf",
+        "CreateCleanupFailed",
+        "Internal",
+        "PayloadTooLarge",
+        "IndexFull",
+        "Compression",
+        "Cancelled",
+        "ReentrantRun",
+        "WouldBlock",
+        "WrongNamespaceKind",
+        "TooManyNamespaces",
+        "ContainerTooLarge",
+        "IntegrityFailure",
+    ];
+}
+
