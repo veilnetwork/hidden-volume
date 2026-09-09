@@ -23,6 +23,38 @@
   for scrubbing. One reader spelling a layout for itself is how that happens;
   it uses the shared parser now.
 
+- **The identifiable history reaches as far as the guide says it does.**
+  `commit_history_with_roots` was built out of the superblock candidate cache —
+  a 64-entry fallback the scan keeps in case the newest superblock will not
+  decode — so a reopen could identify only the newest 64 eras. The multi-device
+  guide tells a host that an anchor within `ANCHOR_HORIZON` (1024) commits is
+  inside the window, and that a pair missing from the history inside that window
+  is a fork; after 65 commits a container nobody had forked answered like one.
+  The eras have their own bounded store now — `(seq, root_hash)` to the horizon,
+  forty bytes each — and the cache goes back to being a fallback depth. A
+  same-seq collision, which only a container written by an older build can hold,
+  is resolved in the store by the rule the winner search uses: the payload in
+  the higher slot is the later write. Carried explicitly, so it no longer
+  depends on which direction a scan backend walks the file
+  (report24 HV24-02).
+
+  Found while fixing it: the open-peak measurement compared two fixtures that
+  differed in COMMITS and divided by owned SLOTS, so it charged a
+  history-bounded window as a per-slot cost and extrapolated 754 MiB from
+  40 KiB. Its fixtures vary the owned set now, with the commit count held equal.
+
+- **A decompressed log batch is cleared on the paths that fail, too.** The
+  wiping wrapper was put around the buffer after the reads returned, so the two
+  error exits between — a decoder that fails mid-frame, a batch over the size
+  cap — handed the plaintext back to the allocator as an ordinary vector. It is
+  wrapped before the first byte lands in it (report24 HV24-06).
+
+- **Coalescing clears the value it displaces.** A key written twice in one
+  transaction, or written and then deleted, displaces the earlier value inside
+  the commit's own map; `BTreeMap::insert` returns that value and it was dropped
+  on the spot, unwiped. It is the exact secret somebody replaced or deleted, and
+  ordinary documented use reaches it (report24 HV24-07).
+
 - **Repack clears the plaintext it owns.** Keys, values, the cursor and log
   payloads were held in ordinary vectors and handed back to the allocator as
   they were. `Tx::put` makes its own protected copy, but the source belonged to

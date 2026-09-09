@@ -19,6 +19,22 @@
 //!    before the fast path decides it cannot proceed, and it was the actual
 //!    peak: an 800-commit fixture held 800 payloads at once.
 //!
+//! ## Why the fixtures differ in KEYS and not in commits
+//!
+//! The number this file reports is a slope: two containers, and the extra
+//! bytes divided by the extra owned slots. That arithmetic charges the slots
+//! for everything that differs between the two, so anything scaling with
+//! something ELSE has to be held equal — and history is such a thing. The
+//! identifiable-era window is `ANCHOR_HORIZON` pairs of `(seq, root_hash)`:
+//! it grows with a container's COMMITS, stops at 40 KiB, and never depends on
+//! the owned set at all. A fixture pair that varied commits (200 against 800)
+//! read that window as 47 bytes per owned slot and reported 754 MiB at the
+//! slot cap — a number nothing in the library can reach (report24 HV24-02).
+//!
+//! So both fixtures commit the same number of times and differ in how many
+//! keys each commit writes. Every key is `MAX_VALUE_LEN` long, so no two
+//! share a leaf, and the owned set is the only thing that moves.
+//!
 //! ## Why this measures allocation
 //!
 //! Nothing about the open's RESULT changes with the cost: the same superblock
@@ -70,8 +86,24 @@ fn peak_growth<T>(f: impl FnOnce() -> T) -> (usize, T) {
     (peak.saturating_sub(before), value)
 }
 
-const SMALL_COMMITS: usize = 200;
-const LARGE_COMMITS: usize = 800;
+/// Commits, held EQUAL across the two fixtures.
+///
+/// The measurement is a slope in the owned set, so anything that scales with
+/// something ELSE has to be constant between the fixtures or it is charged to
+/// the slots. History is one such thing: the identifiable-era window is
+/// bounded by `ANCHOR_HORIZON` pairs, so it grows with a container's COMMITS
+/// and then stops. A fixture pair that varied commits reported that bounded
+/// window as 47 bytes per owned slot and extrapolated it to 754 MiB at the
+/// slot cap, which is not what it costs — 40 KiB is (report24 HV24-02).
+const COMMITS: usize = 40;
+
+/// Keys per commit, which is what the two fixtures differ in: every key is a
+/// leaf chunk, so this is the owned set.
+const SMALL_KEYS: usize = 20;
+const LARGE_KEYS: usize = 220;
+
+/// One leaf per key: `MAX_VALUE_LEN`, which no two of can share a node.
+const VALUE_LEN: usize = 2048;
 
 fn scratch(tag: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
@@ -91,14 +123,21 @@ impl Drop for Cleanup {
     }
 }
 
-fn build(path: &std::path::Path, commits: usize) {
+/// A container of [`COMMITS`] commits holding `keys_per_commit` distinct keys
+/// each — the owned set varies, the history does not.
+fn build(path: &std::path::Path, keys_per_commit: usize) {
     let _ = std::fs::remove_file(path);
+    let value = [0x5au8; VALUE_LEN];
     let mut c = Container::create(path, Argon2Params::MIN).unwrap();
     let mut s = c.create_space(b"pw").unwrap();
-    for i in 0..commits {
+    for commit in 0..COMMITS {
         let mut tx = s.begin_tx();
-        tx.put(Namespace::SETTINGS, b"k", &(i as u64).to_be_bytes())
-            .unwrap();
+        for key in 0..keys_per_commit {
+            // Distinct across the whole build: a repeated key would replace a
+            // leaf rather than add one, and the owned set would stop growing.
+            let k = format!("{commit:04}-{key:04}");
+            tx.put(Namespace::SETTINGS, k.as_bytes(), &value).unwrap();
+        }
         tx.commit().unwrap();
     }
 }
@@ -149,11 +188,11 @@ fn open_peak_does_not_scale_with_the_owned_set() {
     let _cleanup = Cleanup(vec![small.clone(), large.clone()]);
 
     // Warm anything lazily initialised on first use.
-    build(&small, 8);
+    build(&small, 1);
     let _ = open_peak(&small, false);
 
-    build(&small, SMALL_COMMITS);
-    build(&large, LARGE_COMMITS);
+    build(&small, SMALL_KEYS);
+    build(&large, LARGE_KEYS);
 
     let (owned_small, peak_small) = open_peak(&small, false);
     let (owned_large, peak_large) = open_peak(&large, false);
@@ -169,12 +208,22 @@ fn open_peak_does_not_scale_with_the_owned_set() {
     let growth = peak_large.saturating_sub(peak_small);
     let per_slot = growth as f64 / extra_slots as f64;
 
-    // One byte per slot: eight times the bitmap's one bit and eight times
-    // BELOW the `Vec<u64>` this replaced, so it separates the two
-    // representations without pretending to a precision the fixture has not
-    // got. The bitmap measures 0.125 B/slot, which is the bit exactly.
+    // Two bytes per slot: a quarter of the `Vec<u64>` this test exists to keep
+    // out, and comfortably above what the bitmaps cost.
+    //
+    // The measurement is 0.84, and the composition is known. Two structures
+    // are one bit per slot — the owned set and the decoy pool — which is 0.25
+    // together, and each lives in a `Vec` that doubles, so a fixture caught
+    // between two doublings pays up to twice that. The rest is the scan's
+    // transient working set.
+    //
+    // The bar used to read 1.0, written against a fixture pair whose owned
+    // sets differed by 2400 slots and which reported 0.16. That number was
+    // mostly invisibility: with 8145 slots between the fixtures the same
+    // library measures 0.84, and a bound of 1.0 would be a hair from red for
+    // reasons that have nothing to do with a regression.
     assert!(
-        per_slot < 1.0,
+        per_slot < 2.0,
         "open_space peaked at {peak_small} bytes over {owned_small} owned \
          slots and {peak_large} over {owned_large} — {growth} bytes for \
          {extra_slots} extra slots, {per_slot:.2} per slot. At the {} slot \
@@ -196,8 +245,15 @@ fn open_peak_does_not_scale_with_the_owned_set() {
     // deliberately held live — the representation `owned_slots` used to have
     // — and require the harness to see it. The bar is four rather than eight:
     // the shadow reuses memory the scan has freed, so it reads a little under
-    // what it holds (measured 6.3), and the real number it has to be told
-    // apart from is 0.16.
+    // what it holds (measured 7.7), and the real number it has to be told
+    // apart from is 0.84.
+    //
+    // This control is also what says the fixtures are still big enough. The
+    // peak is a maximum over the whole open, so a constant transient taller
+    // than the shadow hides it completely: when the era window was a map of
+    // superblock PAYLOADS, every measurement here pinned to the same 105 KB
+    // and the control read 0.00 — the budget above was passing while
+    // measuring nothing at all.
     let (_, control_small) = open_peak(&small, true);
     let (_, control_large) = open_peak(&large, true);
     let control_per_slot = control_large.saturating_sub(control_small) as f64 / extra_slots as f64;
