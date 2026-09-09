@@ -1332,6 +1332,17 @@ class HvAsyncSpace {
   /// Killing is still the last resort, on the two paths where it is safe:
   /// after the worker has answered (it is already tearing itself down), and
   /// after it has died (there is no frame left to unwind).
+  /// The background wait a timed-out [close] left running, or null when the
+  /// close answered inside its grace.
+  ///
+  /// Exposed because the thing that went wrong is a future that never
+  /// completes, and a leak of that shape has no other observable: the ports it
+  /// holds report nothing about themselves, and "the process did not exit" is
+  /// not something a test in that process can ask.
+  @visibleForTesting
+  Future<void>? get debugCloseDrain => _closeDrain;
+  Future<void>? _closeDrain;
+
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
@@ -1404,13 +1415,26 @@ class HvAsyncSpace {
     // Timed out. Leave the worker alive (see the doc above) and drain its
     // answer in the background, so the watcher and the port are released when
     // it finally lands rather than never.
-    unawaited(done.catchError((Object _) => null).whenComplete(() {
+    //
+    // Raced against the death, exactly as the first wait was. Waiting on the
+    // reply ALONE has a hole with the same shape as the one that race was
+    // added for: if the worker dies after this point without answering, the
+    // reply future never completes — a receive port does not close because its
+    // sender is gone — so the port and the watcher are held for the life of the
+    // host, and ports keep a Dart event loop alive (report24 HV24-05). The
+    // worker is still not killed: a silent worker may simply be busy inside
+    // the FFI, which is the whole reason this branch exists.
+    _closeDrain = _death
+        .race(done)
+        .catchError((Object _) => null)
+        .whenComplete(() {
       reply.close();
       // The worker is finally gone, on its own terms. Stop watching now rather
       // than at the timeout: until this lands the isolate is still live and a
       // real crash in the meantime is still worth reporting.
       _death.dispose();
-    }));
+    });
+    unawaited(_closeDrain!);
     throw HvException(
         'Busy',
         'hidden-volume worker did not close within '
