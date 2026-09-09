@@ -401,12 +401,20 @@ impl<'f> Space<'f> {
                 };
                 cursor = Some(last_key.clone());
                 for (_key, value) in &page {
-                    if let Ok(bytes) = <[u8; 8]>::try_from(value.as_slice()) {
+                    // THE SHARED PARSER, not an 8-byte cast. A log index value
+                    // carries the batch's content hash as well now, and an
+                    // exact-length cast silently matched nothing — so no batch
+                    // counted as referenced and every live one was a candidate
+                    // for scrubbing. Caught by `vacuum_data_batches` tests;
+                    // one reader spelling the layout for itself is how that
+                    // happens (report24 HV24-01 is the change, this is its
+                    // blast radius).
+                    if let Ok(slot) = crate::space::log::parse_batch_slot_value(value) {
                         // A value that names no real slot is dropped by
                         // `insert` and cannot match an owned slot
                         // anyway — a false negative at worst, never a
                         // wrongful scrub.
-                        referenced.insert(u64::from_le_bytes(bytes));
+                        referenced.insert(slot);
                     }
                 }
             }

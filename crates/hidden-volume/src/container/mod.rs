@@ -4,8 +4,8 @@
 pub mod file;
 pub mod header;
 
-use zeroize::{Zeroize, Zeroizing};
 use std::path::Path;
+use zeroize::{Zeroize, Zeroizing};
 
 pub use file::{ContainerFile, DEFAULT_SUPERBLOCK_REPLICAS};
 pub use header::Header;
@@ -1480,9 +1480,11 @@ impl Container {
                             // Same ownership rule as the KV branch above: the
                             // payloads are this function's, so this function
                             // clears them.
-                            let page = WipedLogPage(
-                                src_space.iter_log_after(ns, cursor, log_page_size)?,
-                            );
+                            let page = WipedLogPage(src_space.iter_log_after(
+                                ns,
+                                cursor,
+                                log_page_size,
+                            )?);
                             if page.0.is_empty() {
                                 break;
                             }

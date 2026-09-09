@@ -414,17 +414,79 @@ pub fn parse_log_id_key(key: &[u8]) -> Result<u64> {
 /// log" rather than "log namespace is corrupt". `repack` uses the
 /// distinction to auto-classify namespaces (audit pass 7, L1).
 pub fn parse_batch_slot_value(value: &[u8]) -> Result<u64> {
-    if value.len() != 8 {
+    // Two layouts, and both are read:
+    //
+    //   v1: slot(8)                 — every container written before the
+    //                                 content hash existed
+    //   v2: slot(8) ‖ batch_hash(32)
+    //
+    // See [`encode_batch_slot_value`] for why v2 exists. A v1 value is not an
+    // error: it is what is on disk, and refusing it would make yesterday's
+    // container unreadable to fix a property of tomorrow's.
+    if value.len() != BATCH_SLOT_VALUE_V1_LEN && value.len() != BATCH_SLOT_VALUE_LEN {
         return Err(Error::WrongNamespaceKind(
-            "log entry value not 8 bytes (namespace is not a log)",
+            "log entry value is neither 8 nor 40 bytes (namespace is not a log)",
         ));
     }
     let mut buf = [0u8; 8];
-    buf.copy_from_slice(value);
+    buf.copy_from_slice(&value[..8]);
     Ok(u64::from_le_bytes(buf))
 }
 
-/// Encode a batch slot pointer as a KV value.
+/// The batch's content hash, when the value carries one.
+///
+/// `None` for a v1 value — the container predates the hash, and saying so is
+/// not the same as saying the content is unknown-and-therefore-equal.
+#[must_use]
+pub fn parse_batch_content_hash(value: &[u8]) -> Option<[u8; 32]> {
+    if value.len() != BATCH_SLOT_VALUE_LEN {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&value[8..]);
+    Some(out)
+}
+
+/// Length of a v1 log index value: the batch slot alone.
+pub const BATCH_SLOT_VALUE_V1_LEN: usize = 8;
+
+/// Length of the current log index value: the slot and the batch's hash.
+pub const BATCH_SLOT_VALUE_LEN: usize = 40;
+
+/// Encode a log index value: where the batch is, and WHAT IT IS.
+///
+/// The hash is the whole point. The index tree is built over these values, and
+/// the namespace root — and through it the commit's `root_hash` — is a hash of
+/// the tree. With the slot alone, the root described an ADDRESS: two copies of
+/// one container, appending records of the same shape, place their batch on the
+/// same slot and produce the SAME `(seq, root_hash)` while holding different
+/// messages.
+///
+/// That pair is what `commit_history_with_roots` offers as an exact identifier
+/// of a log branch, and what the multi-device guide tells a reader to use to
+/// tell a clean continuation from a fork. It could not do that
+/// (report24 HV24-01).
+///
+/// **Format**: a container that has been written by this version holds 40-byte
+/// values in its log namespaces, and a build older than this reads them as
+/// "not a log". Reading NEWER data with an OLDER build is the direction that
+/// breaks; this build reads both.
+#[must_use]
+pub fn encode_batch_slot_value_v2(
+    batch_slot: u64,
+    batch_hash: &[u8; 32],
+) -> [u8; BATCH_SLOT_VALUE_LEN] {
+    let mut out = [0u8; BATCH_SLOT_VALUE_LEN];
+    out[..8].copy_from_slice(&batch_slot.to_le_bytes());
+    out[8..].copy_from_slice(batch_hash);
+    out
+}
+
+/// The layout before the content hash: the batch slot alone.
+///
+/// Kept, name and signature unchanged, because it is public API — and used by
+/// the tests that exercise reading a container written by an older build. New
+/// writes go through [`encode_batch_slot_value_v2`].
 #[must_use]
 pub fn encode_batch_slot_value(batch_slot: u64) -> [u8; 8] {
     batch_slot.to_le_bytes()

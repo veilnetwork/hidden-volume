@@ -1,5 +1,42 @@
 # Changelog
 
+## 2.5.0 — 2026-09-09
+
+### Fixed
+
+- **A log branch is identified by what it holds, not by where it put it.**
+  `commit_history_with_roots` offers `(seq, root_hash)` as an exact identifier
+  of a branch, and the multi-device guide tells a reader to use it to tell a
+  clean continuation from a fork. It could not: the index tree for a log
+  namespace was built over values holding the batch's SLOT and nothing else, so
+  two copies of one container appending records of the same shape placed their
+  batch on the same slot and produced the SAME pair while holding different
+  messages. The index value now carries the batch's content hash as well.
+
+  **Format**: a container written by 2.5.0 or later holds 40-byte log index
+  values, and a build older than this reads them as "namespace is not a log".
+  This build reads both layouts, so upgrading is safe and downgrading is not.
+
+  Found by report24 (HV24-01). Found while fixing it: the data-batch vacuum
+  decoded those values with an exact 8-byte cast of its own, so with the new
+  layout nothing counted as referenced and every live batch became a candidate
+  for scrubbing. One reader spelling a layout for itself is how that happens;
+  it uses the shared parser now.
+
+- **Repack clears the plaintext it owns.** Keys, values, the cursor and log
+  payloads were held in ordinary vectors and handed back to the allocator as
+  they were. `Tx::put` makes its own protected copy, but the source belonged to
+  this library, and clearing what it owns is this library's own rule
+  (report24 HV24-03).
+
+- **Two error variants stopped being erased at the FFI boundary.**
+  `CreateCleanupFailed` and `ReentrantRun` reached every caller as "unknown
+  error variant". The guard that was meant to prevent this enumerated variants
+  by hand and was missing three of twenty-seven, so `Error::variant_name` now
+  matches exhaustively in the crate that defines the enum — a new variant does
+  not compile until it is named — and the FFI guard walks that inventory
+  (report24 HV24-04).
+
 ## 2.4.0 — 2026-09-08
 
 ### Fixed
