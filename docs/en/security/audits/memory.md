@@ -42,8 +42,8 @@ decisions. Update on every change to crypto / space / tx modules.
 |---|---|
 | Container salt (`[u8; 32]`) | Stored cleartext in header |
 | Argon2 params (`u32 × 4`) | Stored cleartext in header |
-| Per-record `payload_hash` (BLAKE3) | Hash of already-encrypted ciphertext; reveals nothing |
-| `Superblock.root_hash` | Same |
+| Per-record `payload_hash` (BLAKE3) | Hash of the PLAINTEXT node bytes — `tree.rs` hashes before `place_chunk` seals them, and `reference/format.md` says so. Safe to retain anyway, but for a different reason than this table used to give: the hash never leaves an AEAD-sealed payload. Read as "hash of ciphertext" it would look safe to put somewhere unencrypted, and it is not |
+| `Superblock.root_hash` | Same — plaintext-derived, safe only where it stays sealed |
 | `IndexRoot.payload_hash` | Same |
 | `ChildPointer.child_hash` | Same |
 | AEAD nonces (`[u8; 24]`) | Random per-write; OK to retain |

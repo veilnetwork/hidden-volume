@@ -1904,8 +1904,11 @@ class SpaceHandleBindings {
     return _decodeFramedKeys(_Reader(_bufferToBytes(out)).readByteVec());
   }
 
-  /// Drop all entries in [namespace] and zero the index root. Returns
-  /// the new commit_seq.
+  /// Drop all entries in [namespace] and zero the index root. Returns the
+  /// NUMBER OF ENTRIES ERASED, not a commit_seq — `Space::erase_namespace`
+  /// is a `usize` count, and an already-empty namespace answers 0 without
+  /// committing at all. A caller that read this as a sequence number got a
+  /// count that happens to look like one.
   int eraseNamespace(int namespace) {
     _ensureOpen();
     final ns = _ns(namespace);

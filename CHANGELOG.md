@@ -1,5 +1,24 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed (documentation)
+
+- **The memory audit gave the right verdict for the wrong reason.** Its
+  retention table called `payload_hash`, `root_hash` and `child_hash` "hash of
+  already-encrypted ciphertext". They are BLAKE3 over the PLAINTEXT node bytes
+  — `space/tree.rs` hashes before `place_chunk` seals them, and
+  `reference/format.md` has said so all along. The verdict stands (they never
+  leave an AEAD-sealed payload), but read as "hash of ciphertext" they look
+  safe to put somewhere unencrypted, and they are not. Corrected in both
+  languages.
+
+- **`eraseNamespace` does not return a commit_seq.** Two of the three Dart
+  docs said it did; it returns the NUMBER OF ENTRIES ERASED, and an
+  already-empty namespace answers 0 without committing at all. The top-level
+  `hidden_volume.dart` had already been corrected — these two had not, so the
+  binding a caller reads first was the one still wrong.
+
 ## 2.5.0 — 2026-09-09
 
 ### Fixed
