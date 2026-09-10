@@ -1170,7 +1170,8 @@ class HvAsyncSpace {
   Future<int> count(int namespace) =>
       _call<int>((reply) => _CountRequest(namespace: namespace, reply: reply));
 
-  /// Drop all entries in [namespace]. Returns the new commit_seq.
+  /// Drop all entries in [namespace]. Returns the NUMBER OF ENTRIES ERASED,
+  /// not a commit_seq — see [HvSpace.eraseNamespace] in `bindings.dart`.
   ///
   /// See [eraseNamespaceOperation] if you intend to time this out.
   Future<int> eraseNamespace(int namespace) async =>
