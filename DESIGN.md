@@ -278,8 +278,11 @@ only `owned_slots` (a BITMAP — one bit per slot in the file, not eight bytes
 per owned chunk; see `space::slots`), `commit_history: Vec<u64>` (8 B per
 distinct commit seq, replicas collapsed as the scan goes), and the payload of
 the current max-seq Superblock (~48 B) accumulate. Measured end to end by
-`tests/open_peak_memory.rs`: **0.16 bytes of peak heap per owned slot**, which
-is ~2.5 MiB at the 16M-slot scan cap. It was 27.5 B/slot — 440 MiB at the cap
+`tests/open_peak_memory.rs`: **0.84 bytes of peak heap per owned slot**, which
+is ~13 MiB at the 16M-slot scan cap, against a bar of 2.0. (This read 0.16
+until report27 H07 — the same library, measured across a fixture pair whose
+owned sets differed by too few slots to see; the number changed, the library
+did not.) It was 27.5 B/slot — 440 MiB at the cap
 — while `owned_slots` was a `Vec<u64>` (report9 HV-13). That is ~250× less than holding all
 Plaintexts during the scan; critical for weak devices with large
 (multi-GiB) containers.

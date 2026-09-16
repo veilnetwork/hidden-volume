@@ -56,3 +56,34 @@ pub fn scratch_path() -> std::path::PathBuf {
     drop(tmp);
     p
 }
+
+/// No temp of a rewrite's making survives beside `path`.
+///
+/// `unique_temp_path_in_parent` builds `.{file_name}.{prefix}.{random}.tmp`.
+/// Several tests instead asserted on `path.with_extension("hv-compact-tmp")`
+/// or filtered a directory listing for `hv-compact*` — names the helper has
+/// not produced since it grew a random suffix — so they were green whatever
+/// was left behind (report27 H10). Spelled here from the same two pieces the
+/// helper uses, once, rather than remembered at each site.
+#[allow(
+    dead_code,
+    reason = "consumed by the rewrite/cancellation test files, not by all"
+)]
+pub fn assert_no_stray_temp(path: &std::path::Path) {
+    let parent = path.parent().expect("a container path has a parent");
+    let stem = path
+        .file_name()
+        .expect("a container path has a file name")
+        .to_string_lossy()
+        .into_owned();
+    let leftovers: Vec<_> = std::fs::read_dir(parent)
+        .expect("the parent directory must be readable")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(&format!(".{stem}.")) && n.ends_with(".tmp"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "a failed rewrite left its temp behind: {leftovers:?}"
+    );
+}

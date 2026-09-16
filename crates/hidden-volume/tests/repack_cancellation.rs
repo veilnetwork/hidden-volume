@@ -22,7 +22,7 @@ use hidden_volume::space::index::Namespace;
 use hidden_volume::{Container, Error};
 
 mod common;
-use common::{fast_params, scratch_path};
+use common::{assert_no_stray_temp, fast_params, scratch_path};
 
 fn fast_repack_options() -> RepackOptions {
     RepackOptions {
@@ -71,8 +71,7 @@ fn pre_fired_token_cleans_up_compact_tmp() {
     let path = scratch_path();
     build_container(&path, &[b"alice"], 50);
 
-    let tmp_path = path.with_extension("hv-compact-tmp");
-    assert!(!tmp_path.exists());
+    assert_no_stray_temp(&path);
 
     let token = CancelToken::new();
     token.cancel();
@@ -80,10 +79,7 @@ fn pre_fired_token_cleans_up_compact_tmp() {
     let result = Container::compact_known_cancellable(&path, &[pw], fast_repack_options(), &token);
     assert!(matches!(result, Err(Error::Cancelled)));
     // Temp file must be cleaned up — no leftover.
-    assert!(
-        !tmp_path.exists(),
-        "compact's temp file must be removed on cancel"
-    );
+    assert_no_stray_temp(&path);
     // Original path still openable with original password.
     let mut c = Container::open(&path).unwrap();
     let mut s = c.open_space(b"alice").unwrap();
@@ -194,14 +190,13 @@ fn compact_known_cancellable_pre_fired_with_all_passwords() {
     // With all spaces' passwords supplied, semantics are identical.
     let path = scratch_path();
     build_container(&path, &[b"alice", b"bob"], 20);
-    let tmp_path = path.with_extension("hv-compact-tmp");
 
     let token = CancelToken::new();
     token.cancel();
     let pws: Vec<&[u8]> = vec![b"alice", b"bob"];
     let result = Container::compact_known_cancellable(&path, &pws, fast_repack_options(), &token);
     assert!(matches!(result, Err(Error::Cancelled)));
-    assert!(!tmp_path.exists());
+    assert_no_stray_temp(&path);
     // Both spaces still accessible.
     let mut c = Container::open(&path).unwrap();
     c.open_space(b"alice").unwrap();

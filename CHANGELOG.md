@@ -2,6 +2,82 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **An open holds the file the path names, not one a rename displaced.**
+  Opening and locking are two steps, and every in-place rewrite here publishes
+  with `rename(2)`. An open that reached the lock after the rename came back
+  holding the ORPHANED inode — a valid descriptor that no path names any more.
+  Writes through it were invisible to the next open, and a compaction started
+  from it would republish a stale container over the rewrite that displaced it.
+  The identity is checked after the lock now, and a mismatch retries onto
+  whatever the path names by then (report27 H08).
+
+- **The identifiable history reaches the horizon INCLUSIVE.** The guide's test
+  is `current_seq - anchor_seq > ANCHOR_HORIZON` → out of range, and
+  `vacuum_orphans` agrees: it keeps every era at `seq >= current - HORIZON`.
+  The open's anchor window kept only `HORIZON` of them, so the era exactly
+  1024 commits back was dropped on the way in — still on disk, no longer
+  identifiable — and the guide reads an in-range anchor missing from the
+  history as a fork nobody made (report27 H06).
+
+- **A temp that could not be removed is reported.** Seven exits from the
+  in-place rewrite removed the temporary they had written, and all seven
+  discarded the result. A read-only mount or a detached volume left a full
+  encrypted copy of the container beside it under a random name, and the caller
+  heard only why the rewrite failed. For a deniable container that is the thing
+  the abandoned-rewrite design is built to avoid: the source is restored byte
+  for byte so nothing says a rewrite ran, and then an orphan beside it says so.
+  New `Error::RewriteCleanupFailed` carries both causes and the leftover's file
+  NAME — not its path, for the reason `CreateCleanupFailed` names none. At the
+  FFI boundary it folds into `HvError::Io` with both causes, as
+  `CreateCleanupFailed` already did, so no positional variant moves (report27
+  H09).
+
+- **The stats total is taken from the core, once.** Three surfaces summed the
+  per-namespace counts as `usize` before widening, going around
+  `SpaceStats::total_entries_u64`, which saturates in a width the counts cannot
+  outgrow. On a 32-bit target that sum panics under overflow checks and wraps
+  without them, so the one number a host puts in front of a person could come
+  back smaller than any single namespace it counts. One converter now, and a
+  guard against a fourth (report27 H05).
+
+- **Pages of plaintext clear themselves when a walk leaves early.** The index
+  walk's key and pair accumulators, and the leaf decoder's entry list, were
+  bare `Vec`s: every `?` below the first push dropped the plaintext gathered so
+  far without clearing it. The repack's pages had had a self-clearing guard
+  since report24; it now lives in one module and all of them use it (report27
+  H02).
+
+- **`AsyncSpace::create` / `::open` guard the password in the CALL.** They
+  built their `Zeroizing` wrapper as the first statement of an `async fn`, and
+  an `async fn` body does not begin until the first poll — so a future built
+  and dropped without ever being polled freed the password as a plain `Vec`.
+  Both are plain `fn`s returning `impl Future` now, so the prologue runs before
+  there is a future to abandon. The uniffi constructors next door cannot take
+  that shape and say why (report27 H03).
+
+### Changed (internal)
+
+- **The error-variant inventory is generated, not remembered.**
+  `variant_name` and `ALL_VARIANT_NAMES` were two lists, and only the first was
+  compiler-enforced: a new variant with an arm compiled, passed, and stayed
+  invisible to every downstream guard that enumerates the names — which is how
+  `CreateCleanupFailed` and `ReentrantRun` reached FFI callers as "unknown
+  error variant" (report24 HV24-04). One macro emits both from the same arms
+  now, so adding a variant makes the FFI's sample inventory red until it is
+  handled (report27 H04).
+
+### Fixed (tests)
+
+- **The leftover-temp assertions looked for a name nothing creates.** Five of
+  them checked `path.with_extension("hv-compact-tmp")` or filtered a directory
+  listing for `hv-compact*`, while the helper builds
+  `.{file_name}.{prefix}.{random}.tmp` — so they were green whatever was left
+  behind. One shared `assert_no_stray_temp`, spelled from the same two pieces
+  the helper uses; break-checked by making the rewrite leak, which the old
+  assertions did not notice and these do (report27 H10).
+
 ### Fixed (documentation)
 
 - **The memory audit gave the right verdict for the wrong reason.** Its

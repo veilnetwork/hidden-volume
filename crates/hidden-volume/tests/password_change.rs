@@ -22,7 +22,7 @@ use hidden_volume::space::index::Namespace;
 use hidden_volume::{Container, Error};
 
 mod common;
-use common::{fast_params, scratch_path};
+use common::{assert_no_stray_temp, fast_params, scratch_path};
 
 fn fast_repack_options() -> RepackOptions {
     RepackOptions {
@@ -144,14 +144,13 @@ fn rotate_both_spaces_at_once() {
 fn wrong_old_password_returns_authfailed_and_leaves_original_intact() {
     let path = scratch_path();
     build_single_space(&path, b"actual-pw", 5);
-    let tmp_path = path.with_extension("hv-rotate-tmp");
 
     let wrong: &[u8] = b"wrong-pw";
     let new: &[u8] = b"new-pw";
     let result = Container::change_passwords(&path, &[(wrong, new)], fast_repack_options());
     assert!(matches!(result, Err(Error::AuthFailed)));
     // Temp file was cleaned up.
-    assert!(!tmp_path.exists());
+    assert_no_stray_temp(&path);
 
     // Original still works with original password.
     let mut c = Container::open(&path).unwrap();
@@ -164,7 +163,6 @@ fn wrong_old_password_returns_authfailed_and_leaves_original_intact() {
 fn two_write_as_collide_returns_space_already_exists() {
     let path = scratch_path();
     build_two_spaces(&path, b"a-old", b"b-old");
-    let tmp_path = path.with_extension("hv-rotate-tmp");
 
     let a_old: &[u8] = b"a-old";
     let b_old: &[u8] = b"b-old";
@@ -175,7 +173,7 @@ fn two_write_as_collide_returns_space_already_exists() {
         fast_repack_options(),
     );
     assert!(matches!(result, Err(Error::SpaceAlreadyExists)));
-    assert!(!tmp_path.exists());
+    assert_no_stray_temp(&path);
 
     // Original unchanged — both old passwords still work.
     let mut c = Container::open(&path).unwrap();
@@ -233,7 +231,6 @@ fn noop_rotation_is_identical_to_compact_known() {
 fn cancellable_pre_fired_aborts_and_cleans_tmp() {
     let path = scratch_path();
     build_single_space(&path, b"old-pw", 5);
-    let tmp_path = path.with_extension("hv-rotate-tmp");
 
     let token = CancelToken::new();
     token.cancel();
@@ -247,7 +244,7 @@ fn cancellable_pre_fired_aborts_and_cleans_tmp() {
         &token,
     );
     assert!(matches!(result, Err(Error::Cancelled)));
-    assert!(!tmp_path.exists());
+    assert_no_stray_temp(&path);
 
     // Original unchanged.
     let mut c = Container::open(&path).unwrap();

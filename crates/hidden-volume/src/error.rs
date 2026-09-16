@@ -412,91 +412,115 @@ pub enum Error {
         /// Slot index where the offending chunk lives.
         slot: u64,
     },
+
+    /// An in-place rewrite failed, AND the encrypted temporary it had written
+    /// could not be removed.
+    ///
+    /// A rewrite — `compact_known`, `change_passwords` — builds the whole new
+    /// container in a sibling of the source before renaming it into place, and
+    /// every way out before that rename removes it. Seven of those removals
+    /// discarded their own result, so a read-only mount, a lost volume or a
+    /// permission the caller has for creating but not for unlinking left a
+    /// full encrypted copy of the container beside it under a name nobody had
+    /// chosen, and the caller was told only why the rewrite failed (report27
+    /// H09).
+    ///
+    /// For a deniable container that is not a housekeeping detail. The design
+    /// goes to some length to leave the source byte-identical when a rewrite
+    /// is abandoned, precisely so that an abandoned rewrite is not evidence
+    /// that something ran — and an orphaned temp beside it is exactly that
+    /// evidence, in a file the caller does not know to look for.
+    ///
+    /// `source` is why the rewrite failed, `cleanup` is why the temporary is
+    /// still there. `leftover` is its FILE NAME, not its path: the caller
+    /// passed the directory and can act on the name, while an error string
+    /// that carries the whole path announces a container's location to
+    /// whatever reads the log — the reason [`Self::CreateCleanupFailed`] names
+    /// no path at all. The random suffix is the one part the caller could not
+    /// have worked out for themselves.
+    #[error(
+        "the rewrite failed ({source}), and the temporary it wrote could not \
+         be removed ({cleanup}) — a file named {leftover} is still beside the \
+         container"
+    )]
+    RewriteCleanupFailed {
+        /// Why the rewrite itself failed.
+        source: Box<Error>,
+        /// Why the temporary could not be removed.
+        cleanup: std::io::Error,
+        /// The leftover's file name, in the directory the caller named.
+        leftover: String,
+    },
+}
+
+/// Both halves of the variant inventory, from ONE list of arms.
+///
+/// They used to be two lists. The match is exhaustive and lives in the defining
+/// crate, where `#[non_exhaustive]` does not apply, so the compiler does force
+/// a new variant to be named there — but nothing tied that to
+/// `ALL_VARIANT_NAMES` beside it, and a hand-written list is a promise somebody
+/// will remember. Two variants had already slipped past one (report24
+/// HV24-04): `CreateCleanupFailed` and `ReentrantRun` were described to every
+/// FFI caller as "unknown error variant". The comment answering for that said
+/// the reviewer "has this list under their cursor", which is not a mechanism
+/// (report27 H04).
+///
+/// Generated together, the drift has nowhere to happen: the compiler makes you
+/// add an arm, and the arm IS the entry. Downstream guards enumerate
+/// `ALL_VARIANT_NAMES` and fail on a name they do not handle — the FFI's sample
+/// inventory among them — so the chain now runs end to end without a step that
+/// depends on being remembered.
+macro_rules! variant_inventory {
+    ($($pat:pat => $name:literal,)+) => {
+        /// The variant's own name.
+        ///
+        /// The match is EXHAUSTIVE and lives in the defining crate, where
+        /// `#[non_exhaustive]` does not apply — so adding a variant without
+        /// naming it here does not compile.
+        pub fn variant_name(&self) -> &'static str {
+            match self {
+                $($pat => $name,)+
+            }
+        }
+
+        /// Every variant's name, for guards that cannot match exhaustively
+        /// because this enum is `#[non_exhaustive]` to them.
+        ///
+        /// Generated from the same arms as [`Self::variant_name`]; see
+        /// [`variant_inventory`] for why it is not a list of its own.
+        pub const ALL_VARIANT_NAMES: &'static [&'static str] = &[$($name,)+];
+    };
 }
 
 impl Error {
-    /// The variant's own name.
-    ///
-    /// The match below is EXHAUSTIVE and lives in the defining crate, where
-    /// `#[non_exhaustive]` does not apply — so adding a variant without naming
-    /// it here does not compile. That is the point: everything downstream that
-    /// has to keep up with this enum is guarded by hand-written lists, and a
-    /// hand-written list is a promise somebody will remember. Two variants had
-    /// already slipped past one (report24 HV24-04): `CreateCleanupFailed` and
-    /// `ReentrantRun` were described to every FFI caller as "unknown error
-    /// variant".
-    ///
-    /// Downstream guards enumerate [`Self::ALL_VARIANT_NAMES`] and fail on a
-    /// name they do not handle, so the chain is: the compiler makes you name a
-    /// new variant, and the name then makes the guards fail until it is
-    /// handled.
-    pub fn variant_name(&self) -> &'static str {
-        match self {
-            Self::Io(_) => "Io",
-            Self::AuthFailed => "AuthFailed",
-            Self::UnreadableNewerState => "UnreadableNewerState",
-            Self::SpaceAlreadyExists => "SpaceAlreadyExists",
-            Self::Busy => "Busy",
-            Self::ReadOnly => "ReadOnly",
-            Self::RenameVisibleDurabilityUncertain(_) => "RenameVisibleDurabilityUncertain",
-            Self::RenameVisibleContentUnverified(_) => "RenameVisibleContentUnverified",
-            Self::SourceIsNotARegularFile(_) => "SourceIsNotARegularFile",
-            Self::RenameVisibleAliasesNotRevoked(_) => "RenameVisibleAliasesNotRevoked",
-            Self::RenameVisibleAliasesUnknown => "RenameVisibleAliasesUnknown",
-            Self::RenameVisibleAliasesAndDurabilityUncertain { .. } => {
-                "RenameVisibleAliasesAndDurabilityUncertain"
-            },
-            Self::PublishUncertain(_) => "PublishUncertain",
-            Self::Malformed(_) => "Malformed",
-            Self::Kdf(_) => "Kdf",
-            Self::CreateCleanupFailed { .. } => "CreateCleanupFailed",
-            Self::Internal(_) => "Internal",
-            Self::PayloadTooLarge => "PayloadTooLarge",
-            Self::IndexFull => "IndexFull",
-            Self::Compression(_) => "Compression",
-            Self::Cancelled => "Cancelled",
-            Self::ReentrantRun => "ReentrantRun",
-            Self::WouldBlock => "WouldBlock",
-            Self::WrongNamespaceKind(_) => "WrongNamespaceKind",
-            Self::TooManyNamespaces { .. } => "TooManyNamespaces",
-            Self::ContainerTooLarge { .. } => "ContainerTooLarge",
-            Self::IntegrityFailure { .. } => "IntegrityFailure",
-        }
+    variant_inventory! {
+        Self::Io(_) => "Io",
+        Self::AuthFailed => "AuthFailed",
+        Self::UnreadableNewerState => "UnreadableNewerState",
+        Self::SpaceAlreadyExists => "SpaceAlreadyExists",
+        Self::Busy => "Busy",
+        Self::ReadOnly => "ReadOnly",
+        Self::RenameVisibleDurabilityUncertain(_) => "RenameVisibleDurabilityUncertain",
+        Self::RenameVisibleContentUnverified(_) => "RenameVisibleContentUnverified",
+        Self::SourceIsNotARegularFile(_) => "SourceIsNotARegularFile",
+        Self::RenameVisibleAliasesNotRevoked(_) => "RenameVisibleAliasesNotRevoked",
+        Self::RenameVisibleAliasesUnknown => "RenameVisibleAliasesUnknown",
+        Self::RenameVisibleAliasesAndDurabilityUncertain { .. } => "RenameVisibleAliasesAndDurabilityUncertain",
+        Self::PublishUncertain(_) => "PublishUncertain",
+        Self::Malformed(_) => "Malformed",
+        Self::Kdf(_) => "Kdf",
+        Self::CreateCleanupFailed { .. } => "CreateCleanupFailed",
+        Self::Internal(_) => "Internal",
+        Self::PayloadTooLarge => "PayloadTooLarge",
+        Self::IndexFull => "IndexFull",
+        Self::Compression(_) => "Compression",
+        Self::Cancelled => "Cancelled",
+        Self::ReentrantRun => "ReentrantRun",
+        Self::WouldBlock => "WouldBlock",
+        Self::WrongNamespaceKind(_) => "WrongNamespaceKind",
+        Self::TooManyNamespaces { .. } => "TooManyNamespaces",
+        Self::ContainerTooLarge { .. } => "ContainerTooLarge",
+        Self::IntegrityFailure { .. } => "IntegrityFailure",
+        Self::RewriteCleanupFailed { .. } => "RewriteCleanupFailed",
     }
-
-    /// Every variant's name, for guards that cannot match exhaustively because
-    /// this enum is `#[non_exhaustive]` to them.
-    ///
-    /// Kept beside [`Self::variant_name`] deliberately: the compiler forces a
-    /// new variant into that match, and the reviewer adding it there has this
-    /// list under their cursor.
-    pub const ALL_VARIANT_NAMES: &'static [&'static str] = &[
-        "Io",
-        "AuthFailed",
-        "UnreadableNewerState",
-        "SpaceAlreadyExists",
-        "Busy",
-        "ReadOnly",
-        "RenameVisibleDurabilityUncertain",
-        "RenameVisibleContentUnverified",
-        "SourceIsNotARegularFile",
-        "RenameVisibleAliasesNotRevoked",
-        "RenameVisibleAliasesUnknown",
-        "RenameVisibleAliasesAndDurabilityUncertain",
-        "PublishUncertain",
-        "Malformed",
-        "Kdf",
-        "CreateCleanupFailed",
-        "Internal",
-        "PayloadTooLarge",
-        "IndexFull",
-        "Compression",
-        "Cancelled",
-        "ReentrantRun",
-        "WouldBlock",
-        "WrongNamespaceKind",
-        "TooManyNamespaces",
-        "ContainerTooLarge",
-        "IntegrityFailure",
-    ];
 }
