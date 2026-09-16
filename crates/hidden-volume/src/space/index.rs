@@ -449,7 +449,14 @@ impl LeafNode {
         if num.saturating_mul(MIN_LEAF_ENTRY_BYTES) > bytes.len() - HEADER_LEN {
             return Err(Error::Malformed("leaf count exceeds payload bound"));
         }
-        let mut entries = Vec::with_capacity(num);
+        // Guarded, not bare: from the first push below there are five ways
+        // out of this function that are not its return value — a truncated
+        // key length, an invalid one, a truncated value, trailing bytes, an
+        // out-of-order pair — and each dropped the plaintext gathered so far
+        // without clearing it (report27 H02). A leaf that decodes badly is
+        // exactly the case worth something to an attacker, since it is the one
+        // a hostile writer can produce.
+        let mut entries = crate::wipe::WipedPairs::new(Vec::with_capacity(num));
         let mut off = HEADER_LEN;
         for _ in 0..num {
             if bytes.len() < off + 2 {
@@ -475,7 +482,7 @@ impl LeafNode {
             }
             let value = bytes[off..off + vlen].to_vec();
             off += vlen;
-            entries.push((key, value));
+            entries.0.push((key, value));
         }
         // Audit pass 19 round 2: reject trailing bytes after the
         // last entry. The leaf encoding is exact-length; trailing
@@ -485,7 +492,7 @@ impl LeafNode {
                 "leaf payload trailing bytes after last entry",
             ));
         }
-        for w in entries.windows(2) {
+        for w in entries.0.windows(2) {
             // `windows(2)` yields slices of length 2 by definition; the
             // pattern destructure can only fail if a future `windows`
             // refactor changes that shape. Audit pass 17: previously
@@ -504,7 +511,7 @@ impl LeafNode {
         }
         Ok(Self {
             namespace,
-            entries: Redacted::new(entries),
+            entries: Redacted::new(entries.take()),
         })
     }
 

@@ -581,11 +581,11 @@ impl AsyncSpace {
     /// inside it under `password`. Equivalent to chaining
     /// [`Container::create`] + [`Container::create_space`] on the sync
     /// side, all inside one `spawn_blocking`.
-    pub async fn create(
+    pub fn create(
         path: impl AsRef<Path>,
         password: Vec<u8>,
         params: Argon2Params,
-    ) -> Result<Self> {
+    ) -> impl std::future::Future<Output = Result<Self>> + Send + 'static {
         // Audit pass 17 E: scrub the Rust-side password copy on
         // normal return — symmetric to the FFI crate's pass-16
         // wrappers. The wrapper is moved into the blocking closure
@@ -593,36 +593,52 @@ impl AsyncSpace {
         // path. Under `panic = "abort"` ([profile.release] in the
         // workspace Cargo.toml) destructors do not run on panic;
         // the OS process teardown is the scrub there.
+        //
+        // NOT an `async fn`, and that is the whole point of the shape: an
+        // `async fn` body does not begin until the first poll, so the
+        // `Zeroizing` below was built only if somebody awaited. A future
+        // built and dropped without ever being polled — a `select!` that lost,
+        // a timeout, a task cancelled between spawn and schedule — freed the
+        // password as a plain `Vec` (report27 H03). Here the guard is taken by
+        // the CALL, before the future exists, so dropping it unpolled wipes.
         let password = zeroize::Zeroizing::new(password);
         let path = path.as_ref().to_path_buf();
-        let inner = run_blocking(move || {
-            let container = Box::new(Container::create(&path, params)?);
-            OwnedSpace::wrap_create(container, &password)
-        })
-        .await?;
-        Ok(Self {
-            inner: Arc::new(Mutex::new(inner)),
-            ops: Arc::new(OpLedger::default()),
-        })
+        async move {
+            let inner = run_blocking(move || {
+                let container = Box::new(Container::create(&path, params)?);
+                OwnedSpace::wrap_create(container, &password)
+            })
+            .await?;
+            Ok(Self {
+                inner: Arc::new(Mutex::new(inner)),
+                ops: Arc::new(OpLedger::default()),
+            })
+        }
     }
 
     /// Open an existing container at `path` and unlock the space
     /// identified by `password`. The full open-time scan runs once
     /// inside the spawned blocking task; subsequent async calls on
     /// this `AsyncSpace` reuse the recovered state.
-    pub async fn open(path: impl AsRef<Path>, password: Vec<u8>) -> Result<Self> {
-        // Audit pass 17 E: see `Self::create` for the rationale.
+    pub fn open(
+        path: impl AsRef<Path>,
+        password: Vec<u8>,
+    ) -> impl std::future::Future<Output = Result<Self>> + Send + 'static {
+        // Audit pass 17 E: see `Self::create` for the rationale, including
+        // why this is not an `async fn` (report27 H03).
         let password = zeroize::Zeroizing::new(password);
         let path = path.as_ref().to_path_buf();
-        let inner = run_blocking(move || {
-            let container = Box::new(Container::open(&path)?);
-            OwnedSpace::wrap_open(container, &password)
-        })
-        .await?;
-        Ok(Self {
-            inner: Arc::new(Mutex::new(inner)),
-            ops: Arc::new(OpLedger::default()),
-        })
+        async move {
+            let inner = run_blocking(move || {
+                let container = Box::new(Container::open(&path)?);
+                OwnedSpace::wrap_open(container, &password)
+            })
+            .await?;
+            Ok(Self {
+                inner: Arc::new(Mutex::new(inner)),
+                ops: Arc::new(OpLedger::default()),
+            })
+        }
     }
 
     /// Run a closure with mutable access to the underlying [`Space`].

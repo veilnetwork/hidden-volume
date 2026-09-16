@@ -5,7 +5,7 @@ pub mod file;
 pub mod header;
 
 use std::path::Path;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 pub use file::{ContainerFile, DEFAULT_SUPERBLOCK_REPLICAS};
 pub use header::Header;
@@ -159,89 +159,7 @@ pub struct Container {
     pub(crate) file: ContainerFile,
 }
 
-/// A page of KV pairs that clears itself when it goes.
-///
-/// `Vec<(Vec<u8>, Vec<u8>)>` freed by an ordinary drop leaves the plaintext in
-/// the allocator's hands. Draining moves most entries out — this covers the
-/// rest, which is what an error or a cancel in the middle of a page leaves
-/// behind (report24 HV24-03).
-struct WipedPairs(Vec<(Vec<u8>, Vec<u8>)>);
-
-impl WipedPairs {
-    /// Clear every byte still held. Separate from [`Drop`] so a test can watch
-    /// it work on LIVE memory — reading a buffer back after it has been freed
-    /// is undefined behaviour, which makes "did the drop wipe it" a question
-    /// no safe test can ask directly.
-    fn wipe(&mut self) {
-        for (key, value) in self.0.iter_mut() {
-            key.zeroize();
-            value.zeroize();
-        }
-    }
-}
-
-impl Drop for WipedPairs {
-    fn drop(&mut self) {
-        self.wipe();
-    }
-}
-
-/// The same for a page of log payloads, which are read by reference and so are
-/// never drained.
-struct WipedLogPage(Vec<(u64, Vec<u8>)>);
-
-impl WipedLogPage {
-    /// See [`WipedPairs::wipe`].
-    fn wipe(&mut self) {
-        for (_, payload) in self.0.iter_mut() {
-            payload.zeroize();
-        }
-    }
-}
-
-impl Drop for WipedLogPage {
-    fn drop(&mut self) {
-        self.wipe();
-    }
-}
-
-#[cfg(test)]
-mod repack_wipe_tests {
-    use super::{WipedLogPage, WipedPairs};
-
-    #[test]
-    fn a_kv_page_clears_every_byte_it_still_holds() {
-        let mut page = WipedPairs(vec![
-            (b"key-one".to_vec(), b"secret-value".to_vec()),
-            (b"key-two".to_vec(), b"another-secret".to_vec()),
-        ]);
-
-        page.wipe();
-
-        for (key, value) in &page.0 {
-            assert!(key.iter().all(|b| *b == 0), "key survived: {key:?}");
-            assert!(value.iter().all(|b| *b == 0), "value survived: {value:?}");
-        }
-    }
-
-    #[test]
-    fn a_log_page_clears_its_payloads() {
-        let mut page = WipedLogPage(vec![
-            (1, b"a message body".to_vec()),
-            (2, b"another one".to_vec()),
-        ]);
-
-        page.wipe();
-
-        for (id, payload) in &page.0 {
-            assert!(*id > 0, "ids are not secret and are left alone");
-            assert!(
-                payload.iter().all(|b| *b == 0),
-                "payload survived: {payload:?}"
-            );
-        }
-    }
-}
+use crate::wipe::{WipedLogPage, WipedPairs};
 
 impl Container {
     /// Create a new empty container with default options (no initial
@@ -1749,11 +1667,10 @@ where
 
     let mut src = Container::open_exclusive_readonly(path)?;
 
-    let tmp = unique_temp_path_in_parent(path, prefix)?;
+    let tmp = TempOwner::reserve(path, prefix)?;
 
-    if let Err(e) = write(&mut src, &tmp, cancel) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
+    if let Err(e) = write(&mut src, tmp.path(), cancel) {
+        return Err(tmp.discard_after(e));
     }
 
     // M3-hardening: re-open tmp ourselves and hold an LOCK_EX fd on
@@ -1761,11 +1678,10 @@ where
     // non-empty, (b) starts with our format magic — defends against
     // a directory-writer attacker substituting tmp between the
     // writer's Container drop and our open.
-    let tmp_handle = match std::fs::OpenOptions::new().read(true).open(&tmp) {
+    let tmp_handle = match std::fs::OpenOptions::new().read(true).open(tmp.path()) {
         Ok(f) => f,
         Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(Error::Io(e));
+            return Err(tmp.discard_after(Error::Io(e)));
         },
     };
     // Exclusive lock pin on the tmp we are about to rename into place.
@@ -1786,8 +1702,8 @@ where
     match file::try_lock_exclusive(&tmp_handle) {
         Ok(()) => {},
         Err(Error::Busy) => {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(Error::Busy);
+            drop(tmp_handle);
+            return Err(tmp.discard_after(Error::Busy));
         },
         Err(_) => {
             // The filesystem does not honour flock (an exotic non-Unix
@@ -1812,8 +1728,8 @@ where
         use std::io::Read as _;
         let mut header = [0u8; HEADER_LEN];
         if let Err(e) = (&tmp_handle).read_exact(&mut header) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(Error::Io(e));
+            drop(tmp_handle);
+            return Err(tmp.discard_after(Error::Io(e)));
         }
         let params_bytes: [u8; HEADER_PARAMS_LEN] = header
             [HEADER_PARAMS_OFFSET..HEADER_PARAMS_OFFSET + HEADER_PARAMS_LEN]
@@ -1824,10 +1740,10 @@ where
             .map(|p| p.validate().is_ok())
             .unwrap_or(false);
         if !header_ok {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(Error::Internal(
+            drop(tmp_handle);
+            return Err(tmp.discard_after(Error::Internal(
                 "M3-hardening: tmp file substituted before rename (header validate failed)",
-            ));
+            )));
         }
     }
     // Capture inode for post-rename verification (Unix only — Windows
@@ -1858,9 +1774,8 @@ where
     if let Some(token) = cancel
         && token.is_cancelled()
     {
-        let _ = std::fs::remove_file(&tmp);
         drop(tmp_handle);
-        return Err(Error::Cancelled);
+        return Err(tmp.discard_after(Error::Cancelled));
     }
 
     // Atomic rename — on POSIX this overwrites `path` atomically.
@@ -1869,14 +1784,16 @@ where
     // MOVEFILE_WRITE_THROUGH, which is what makes it DURABLE. std's rename
     // passes only the first, and the parent fsync below is a no-op there — so
     // that platform had no barrier at all. See `rename_durable`.
-    let barrier = match rename_durable(&tmp, path) {
+    let barrier = match rename_durable(tmp.path(), path) {
         Ok(barrier) => barrier,
         Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
             drop(tmp_handle);
-            return Err(Error::Io(e));
+            return Err(tmp.discard_after(Error::Io(e)));
         },
     };
+    // The name is the published container's now; there is nothing left to
+    // remove, and unlinking it would take whatever reserved it next.
+    tmp.published();
 
     // M2: fsync parent directory so the rename is durable. On Unix
     // ext4/xfs/etc. without this, a crash after rename can revert the
@@ -2085,6 +2002,142 @@ fn parent_dir_for(path: &std::path::Path) -> &std::path::Path {
     match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => std::path::Path::new("."),
+    }
+}
+
+/// The one owner of a rewrite's temporary file.
+///
+/// Every way out of `atomic_rewrite_under_source_lock` before the rename has
+/// to remove the temp, and there are seven of them. Each used to do it inline
+/// with `let _ = std::fs::remove_file(&tmp)`, which discards the one fact
+/// worth keeping: whether the removal WORKED. A read-only mount, a detached
+/// volume, or a permission the caller has for creating but not for unlinking
+/// left a full encrypted copy of the container beside it under a random name,
+/// and the caller was told only why the rewrite failed (report27 H09).
+///
+/// One owner rather than a rule to re-remember at each site — a seventh site
+/// gets it wrong again — and it carries the removal's outcome so the caller
+/// can be told. [`Drop`] is the backstop for the paths that do not go through
+/// [`Self::discard_after`] at all: a panic, or a `?` added later.
+struct TempOwner {
+    path: std::path::PathBuf,
+    /// Disarmed once the rename has consumed the name, so `Drop` does not
+    /// unlink a name that now belongs to whoever reserved it next.
+    armed: bool,
+}
+
+impl TempOwner {
+    /// Reserve a temp beside `path`. See [`unique_temp_path_in_parent`].
+    fn reserve(path: &std::path::Path, prefix: &str) -> Result<Self> {
+        Ok(Self {
+            path: unique_temp_path_in_parent(path, prefix)?,
+            armed: true,
+        })
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// The rename took the name; there is nothing left to remove.
+    fn published(mut self) {
+        self.armed = false;
+    }
+
+    /// Remove the temp, answering whether it is really gone.
+    ///
+    /// `NotFound` is success: the file is not there, which is the whole
+    /// objective, and something removing it first is not a failure to report.
+    fn remove(&mut self) -> std::io::Result<()> {
+        self.armed = false;
+        #[cfg(test)]
+        if let Some(injected) = forced_unlink_failure() {
+            self.armed = true;
+            return Err(injected);
+        }
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => {
+                self.armed = true;
+                Err(e)
+            },
+        }
+    }
+
+    /// Fail with `primary`, or — if the temp survived — with both.
+    fn discard_after(mut self, primary: Error) -> Error {
+        match self.remove() {
+            Ok(()) => primary,
+            Err(cleanup) => {
+                // Disarmed although the file is still there, and deliberately:
+                // the error we are about to return SAYS it is still there, and
+                // `Drop` retrying the same unlink under the same conditions
+                // would at best change nothing and at worst make that
+                // statement false.
+                self.armed = false;
+                Error::RewriteCleanupFailed {
+                    source: Box::new(primary),
+                    cleanup,
+                    leftover: self
+                        .path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                }
+            },
+        }
+    }
+}
+
+impl Drop for TempOwner {
+    fn drop(&mut self) {
+        if self.armed {
+            // Nothing to report to from here — this is the panic path and the
+            // "somebody added a `?`" path. The reporting one is
+            // `discard_after`, which every deliberate exit goes through.
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+// Test-only switch that makes the temp removal fail.
+//
+// Thread-local for the reason `CREATE_FSYNC_FAILS` in `container/file.rs`
+// records at length. The failure it stands for — a read-only mount, a
+// detached volume, a directory the caller may create in but not unlink from —
+// cannot be staged from outside a test on a directory this process just wrote
+// to, and the one that CAN be staged (`chmod 0o500` on the parent) does
+// nothing when the suite runs as root, which would make the guard quietly
+// vacuous on exactly the hosts where tests run in containers.
+#[cfg(test)]
+thread_local! {
+    static REWRITE_UNLINK_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn forced_unlink_failure() -> Option<std::io::Error> {
+    REWRITE_UNLINK_FAILS
+        .with(std::cell::Cell::get)
+        .then(|| std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+}
+
+/// Arm [`REWRITE_UNLINK_FAILS`] on this thread; restores on drop.
+#[cfg(test)]
+struct ForcedUnlinkFailure;
+
+#[cfg(test)]
+impl ForcedUnlinkFailure {
+    fn arm() -> Self {
+        REWRITE_UNLINK_FAILS.with(|c| c.set(true));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for ForcedUnlinkFailure {
+    fn drop(&mut self) {
+        REWRITE_UNLINK_FAILS.with(|c| c.set(false));
     }
 }
 
@@ -2611,11 +2664,11 @@ mod hv06_tests {
             .expect("could not bound the rewrite");
         let body = &body[..end];
         assert!(
-            body.contains("rename_durable(&tmp, path)"),
+            body.contains("rename_durable(tmp.path(), path)"),
             "the publish must go through the durable helper"
         );
         assert!(
-            !body.contains("std::fs::rename(&tmp, path)"),
+            !body.contains("std::fs::rename(tmp.path(), path)"),
             "a bare rename leaves Windows with no barrier, and fsync_parent_dir \
              is a no-op there"
         );
@@ -2663,6 +2716,102 @@ mod hv06_tests {
             "the ERROR_ACCESS_DENIED fallback reports the same success as the \
              barrier path"
         );
+    }
+
+    /// No temp of `unique_temp_path_in_parent`'s making survives.
+    ///
+    /// The name it builds is `.{file_name}.{prefix}.{random}.tmp` — so a
+    /// filter for `hv-compact*` matched nothing whatever was left behind, and
+    /// the assertion it guarded passed on a container with an orphaned
+    /// encrypted copy sitting beside it (report27 H10). Spelled from the same
+    /// two pieces the helper uses, rather than from a remembered shape.
+    fn assert_no_stray_temp(path: &std::path::Path) {
+        let parent = path.parent().unwrap();
+        let stem = path.file_name().unwrap().to_string_lossy().into_owned();
+        let leftovers: Vec<_> = std::fs::read_dir(parent)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(&format!(".{stem}.")) && n.ends_with(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "the refused replacement must not be left behind: {leftovers:?}",
+        );
+    }
+
+    /// A temp that could not be removed is REPORTED, with the name to find it.
+    ///
+    /// Every exit before the rename removes the temp, and all seven discarded
+    /// the result of doing so. A read-only mount or a detached volume left a
+    /// full encrypted copy of the container beside it under a random name, and
+    /// the caller heard only why the rewrite failed (report27 H09). For a
+    /// deniable container that is the thing the abandoned-rewrite design is
+    /// built to avoid: the source is restored byte for byte so that nothing
+    /// says a rewrite ran, and then an orphan beside it says so.
+    #[test]
+    fn a_temp_that_cannot_be_removed_is_reported_with_the_name_to_find_it() {
+        let (_guard, path) = scratch("h09-cleanup");
+        {
+            let mut c = Container::create_with_options(&path, options()).unwrap();
+            let _ = c.create_space(b"pw").unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+
+        let token = crate::cancel::CancelToken::new();
+        let leftover = {
+            let _armed = ForcedUnlinkFailure::arm();
+            let err = atomic_rewrite_under_source_lock(
+                &path,
+                "hv-compact",
+                Some(&token),
+                |_src, tmp, _c| {
+                    let mut out = Container::create_with_options(tmp, options())?;
+                    let _ = out.create_space(b"pw")?;
+                    drop(out);
+                    // The window between the writer's last poll and the
+                    // rename, which is where the temp is complete and the
+                    // rewrite still has to throw it away.
+                    token.cancel();
+                    Ok(())
+                },
+            )
+            .expect_err("a cancelled rewrite must not publish");
+
+            match err {
+                Error::RewriteCleanupFailed {
+                    source, leftover, ..
+                } => {
+                    assert!(
+                        matches!(*source, Error::Cancelled),
+                        "the reason the rewrite stopped must survive: {source:?}"
+                    );
+                    leftover
+                },
+                other => panic!(
+                    "an encrypted copy of the container is still on disk and \
+                     the caller was told only {other:?}"
+                ),
+            }
+        };
+
+        // The name must be enough to ACT on — that is the whole point of
+        // carrying it, and the suffix is random, so nobody could reconstruct
+        // it.
+        let orphan = path.parent().unwrap().join(&leftover);
+        assert!(
+            orphan.exists(),
+            "the error named {leftover}, which is not there — either the name \
+             is wrong or the file was removed after we said it was not"
+        );
+        std::fs::remove_file(&orphan).unwrap();
+
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "the source must be exactly as it was",
+        );
+        assert_no_stray_temp(&path);
     }
 
     fn options() -> ContainerOptions {
@@ -2882,16 +3031,7 @@ mod hv06_tests {
             "the source must be exactly as it was",
         );
 
-        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.starts_with("hv-compact"))
-            .collect();
-        assert!(
-            leftovers.is_empty(),
-            "the refused replacement must not be left behind: {leftovers:?}",
-        );
+        assert_no_stray_temp(&path);
     }
 
     #[cfg(unix)]

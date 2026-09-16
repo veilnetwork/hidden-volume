@@ -1158,12 +1158,19 @@ impl<'f> Space<'f> {
         };
         // Cap the pre-allocation: `list_keys` passes `usize::MAX` to mean
         // "everything", and `Vec::with_capacity` panics on overflow.
-        let mut out: Vec<Vec<u8>> = Vec::with_capacity(limit.min(1024));
+        //
+        // Guarded rather than bare, because the walk below has a way out that
+        // is not this function's return value: an unreadable or undecodable
+        // chunk anywhere in the tree leaves with `?`, and the keys gathered up
+        // to that point were freed without being cleared (report27 H02). On
+        // the success path `take` moves them to the caller and the guard is
+        // left with nothing to wipe.
+        let mut out = crate::wipe::WipedKeys::new(Vec::with_capacity(limit.min(1024)));
         let mut walk = self.new_tree_walk();
         self.collect_leaf_keys_after_at(
-            root_slot, namespace, after, limit, 0, &mut walk, &mut out,
+            root_slot, namespace, after, limit, 0, &mut walk, &mut out.0,
         )?;
-        Ok(out)
+        Ok(out.take())
     }
 
     /// Paginate forward through a namespace's `(key, value)` pairs.
@@ -1204,12 +1211,15 @@ impl<'f> Space<'f> {
         // Cap the pre-allocation the way `list_keys_after` does: a
         // caller may pass `usize::MAX` to mean "everything", and
         // `Vec::with_capacity` panics on overflow.
-        let mut out: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(limit.min(1024));
+        //
+        // Guarded for the reason `list_keys_after` is, and with more at stake:
+        // these pairs carry the VALUES as well (report27 H02).
+        let mut out = crate::wipe::WipedPairs::new(Vec::with_capacity(limit.min(1024)));
         let mut walk = self.new_tree_walk();
         self.collect_leaf_pairs_after_at(
-            root_slot, namespace, after, limit, 0, &mut walk, &mut out,
+            root_slot, namespace, after, limit, 0, &mut walk, &mut out.0,
         )?;
-        Ok(out)
+        Ok(out.take())
     }
 
     /// Number of entries in `namespace`. Walks all leaves of the tree

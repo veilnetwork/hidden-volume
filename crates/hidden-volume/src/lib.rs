@@ -166,8 +166,11 @@ pub mod multi;
 pub(crate) mod open;
 pub mod padding;
 pub mod redact;
+
 pub mod space;
 pub mod tx;
+/// Accumulators that clear themselves; see the module docs.
+pub(crate) mod wipe;
 
 pub use container::Container;
 pub use error::{Error, Result};

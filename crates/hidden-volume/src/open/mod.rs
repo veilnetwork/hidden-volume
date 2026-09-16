@@ -14,17 +14,27 @@
 //!
 //! - `owned_slots` — one BIT per slot in the file ([`crate::space::slots`]).
 //! - up to [`MAX_SB_CANDIDATES`] Superblock payloads (≈48 bytes each),
-//!   and up to [`MAX_ERA_ANCHORS`] `(seq, root_hash)` era anchors (40 bytes
-//!   each) — the recovery fallback and the published history window, bounded
-//!   separately because they are bounded for different reasons.
+//!   and up to [`MAX_ERA_ANCHORS`] era anchors — the recovery fallback and the
+//!   published history window, bounded separately because they are bounded for
+//!   different reasons. An anchor is 48 bytes WHILE THE SCAN HOLDS IT
+//!   (`(seq, slot, root_hash)`, plus whatever the `Vec`'s doubling is carrying)
+//!   and 40 in the `(seq, root_hash)` list handed back, and those are two
+//!   different numbers: the working set is what an open has to fit in.
 //! - `commit_history: Vec<u64>` — 8 bytes per distinct commit seq, with
 //!   replicas collapsed before the list doubles.
 //!
-//! Measured end to end by `tests/open_peak_memory.rs`: **0.16 bytes of peak
-//! heap per owned slot**, which is ~2.5 MiB at [`MAX_OPEN_SCAN_CHUNKS`]. It
-//! was 27.5 bytes — 440 MiB at the cap — until report9 HV-13 replaced the
-//! owned-slot `Vec<u64>` with the bitmap, collapsed the anchor replicas, and
-//! capped the backward hunt's candidate window. See DESIGN §5.
+//! Measured end to end by `tests/open_peak_memory.rs`: **0.84 bytes of peak
+//! heap per owned slot**, ≈13 MiB at [`MAX_OPEN_SCAN_CHUNKS`], against a bar
+//! of 2.0. It was 27.5 bytes — 440 MiB at the cap — until report9 HV-13
+//! replaced the owned-slot `Vec<u64>` with the bitmap, collapsed the anchor
+//! replicas, and capped the backward hunt's candidate window.
+//!
+//! The figure READ 0.16 here long after the fixture stopped reporting it
+//! (report27 H07). 0.16 was measured across a fixture pair whose owned sets
+//! differed by 2400 slots, which was mostly invisibility: with 8145 slots
+//! between them the same library measures 0.84. Neither number is a
+//! regression, and quoting the smaller one made the headroom look five times
+//! what it is. See DESIGN §5.
 
 use crate::cancel::CancelToken;
 use crate::chunk::ChunkKind;
@@ -139,8 +149,11 @@ const CANCEL_POLL_PERIOD: u64 = 64;
 /// slot** — ≈440 MiB at this cap, worse than the estimate and far past what a
 /// phone has. A device that could hold a 64 GiB container could not open one.
 ///
-/// It is **0.16 bytes per owned slot now**, ≈2.5 MiB at this cap. Three
-/// things carried the old figure: `owned_slots` was a `Vec<u64>` (eight bytes
+/// It is **0.84 bytes per owned slot now**, ≈13 MiB at this cap — the figure
+/// `tests/open_peak_memory.rs` reports, against a bar of 2.0. (This line read
+/// 0.16 until report27 H07: that was the same library measured across a
+/// fixture pair too close together to see, and the module doc above says what
+/// changed.) Three things carried the OLD 27.5: `owned_slots` was a `Vec<u64>` (eight bytes
 /// per owned chunk, retained for the life of the handle — a bitmap now, in
 /// `space::slots`); the commit-anchor list took a push per superblock
 /// CHUNK, so replicas inflated it before the final dedup; and the backward
@@ -472,20 +485,32 @@ fn push_sb_candidate(
 
 /// How many `(seq, root_hash)` era anchors an open keeps.
 ///
-/// [`ANCHOR_HORIZON`], because that is the window the multi-device guide
-/// publishes: a host is told that an anchor within this many commits of the
-/// current seq is inside the window, and that a pair missing from
-/// `Space::commit_history_with_roots` inside the window means a fork. A
-/// retention shorter than the window turns "this device has not opened the
-/// container for a few hundred commits" into "somebody forked it" — which is
-/// what a 64-entry recovery cache was quietly doing (report24 HV24-02).
+/// [`ANCHOR_HORIZON`] **inclusive**, because that is the window the
+/// multi-device guide publishes: a host is told that an anchor within this
+/// many commits of the current seq is inside the window, and that a pair
+/// missing from `Space::commit_history_with_roots` inside the window means a
+/// fork. A retention shorter than the window turns "this device has not opened
+/// the container for a few hundred commits" into "somebody forked it" — which
+/// is what a 64-entry recovery cache was quietly doing (report24 HV24-02).
+///
+/// The `+ 1` is the boundary itself, and it is not cosmetic. The guide's test
+/// is `current_seq - anchor_seq > ANCHOR_HORIZON` → out of range, so an anchor
+/// exactly `ANCHOR_HORIZON` commits back is IN range and must be answerable;
+/// `vacuum_orphans` agrees and keeps every era at `seq >= current - HORIZON`,
+/// the pair included. Keeping only `HORIZON` of them dropped that one era on
+/// the way back in — still on disk, no longer identifiable — and the guide
+/// then reads its absence as a fork nobody made (report27 H06). An inclusive
+/// window is `HORIZON + 1` entries, and the retention here has to be the same
+/// window the vacuum leaves behind.
 ///
 /// Bounded all the same, and for the reason [`MAX_SB_CANDIDATES`] is: every
 /// entry comes from a chunk that AEAD-passed, so a key-holder decides how many
-/// there are. Forty bytes each puts the ceiling at 40 KiB, and the collapse
+/// there are. The ceiling is 48 KiB, not 40: an entry is 48 bytes while the
+/// scan holds it — `(seq, slot, root_hash)`, the slot being the tie rule — and
+/// 40 in the `(seq, root_hash)` list [`Self::finish`] hands back. The collapse
 /// below keeps the allocation a step of the history's SIZE rather than a cost
 /// per owned slot.
-const MAX_ERA_ANCHORS: usize = crate::ANCHOR_HORIZON as usize;
+const MAX_ERA_ANCHORS: usize = crate::ANCHOR_HORIZON as usize + 1;
 
 /// One era as a scan holds it: `(seq, slot, root_hash)`.
 ///

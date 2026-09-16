@@ -417,6 +417,23 @@ impl From<hidden_volume::Error> for HvError {
                  removed ({cleanup}) — a retry at this path will answer \
                  AlreadyExists"
             )),
+            // The same shape one step later in a container's life: the
+            // rewrite failed AND its encrypted temporary is still beside the
+            // container. `HvError::Io` with both causes rather than a new
+            // ordinal, exactly as above — `_hvErrorKinds` in the plugin's
+            // `bindings.dart` is read BY POSITION, and a variant that adds
+            // nothing a caller can branch on is not worth a flag day. The
+            // leftover's NAME is in the message because it is the one thing
+            // the caller could not have worked out: the suffix is random.
+            E::RewriteCleanupFailed {
+                source,
+                cleanup,
+                leftover,
+            } => HvError::Io(format!(
+                "rewrite failed ({source}); the temporary it wrote could not \
+                 be removed ({cleanup}) — a file named {leftover} is still \
+                 beside the container"
+            )),
             // A caller that called back INTO the handle from inside a run
             // closure. Nothing ran, and it is a programming error rather than
             // a state of the container.
@@ -986,6 +1003,44 @@ fn hardening_failure_info(f: &hidden_volume::space::HardeningFailure) -> Hardeni
     HardeningFailureInfo {
         step: f.step.into(),
         message: f.error.to_string(),
+    }
+}
+
+/// One [`StatsInfo`] out of one `SpaceStats`, for every surface that returns
+/// stats.
+///
+/// Three surfaces built this by hand — the blocking handle, the async one, and
+/// the hosted-space one — and all three summed the per-namespace counts as
+/// `iter().map(|(_, n)| *n).sum::<usize>()` before widening to `u64`. The core
+/// has `SpaceStats::total_entries_u64`, which saturates in a width the counts
+/// cannot outgrow, and these went around it: on a 32-bit target the `usize`
+/// sum panics in debug and wraps in release, so the headline "items in this
+/// profile" was the one number that could come back smaller than any single
+/// namespace it counted (report27 H05).
+///
+/// One converter rather than three, for the reason the report gives and the
+/// repository keeps relearning: a fix applied at the site leaves the other two
+/// (report27 H05, and `fixed-the-site-not-the-shared-helper` before it).
+fn stats_info(
+    s: hidden_volume::space::SpaceStats,
+    hardening: Option<HardeningFailureInfo>,
+) -> StatsInfo {
+    StatsInfo {
+        commit_seq: s.commit_seq,
+        commit_history_len: s.commit_history_len as u64,
+        owned_chunk_count: s.owned_chunk_count as u64,
+        total_slot_count: s.total_slot_count,
+        reusable_slot_count: s.reusable_slot_count,
+        total_entries: s.total_entries_u64(),
+        namespace_counts: s
+            .namespace_counts
+            .into_iter()
+            .map(|(ns, c)| NamespaceCount {
+                namespace: ns.as_u8(),
+                count: c as u64,
+            })
+            .collect(),
+        hardening_failure: hardening,
     }
 }
 
@@ -1573,24 +1628,7 @@ impl SpaceHandle {
             let h = sp.last_hardening_error().map(hardening_failure_info);
             Ok::<_, hidden_volume::Error>((s, h))
         })?;
-        let total: usize = s.namespace_counts.iter().map(|(_, n)| *n).sum();
-        Ok(StatsInfo {
-            commit_seq: s.commit_seq,
-            commit_history_len: s.commit_history_len as u64,
-            owned_chunk_count: s.owned_chunk_count as u64,
-            total_slot_count: s.total_slot_count,
-            reusable_slot_count: s.reusable_slot_count,
-            total_entries: total as u64,
-            namespace_counts: s
-                .namespace_counts
-                .into_iter()
-                .map(|(ns, c)| NamespaceCount {
-                    namespace: ns.as_u8(),
-                    count: c as u64,
-                })
-                .collect(),
-            hardening_failure: hardening,
-        })
+        Ok(stats_info(s, hardening))
     }
 
     /// Acknowledge the sticky [`StatsInfo::hardening_failure`] — "I have shown
@@ -1851,6 +1889,17 @@ impl AsyncSpaceHandle {
         // deterministically on the normal-return path. (Under
         // `panic = "abort"` the panic path is process abort —
         // destructors do not run on panic; see SpaceHandle::create.)
+        //
+        // AND NOT BEFORE THE FUTURE, unlike `AsyncSpace::create` next door,
+        // which report27 H03 turned into a plain `fn` returning `impl Future`
+        // so that a future dropped before its first poll still wipes. That
+        // shape is not available here: `#[uniffi::constructor]` recognises
+        // `async fn` and nothing else, so the prologue cannot run until the
+        // first poll. What limits it is that the only caller is uniffi's own
+        // scaffolding, which hands the future straight to the runtime rather
+        // than building one it might abandon — the unpolled drop is reachable
+        // for a Rust caller of this crate, and that caller has
+        // `AsyncSpace` (report27 H03).
         let password = zeroize::Zeroizing::new(password);
         let p = PathBuf::from(path);
         let opts = ContainerOptions {
@@ -2118,24 +2167,7 @@ impl AsyncSpaceHandle {
         self.run_op(move |s, _cancel| -> HvResult<StatsInfo> {
             let stats = s.stats()?;
             let hardening = s.last_hardening_error().map(hardening_failure_info);
-            let total: usize = stats.namespace_counts.iter().map(|(_, n)| *n).sum();
-            Ok(StatsInfo {
-                commit_seq: stats.commit_seq,
-                commit_history_len: stats.commit_history_len as u64,
-                owned_chunk_count: stats.owned_chunk_count as u64,
-                total_slot_count: stats.total_slot_count,
-                reusable_slot_count: stats.reusable_slot_count,
-                total_entries: total as u64,
-                namespace_counts: stats
-                    .namespace_counts
-                    .into_iter()
-                    .map(|(ns, c)| NamespaceCount {
-                        namespace: ns.as_u8(),
-                        count: c as u64,
-                    })
-                    .collect(),
-                hardening_failure: hardening,
-            })
+            Ok(stats_info(stats, hardening))
         })
         .await
     }
@@ -2360,24 +2392,7 @@ impl MultiSpaceHandle {
             let h = sp.last_hardening_error().map(hardening_failure_info);
             Ok::<_, hidden_volume::Error>((s, h))
         })??;
-        let total: usize = s.namespace_counts.iter().map(|(_, n)| *n).sum();
-        Ok(StatsInfo {
-            commit_seq: s.commit_seq,
-            commit_history_len: s.commit_history_len as u64,
-            owned_chunk_count: s.owned_chunk_count as u64,
-            total_slot_count: s.total_slot_count,
-            reusable_slot_count: s.reusable_slot_count,
-            total_entries: total as u64,
-            namespace_counts: s
-                .namespace_counts
-                .into_iter()
-                .map(|(ns, c)| NamespaceCount {
-                    namespace: ns.as_u8(),
-                    count: c as u64,
-                })
-                .collect(),
-            hardening_failure: hardening,
-        })
+        Ok(stats_info(s, hardening))
     }
 
     /// Acknowledge the sticky hardening record of hosted space `id` — "I have
@@ -2604,6 +2619,67 @@ static SENTINEL: sentinel::Sentinel = sentinel::Sentinel;
 
 #[cfg(test)]
 mod tests {
+
+    /// No stats surface adds the counts up for itself.
+    ///
+    /// All three — the blocking handle, the async one, the hosted-space one —
+    /// summed `namespace_counts` as `usize` and then widened, going around the
+    /// core's `total_entries_u64`, which saturates in a width the counts
+    /// cannot outgrow. On a 32-bit target that sum panics under overflow
+    /// checks and wraps without them, so the one number a host puts in front
+    /// of a person could come back smaller than any single namespace it counts
+    /// (report27 H05). The core's own edge case is guarded in
+    /// `space::mod`'s `total_entries_*` test; what could not be guarded there
+    /// is a FOURTH surface doing the arithmetic again — `SpaceStats` is
+    /// `#[non_exhaustive]` outside its crate, so this side cannot construct
+    /// one to test against.
+    ///
+    /// Source-level for that reason, and narrow: the field is written once,
+    /// in the shared converter, out of the core helper.
+    #[test]
+    fn every_stats_surface_takes_the_total_from_the_core() {
+        // The production half only: this test's own assertion strings would
+        // otherwise count as matches, which is how a source guard ends up
+        // measuring itself.
+        let whole = include_str!("lib.rs");
+        let production = &whole[..whole.find("\nmod tests {").expect("the test module moved")];
+        // Comments stripped as well: the converter's own doc quotes the shape
+        // this forbids, so a guard reading them would fire on the fix.
+        let src: String = production
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let src = src.as_str();
+
+        assert_eq!(
+            src.matches("total_entries: ").count(),
+            2,
+            "`total_entries` is written in {} places — the declaration and the \
+             shared converter are the only two; any other is a surface doing \
+             the arithmetic again",
+            src.matches("total_entries: ").count()
+        );
+        assert!(
+            src.contains("total_entries: s.total_entries_u64(),"),
+            "the shared converter must take the total from the core, which is \
+             the only aggregate that cannot lose a count"
+        );
+        assert!(
+            !src.contains("map(|(_, n)| *n).sum()") && !src.contains("sum::<usize>()"),
+            "a stats surface is summing the per-namespace counts in the \
+             platform's pointer width again"
+        );
+        // Vacuity: the converter is actually REACHED, and by every surface
+        // that returns stats. Three calls plus the definition.
+        assert_eq!(
+            src.matches("stats_info(").count(),
+            4,
+            "the shared converter has {} mentions, not the definition plus one \
+             call per stats surface — a surface has stopped using it",
+            src.matches("stats_info(").count()
+        );
+    }
 
     /// The Dart side reads these variants BY POSITION. Nothing checked that.
     ///
@@ -3650,6 +3726,11 @@ mod tests {
                 cleanup: std::io::Error::other("cleanup"),
             },
             hidden_volume::Error::ReentrantRun,
+            hidden_volume::Error::RewriteCleanupFailed {
+                source: Box::new(hidden_volume::Error::Cancelled),
+                cleanup: std::io::Error::other("cleanup"),
+                leftover: ".store.hv.hv-compact.0123456789abcdef.tmp".into(),
+            },
         ];
 
         // Every NAME the core knows must have a sample above. This is the

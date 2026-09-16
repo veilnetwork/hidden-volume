@@ -27,7 +27,7 @@ use hidden_volume::container::{ContainerOptions, RepackOptions};
 use hidden_volume::space::index::Namespace;
 
 mod common;
-use common::{fast_params, scratch_path};
+use common::{assert_no_stray_temp, fast_params, scratch_path};
 
 fn fast_container_options(initial_garbage_chunks: u64) -> ContainerOptions {
     ContainerOptions {
@@ -270,20 +270,4 @@ fn opening_a_space_through_the_maintenance_free_handle_writes_nothing() {
     );
 
     let _ = std::fs::remove_file(&path);
-}
-
-/// No `.<name>.hv-compact.*.tmp` / `.hv-rotate.*` sibling survives a failure.
-fn assert_no_stray_temp(path: &std::path::Path) {
-    let parent = path.parent().unwrap();
-    let stem = path.file_name().unwrap().to_str().unwrap();
-    let leftovers: Vec<_> = std::fs::read_dir(parent)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.starts_with(&format!(".{stem}.")) && n.ends_with(".tmp"))
-        .collect();
-    assert!(
-        leftovers.is_empty(),
-        "a failed rewrite left its temp behind: {leftovers:?}"
-    );
 }

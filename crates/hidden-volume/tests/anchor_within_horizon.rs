@@ -111,11 +111,15 @@ fn the_identifiable_window_stops_at_the_horizon() {
     let eras = s.commit_history_with_roots();
     let numeric = s.commit_history();
 
+    // INCLUSIVE: the guide's own test is `current - anchor > HORIZON` → out of
+    // range, so the era exactly `HORIZON` commits back is in range, and the
+    // window that answers for it is `HORIZON + 1` entries wide.
+    let window = hidden_volume::ANCHOR_HORIZON as usize + 1;
     assert!(
-        eras.len() <= hidden_volume::ANCHOR_HORIZON as usize,
-        "the window holds {} eras, past a horizon of {}",
+        eras.len() <= window,
+        "the window holds {} eras, past an inclusive horizon of {}",
         eras.len(),
-        hidden_volume::ANCHOR_HORIZON
+        window
     );
     assert!(
         eras.contains(&inside),
@@ -124,14 +128,29 @@ fn the_identifiable_window_stops_at_the_horizon() {
         s.commit_seq() - inside.0,
         eras.len()
     );
+    // The BOUNDARY itself, which is what report27 H06 was about. `vacuum`
+    // keeps every era at `seq >= current - HORIZON` and the guide calls that
+    // one in range; a window one entry short dropped it on the way back in,
+    // leaving an era that is still on disk with no root to answer with — and
+    // the guide reads an in-range anchor missing from the history as a fork
+    // nobody made.
+    let boundary = s.commit_seq() - hidden_volume::ANCHOR_HORIZON;
+    assert_eq!(
+        eras.first().map(|e| e.0),
+        Some(boundary),
+        "the oldest identifiable era is {:?}, but the inclusive window reaches \
+         back to {} — an in-range anchor with no root reads as a fork",
+        eras.first().map(|e| e.0),
+        boundary
+    );
     // The two lists are allowed to differ, and this is the only place they do:
     // a seq the scan read but whose era fell past the horizon is still LISTED.
     // An era we cannot identify is not one to offer a root for, and a numeric
     // history that outran the window is what that looks like from outside.
-    if numeric.len() > hidden_volume::ANCHOR_HORIZON as usize {
+    if numeric.len() > window {
         assert_eq!(
             eras.len(),
-            hidden_volume::ANCHOR_HORIZON as usize,
+            window,
             "past the horizon the window is the horizon, not the container"
         );
     }
