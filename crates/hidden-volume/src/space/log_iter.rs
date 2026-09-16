@@ -310,6 +310,26 @@ impl<'f> Space<'f> {
                             "log pointer not a DataBatch chunk (namespace is not a log)",
                         ));
                     }
+                    // THE HASH IN THE INDEX VALUE, CHECKED.
+                    //
+                    // Every 40-byte index value carries `slot || BLAKE3(batch)`
+                    // so the namespace root — and the commit root through it —
+                    // describes WHAT was appended and not merely where it
+                    // landed. Nothing read it back: `parse_batch_content_hash`
+                    // had no callers at all, so a reader could return the
+                    // contents of a different AEAD-valid batch occupying that
+                    // slot and the integrity walk would not notice THAT
+                    // mismatch (report27 H01). A v1 8-byte value carries no
+                    // hash and is left exactly as it was.
+                    if let Some(expected) = log::parse_batch_content_hash(&value) {
+                        let actual = *blake3::hash(&pt.payload).as_bytes();
+                        if actual != expected {
+                            return Err(Error::Malformed(
+                                "log batch does not match the hash its index \
+                                 value commits to",
+                            ));
+                        }
+                    }
                     let records = log::decode_batch(&pt.payload)?;
                     let found = log::find_in_batch(&records, log_id).cloned();
                     batch_cache.insert(batch_slot, records);
