@@ -334,6 +334,64 @@ impl Drop for ForcedGarbageAppendFailure {
     }
 }
 
+/// The lock we just took belongs to the file this PATH names — still.
+///
+/// Unix only: `dev`/`ino` is what makes "the same file" answerable. On other
+/// platforms this is a no-op and the guarantee is the one it always was.
+#[cfg(unix)]
+fn locked_file_still_at(path: &Path, file: &File) -> Result<bool> {
+    use std::os::unix::fs::MetadataExt as _;
+    let held = file.metadata()?;
+    match std::fs::metadata(path) {
+        Ok(named) => Ok(named.dev() == held.dev() && named.ino() == held.ino()),
+        // The name is gone entirely — it is certainly not this file any more.
+        Err(_) => Ok(false),
+    }
+}
+
+#[cfg(not(unix))]
+fn locked_file_still_at(_path: &Path, _file: &File) -> Result<bool> {
+    Ok(true)
+}
+
+// `unix` as well as `test`: the window this opens only matters where
+// `locked_file_still_at` can answer, and that is unix.
+#[cfg(all(test, unix))]
+thread_local! {
+    /// Test-only: runs ONCE inside the window between the open and the lock.
+    ///
+    /// That window is the whole of H08, and it cannot be driven from outside
+    /// the process. The lock is `try_lock`, not a blocking one: there is no
+    /// moment at which a second process can see that an open is waiting, so
+    /// there is no moment at which it could time a rename into the gap. A hook
+    /// here is the only way to put the rename exactly where the defect lives —
+    /// after the descriptor exists, before it is locked.
+    ///
+    /// Thread-local for the reason `CREATE_FSYNC_FAILS` records at length: a
+    /// process-global fires inside whatever unrelated open a parallel test
+    /// thread happens to be running.
+    static IN_LOCK_WINDOW: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Fire the lock-window hook if one is armed, and disarm it — a retry must
+/// find the window clear, or the loop below could never converge.
+#[cfg(all(test, unix))]
+fn run_lock_window_hook() {
+    let armed = IN_LOCK_WINDOW.with(|h| h.borrow_mut().take());
+    if let Some(hook) = armed {
+        hook();
+    }
+}
+
+#[cfg(not(all(test, unix)))]
+fn run_lock_window_hook() {}
+
+/// How many times an open re-takes the lock when the file it locked turned out
+/// to be one a rename had displaced. A rewrite publishes once; a handful of
+/// attempts covers a burst without spinning against a writer in a loop.
+const LOCK_IDENTITY_ATTEMPTS: usize = 8;
+
 impl ContainerFile {
     /// Create a new container at `path` with the given Argon2 params.
     /// Errors if the file already exists or `params` are below
@@ -405,6 +463,51 @@ impl ContainerFile {
         })
     }
 
+    /// Open `path`, take the lock, and make sure the two are the same file.
+    ///
+    /// `open` then `flock` is two steps, and between them the name can be
+    /// pointed at a different file: every in-place rewrite here publishes its
+    /// result with `rename(2)`, so a caller that was WAITING for the lock
+    /// acquires it on the orphaned inode the rename displaced. Nothing after
+    /// that notices — the descriptor is valid, it simply belongs to a file no
+    /// path names any more. Writes through it are invisible to the next open,
+    /// and a compaction started from it can publish a stale container over the
+    /// result of the rewrite that displaced it (report27 H08).
+    ///
+    /// So the identity is checked AFTER the lock, and a mismatch is retried:
+    /// the rewrite has published by then, and the next attempt locks what the
+    /// path names now. Bounded, because a writer that republishes in a loop
+    /// must not turn this into a spin.
+    fn open_locked(path: &Path, writable: bool) -> Result<File> {
+        for _ in 0..LOCK_IDENTITY_ATTEMPTS {
+            let file = OpenOptions::new().read(true).write(writable).open(path)?;
+            run_lock_window_hook();
+            if writable {
+                try_lock_exclusive(&file)?;
+            } else {
+                try_lock_shared(&file)?;
+            }
+            if locked_file_still_at(path, &file)? {
+                return Ok(file);
+            }
+        }
+        Err(Error::Busy)
+    }
+
+    /// [`Self::open_locked`] for the read-only descriptor that takes the
+    /// EXCLUSIVE lock — the source side of an in-place rewrite.
+    fn open_locked_readonly_exclusive(path: &Path) -> Result<File> {
+        for _ in 0..LOCK_IDENTITY_ATTEMPTS {
+            let file = OpenOptions::new().read(true).open(path)?;
+            run_lock_window_hook();
+            try_lock_exclusive(&file)?;
+            if locked_file_still_at(path, &file)? {
+                return Ok(file);
+            }
+        }
+        Err(Error::Busy)
+    }
+
     /// Open an existing container. Errors with [`Error::Busy`] if the
     /// file is already open in another process or open file description.
     ///
@@ -420,8 +523,8 @@ impl ContainerFile {
     /// past them, and the file size correction happens implicitly on
     /// the first write that crosses a chunk boundary.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let mut file = OpenOptions::new().read(true).write(true).open(path)?;
-        try_lock_exclusive(&file)?;
+        let path = path.as_ref();
+        let mut file = Self::open_locked(path, /*writable=*/ true)?;
         let len = file.metadata()?.len();
         if len < CHUNK_SIZE as u64 {
             return Err(Error::Malformed("file shorter than one chunk"));
@@ -451,8 +554,8 @@ impl ContainerFile {
     /// **Trailing partial chunk handling.** Same as [`Self::open`]:
     /// trailing partial bytes are silently ignored.
     pub fn open_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let mut file = OpenOptions::new().read(true).open(path)?;
-        try_lock_shared(&file)?;
+        let path = path.as_ref();
+        let mut file = Self::open_locked(path, /*writable=*/ false)?;
         let len = file.metadata()?.len();
         if len < CHUNK_SIZE as u64 {
             return Err(Error::Malformed("file shorter than one chunk"));
@@ -484,8 +587,8 @@ impl ContainerFile {
         // `write(true)` is deliberately NOT requested: the descriptor
         // itself cannot write, so a missed gate anywhere above this layer
         // fails with EBADF instead of quietly editing the source.
-        let mut file = OpenOptions::new().read(true).open(path)?;
-        try_lock_exclusive(&file)?;
+        let path = path.as_ref();
+        let mut file = Self::open_locked_readonly_exclusive(path)?;
         let len = file.metadata()?.len();
         if len < CHUNK_SIZE as u64 {
             return Err(Error::Malformed("file shorter than one chunk"));
@@ -834,5 +937,110 @@ mod hv07_tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+}
+
+// `unix` as well as `test`: the identity check this exercises is the unix half
+// of `locked_file_still_at`. Compiled for Windows the hook would arm a window
+// nothing inspects, and the test would assert that an open which legitimately
+// kept the displaced file had failed.
+#[cfg(all(test, unix))]
+mod h08_tests {
+    use super::*;
+    use crate::crypto::kdf::Argon2Params;
+    use std::os::unix::fs::MetadataExt as _;
+
+    /// Disarms on drop, so a failure here cannot leak a rename into whatever
+    /// open runs next on this thread.
+    struct ArmedLockWindow;
+
+    impl ArmedLockWindow {
+        fn arm(hook: Box<dyn FnOnce()>) -> Self {
+            IN_LOCK_WINDOW.with(|h| *h.borrow_mut() = Some(hook));
+            Self
+        }
+    }
+
+    impl Drop for ArmedLockWindow {
+        fn drop(&mut self) {
+            IN_LOCK_WINDOW.with(|h| *h.borrow_mut() = None);
+        }
+    }
+
+    struct Cleanup(std::path::PathBuf);
+
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn ino(path: &std::path::Path) -> u64 {
+        std::fs::metadata(path)
+            .expect("the path must name a file")
+            .ino()
+    }
+
+    /// An open must never come back holding the file a rename displaced.
+    ///
+    /// `open` then `flock` is two steps, and every in-place rewrite here
+    /// publishes with `rename(2)`. An open that reaches the lock after the
+    /// rename therefore locks the ORPHANED inode: a perfectly valid descriptor
+    /// that no path names any more. Nothing downstream can tell — so writes
+    /// through it are invisible to the next open, and a compaction started
+    /// from it republishes a stale container over the rewrite that displaced
+    /// it (report27 H08).
+    ///
+    /// The rename is placed inside that window by the only means available:
+    /// the lock is `try_lock`, so no second process can observe an open in
+    /// progress, and there is no instant for it to aim at.
+    #[test]
+    fn an_open_never_comes_back_holding_the_file_a_rename_displaced() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock must be past the epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("hv-h08-{}-{stamp}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("the scratch directory must be creatable");
+        let _cleanup = Cleanup(dir.clone());
+
+        let path = dir.join("container.hv");
+        let staged = dir.join("rewritten.hv");
+        // Both are real containers; the lock in each is released as the
+        // unbound `ContainerFile` drops at the end of the statement.
+        ContainerFile::create(&path, Argon2Params::MIN).expect("the container must be creatable");
+        ContainerFile::create(&staged, Argon2Params::MIN).expect("the rewrite must be creatable");
+
+        let displaced = ino(&path);
+        let published = ino(&staged);
+        assert_ne!(
+            displaced, published,
+            "premise: the rewrite must be a different file, or there is \
+             nothing for the open to get wrong"
+        );
+
+        let (from, to) = (staged.clone(), path.clone());
+        let _armed = ArmedLockWindow::arm(Box::new(move || {
+            std::fs::rename(&from, &to).expect("the rewrite must be publishable");
+        }));
+
+        let opened = ContainerFile::open(&path).expect("the retry must land on the published file");
+
+        assert_eq!(
+            opened
+                .file
+                .metadata()
+                .expect("the held descriptor must be statable")
+                .ino(),
+            published,
+            "the open settled for the inode the rename displaced: every write \
+             through this descriptor is invisible to the next open, and a \
+             compaction from it republishes over the rewrite"
+        );
+        assert_eq!(
+            ino(&path),
+            published,
+            "premise: the hook must have published before the lock was taken"
+        );
     }
 }
