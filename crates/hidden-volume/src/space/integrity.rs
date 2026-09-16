@@ -1049,6 +1049,100 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// The hash an index value commits to is READ BACK.
+    ///
+    /// Every 40-byte log index value carries `slot || BLAKE3(batch)`, so the
+    /// namespace root — and the commit root through it — describes WHAT was
+    /// appended and not merely where it landed. Nothing verified it:
+    /// `parse_batch_content_hash` had no callers at all, so a reader could
+    /// return the contents of a different, perfectly AEAD-valid batch sitting
+    /// in that slot and no walk would notice THAT mismatch (report27 H01).
+    #[test]
+    fn a_batch_that_does_not_match_its_recorded_hash_is_refused() {
+        let path = scratch_path();
+        let mut c = Container::create(&path, Argon2Params::MIN).unwrap();
+        let mut s = c.create_space(b"pw").unwrap();
+        let ns = Namespace::MESSAGE_LOG;
+
+        // A real batch, placed as a real DataBatch chunk.
+        let batch_bytes = super::super::log::encode_batches_split(&[(
+            7u64,
+            zeroize::Zeroizing::new(b"the record".to_vec()),
+        )])
+        .unwrap()
+        .pop()
+        .unwrap()
+        .1;
+        let batch_slot = s
+            .place_chunk(ChunkKind::DataBatch, 1, &batch_bytes)
+            .unwrap();
+        let honest = blake3_of(&batch_bytes);
+        let mut lying = honest;
+        lying[0] ^= 0xff;
+
+        // The index value points at that chunk and commits to a hash the
+        // chunk does not have.
+        let (leaf_slot, leaf_hash) = seal_node(
+            &mut s,
+            &leaf(
+                ns,
+                &[(
+                    &super::super::log::log_id_key(7),
+                    &super::super::log::encode_batch_slot_value_v2(batch_slot, &lying),
+                )],
+            ),
+            1,
+        );
+        publish(
+            &mut s,
+            vec![IndexRoot {
+                namespace: ns,
+                kind: NamespaceKind::Log,
+                index_slot: leaf_slot,
+                payload_hash: leaf_hash,
+            }],
+            1,
+        );
+
+        match s.iter_log_after(ns, None, 10) {
+            Err(Error::Malformed(m)) => {
+                assert!(m.contains("hash"), "refused for the wrong reason: {m}",)
+            },
+            other => panic!(
+                "a batch that does not match the hash its index commits to was \
+                 returned as content: {other:?}",
+            ),
+        }
+
+        // CONTROL: the same tree with the honest hash reads the record back,
+        // so the refusal above is about the mismatch and not about the shape.
+        let (ok_leaf, ok_hash) = seal_node(
+            &mut s,
+            &leaf(
+                ns,
+                &[(
+                    &super::super::log::log_id_key(7),
+                    &super::super::log::encode_batch_slot_value_v2(batch_slot, &honest),
+                )],
+            ),
+            2,
+        );
+        publish(
+            &mut s,
+            vec![IndexRoot {
+                namespace: ns,
+                kind: NamespaceKind::Log,
+                index_slot: ok_leaf,
+                payload_hash: ok_hash,
+            }],
+            2,
+        );
+        let got = s.iter_log_after(ns, None, 10).unwrap();
+        assert_eq!(got.len(), 1, "the honest batch did not read back");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// The guard is not the integrity walk's alone. `list` / `count` /
     /// the `iter_log_*` family / `vacuum_orphans` follow the very same
     /// pointers with no Merkle check at all, so on a DAG they paid the
