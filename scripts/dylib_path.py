@@ -38,6 +38,7 @@ files.
 
 from __future__ import annotations
 
+import os
 import pathlib
 import re
 import sys
@@ -67,8 +68,22 @@ _DART_ORDER_RE = re.compile(
 )
 
 
+def target_root(root: pathlib.Path) -> pathlib.Path:
+    """Where cargo actually puts artifacts for this checkout.
+
+    `CARGO_TARGET_DIR` when set, `<root>/target` otherwise. Asking cargo rather
+    than assuming: with the variable set — a shared build volume, a CI cache —
+    every path below points at a directory cargo never writes, and the gate
+    that reads them reported "cdylib not found" for a library the step before
+    it had just built. A gate that fails for a reason unrelated to the code is
+    a gate people learn to pass over.
+    """
+    override = os.environ.get("CARGO_TARGET_DIR")
+    return pathlib.Path(override) if override else root / "target"
+
+
 def profile_dir(root: pathlib.Path, profile: str) -> pathlib.Path:
-    """`target/<profile>` under `root`, for callers that pin one profile.
+    """`<target root>/<profile>`, for callers that pin one profile.
 
     `bench/ffi_overhead_bench.py` deliberately pins `release` — benchmarking an
     unoptimized build would be a measurement error, not a stale artifact — but
@@ -77,7 +92,7 @@ def profile_dir(root: pathlib.Path, profile: str) -> pathlib.Path:
     """
     if profile not in PROFILE_ORDER:
         raise ValueError(f"unknown cargo profile {profile!r}; expected one of {PROFILE_ORDER}")
-    return root / "target" / profile
+    return target_root(root) / profile
 
 
 def candidates(root: pathlib.Path) -> list[pathlib.Path]:

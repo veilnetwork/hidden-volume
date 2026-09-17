@@ -56,7 +56,15 @@ List<List<String>> _hostTriplets() {
 /// rather than merely declaring it — see `test/checksum_test.dart`.
 List<String> dylibCandidates() {
   final root = Directory.current.path;
+  // `CARGO_TARGET_DIR` FIRST, when cargo has been told to put artifacts
+  // somewhere else — a shared build volume, a CI cache. Without it both paths
+  // below name a directory cargo never writes, and the checksum table's own
+  // guard could certify a library these tests then fail to find at all.
+  // `scripts/dylib_path.py` reads the same variable; the two resolvers have to
+  // agree about the ROOT as well as the order.
+  final override = Platform.environment['CARGO_TARGET_DIR'];
   final searchRoots = <String>[
+    if (override != null && override.isNotEmpty) override,
     // `flutter test` invoked from the plugin dir
     // (`experimental/flutter_plugin/hidden_volume/`) — ascend three
     // levels to find the workspace `target/`.
