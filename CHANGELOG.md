@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## 2.6.0 — 2026-09-17
+
+Report27's hidden-volume findings, each closed with a break-check: an open that
+held an orphaned inode after a rename, an identifiable history one era short of
+the horizon it promises, a temp file whose removal failure nobody heard about,
+plaintext pages left behind by a walk that returned early, and a password that
+was only guarded once the future ran.
+
 ### Fixed
 
 - **An open holds the file the path names, not one a rename displaced.**

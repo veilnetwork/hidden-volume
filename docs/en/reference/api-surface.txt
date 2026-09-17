@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-09-09T10:31:53Z
+# Captured: 2026-09-17T09:18:44Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -184,8 +184,9 @@ error.rs:     variant WrongNamespaceKind(&'static str),
 error.rs:     variant TooManyNamespaces {
 error.rs:     variant ContainerTooLarge {
 error.rs:     variant IntegrityFailure {
+error.rs:     variant RewriteCleanupFailed {
 error.rs:   pub fn variant_name(&self) -> &'static str {
-error.rs:   pub const ALL_VARIANT_NAMES: &'static [&'static str] = &[
+error.rs:   pub const ALL_VARIANT_NAMES: &'static [&'static str] = &[$($name,)+];
 lib.rs: pub mod cancel;
 lib.rs: pub mod chunk;
 lib.rs: pub mod container;
@@ -426,8 +427,8 @@ lib.rs:   pub async fn set_padding_policy(&self, policy: PaddingPolicy) -> Resul
 lib.rs:   pub async fn set_superblock_replicas(&self, replicas: u8) -> Result<()> {
 lib.rs:   pub async fn run_cancellable<F, R>(
 lib.rs: pub struct AsyncSpace {
-lib.rs:   pub async fn create(
-lib.rs:   pub async fn open(path: impl AsRef<Path>, password: Vec<u8>) -> Result<Self> {
+lib.rs:   pub fn create(
+lib.rs:   pub fn open(
 lib.rs:   pub async fn run<F, R>(&self, f: F) -> Result<R>
 lib.rs:   pub async fn try_run<F, R>(&self, f: F) -> Result<R>
 lib.rs:   pub fn abandoned_operations(&self) -> Vec<AbandonedOp> {

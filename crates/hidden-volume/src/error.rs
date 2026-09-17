@@ -486,8 +486,11 @@ macro_rules! variant_inventory {
         /// Every variant's name, for guards that cannot match exhaustively
         /// because this enum is `#[non_exhaustive]` to them.
         ///
-        /// Generated from the same arms as [`Self::variant_name`]; see
-        /// [`variant_inventory`] for why it is not a list of its own.
+        /// Generated from the same arms as [`Self::variant_name`], by the
+        /// private `variant_inventory!` macro — named in plain text rather
+        /// than linked, because a doc link from a public item to a private one
+        /// is a rustdoc error under `-D warnings` and the gate is right: a
+        /// reader of the public docs cannot follow it.
         pub const ALL_VARIANT_NAMES: &'static [&'static str] = &[$($name,)+];
     };
 }
