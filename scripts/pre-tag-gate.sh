@@ -58,6 +58,12 @@ gate "tests (all features)" cargo test --workspace --all-features --no-fail-fast
 gate "API extractor blind spots" ./scripts/check-api-extractor.sh
 gate "public API surface" ./scripts/dump-public-api.sh --check
 gate "docs version drift" ./scripts/check-docs-version-drift.sh
+# The sibling check: that one asks whether the docs still describe the
+# current PARAMS_VERSION, this one asks whether they still point at things
+# that exist. Its own --self-test runs first, so a checker that has stopped
+# checking cannot certify the tree it guards.
+gate "docs self-test" python3 ./scripts/check-docs.py --self-test
+gate "docs links + translation parity" python3 ./scripts/check-docs.py
 gate "workflow tool pins" ./scripts/check-workflow-pins.sh
 
 # In-repo dependency constraints. Sibling crates are depended on by path AND
