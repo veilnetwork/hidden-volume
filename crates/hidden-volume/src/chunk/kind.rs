@@ -4,7 +4,7 @@ use crate::{Error, Result};
 
 /// On-disk chunk kind discriminator. Marked `#[non_exhaustive]`
 /// because future format generations may add chunk kinds via the
-/// reservation mechanism documented in `docs/en/reference/format.md` §8.
+/// reservation mechanism documented in `docs/en/reference/format.md` §9.
 ///
 /// Reserved discriminator bytes (not exposed as variants):
 /// - `0x03` — historically "Data" (direct-data references); never
@@ -35,7 +35,7 @@ pub enum ChunkKind {
     /// (opaque garbage to a foreign adversary); an optimization hint
     /// only — a reader that ignores it is always correct. Written
     /// lazily by the open-scan self-heal path, never by `commit_tx`.
-    /// See `crate::open` and `docs/en/reference/format.md` §8.
+    /// See `crate::open` and `docs/en/reference/format.md` §4.5.
     Checkpoint = 0x07,
 }
 
