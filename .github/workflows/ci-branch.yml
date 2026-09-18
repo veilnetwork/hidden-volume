@@ -161,6 +161,10 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: scripts/check-docs-version-drift.sh
+      # Links, and the English/Russian trees staying in step. Self-test
+      # first: a gate that no longer catches anything must not pass.
+      - run: python3 scripts/check-docs.py --self-test
+      - run: python3 scripts/check-docs.py
 
   android-cross-check:
     name: cross-compile check (aarch64-linux-android)
