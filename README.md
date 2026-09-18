@@ -467,7 +467,9 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 81 integration test files (71 in `hidden-volume`, 6 in
 `hidden-volume-async`, 4 in `hidden-volume-ffi`) plus unit tests;
-**397 tests** green on the dev machine. Highlights:
+**785 tests** green on the dev machine (`cargo test --workspace
+--all-features`, 2026-09-19: 785 passed, 0 failed, 4 ignored across 91
+test binaries). Highlights:
 
 - **Crash recovery**: 8 hand-written truncate scenarios + property-
   based crash proptest (24 random workloads × 3 invariants:

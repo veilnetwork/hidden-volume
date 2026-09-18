@@ -475,7 +475,9 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 81 файл integration-тестов (71 в `hidden-volume`, 6 в
 `hidden-volume-async`, 4 в `hidden-volume-ffi`) плюс unit-тесты;
-**397 тестов** зелёные на dev-машине. Хайлайты:
+**785 тестов** зелёные на dev-машине (`cargo test --workspace
+--all-features`, 19.09.2026: 785 прошло, 0 упало, 4 пропущено, 91 тестовый
+бинарник). Хайлайты:
 
 - **Crash recovery**: 8 ручных truncate-сценариев + property-based
   crash proptest (24 случайных workload × 3 инварианта:
