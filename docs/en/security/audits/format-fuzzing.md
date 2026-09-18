@@ -41,12 +41,12 @@ enumerate maps to a specific test. The single INFO observation:
   CI-failure-on-fuzz-finding gate; fuzz findings would surface
   as `fuzz-crashes` artifacts rather than blocking the release.
   Trade-off documented in [`docs/en/security/audits/fsync.md`](fsync.md)
-  + [TASKS.md F-3 v1.x](../../../TASKS.md). Not a current bug;
+  + [TASKS.md F-3 v1.x](../../../../TASKS.md). Not a current bug;
   noted for completeness.
 
 ## Inventory: existing fuzz / proptest coverage
 
-### cargo-fuzz targets ([`crates/hidden-volume/fuzz/fuzz_targets/`](../../../crates/hidden-volume/fuzz/fuzz_targets/))
+### cargo-fuzz targets ([`crates/hidden-volume/fuzz/fuzz_targets/`](../../../../crates/hidden-volume/fuzz/fuzz_targets/))
 
 | Target | What it fuzzes | Reaches post-AEAD code? |
 |---|---|---|
@@ -57,7 +57,7 @@ enumerate maps to a specific test. The single INFO observation:
 Trigger: nightly `fuzz-smoke` job in `.github/workflows/ci.yml`
 (continue-on-error). Local run: `cargo +nightly fuzz run <target>`.
 
-### proptest properties ([`crates/hidden-volume/tests/parser_fuzz.rs`](../../../crates/hidden-volume/tests/parser_fuzz.rs))
+### proptest properties ([`crates/hidden-volume/tests/parser_fuzz.rs`](../../../../crates/hidden-volume/tests/parser_fuzz.rs))
 
 | Property | Decoder | Phase | Cases per CI run |
 |---|---|---|---|
@@ -81,11 +81,11 @@ Trigger: every `cargo test` run (workspace test gate).
 
 ### Additional crash / property tests
 
-- [`tests/crash_recovery.rs`](../../../crates/hidden-volume/tests/crash_recovery.rs) —
+- [`tests/crash_recovery.rs`](../../../../crates/hidden-volume/tests/crash_recovery.rs) —
   deterministic crash-injection tests for the 3-fsync protocol.
-- [`tests/crash_proptest.rs`](../../../crates/hidden-volume/tests/crash_proptest.rs) —
+- [`tests/crash_proptest.rs`](../../../../crates/hidden-volume/tests/crash_proptest.rs) —
   proptest with crash-injection at arbitrary byte boundaries.
-- [`tests/property_full.rs`](../../../crates/hidden-volume/tests/property_full.rs) —
+- [`tests/property_full.rs`](../../../../crates/hidden-volume/tests/property_full.rs) —
   end-to-end property test on KV + log namespaces.
 
 ## Per-decoder boundary enumeration
@@ -93,7 +93,7 @@ Trigger: every `cargo test` run (workspace test gate).
 For each decoder, the boundary classes I could enumerate, where in
 the code they are rejected, and which test exercises each.
 
-### `Plaintext::decode` ([chunk/format.rs:91](../../../crates/hidden-volume/src/chunk/format.rs))
+### `Plaintext::decode` ([chunk/format.rs:91](../../../../crates/hidden-volume/src/chunk/format.rs))
 
 Decodes the 4040-byte post-AEAD plaintext frame.
 
@@ -110,7 +110,7 @@ Decodes the 4040-byte post-AEAD plaintext frame.
 **Verdict.** Fully bounded; every byte position has a defined valid
 range; every out-of-range case maps to `Err(Malformed)` not panic.
 
-### `Argon2Params::decode` ([crypto/kdf.rs:237](../../../crates/hidden-volume/src/crypto/kdf.rs))
+### `Argon2Params::decode` ([crypto/kdf.rs:237](../../../../crates/hidden-volume/src/crypto/kdf.rs))
 
 Decodes the 16-byte Argon2 params block from the cleartext header.
 
@@ -123,7 +123,7 @@ Decodes the 16-byte Argon2 params block from the cleartext header.
 **Verdict.** Decoder is unconditionally panic-free; semantic
 validation in `validate()` covered separately.
 
-### `Header::decode` ([container/header.rs:49](../../../crates/hidden-volume/src/container/header.rs))
+### `Header::decode` ([container/header.rs:49](../../../../crates/hidden-volume/src/container/header.rs))
 
 Decodes the 48-byte container header (`salt ‖ Argon2Params`). v3
 dropped the 32-byte `container_id` field that v2 placed between
@@ -138,7 +138,7 @@ salt and params; `container_id` is now per-space derived inside
 
 **Verdict.** Fully bounded.
 
-### `Superblock::decode` ([space/superblock.rs:52](../../../crates/hidden-volume/src/space/superblock.rs))
+### `Superblock::decode` ([space/superblock.rs:52](../../../../crates/hidden-volume/src/space/superblock.rs))
 
 Decodes the 48-byte superblock payload.
 
@@ -149,7 +149,7 @@ Decodes the 48-byte superblock payload.
 
 **Verdict.** Fully bounded.
 
-### `IndexNode::decode` ([space/index.rs:156](../../../crates/hidden-volume/src/space/index.rs))
+### `IndexNode::decode` ([space/index.rs:156](../../../../crates/hidden-volume/src/space/index.rs))
 
 Dispatcher: reads the leading discriminator byte and routes to
 `LeafNode::decode` or `InternalNode::decode`.
@@ -161,7 +161,7 @@ Dispatcher: reads the leading discriminator byte and routes to
 
 **Verdict.** Fully bounded.
 
-### `LeafNode::decode` ([space/index.rs:234](../../../crates/hidden-volume/src/space/index.rs))
+### `LeafNode::decode` ([space/index.rs:234](../../../../crates/hidden-volume/src/space/index.rs))
 
 Decodes a Leaf with `num_entries × (klen, key, vlen, value)`.
 
@@ -179,7 +179,7 @@ Decodes a Leaf with `num_entries × (klen, key, vlen, value)`.
 **Verdict.** Fully bounded with explicit pre-allocation budget
 check (G2). No panic site.
 
-### `InternalNode::decode` ([space/index.rs:384](../../../crates/hidden-volume/src/space/index.rs))
+### `InternalNode::decode` ([space/index.rs:384](../../../../crates/hidden-volume/src/space/index.rs))
 
 Decodes an Internal node with `num_children × (klen, first_key,
 child_slot, child_hash)`.
@@ -196,7 +196,7 @@ child_slot, child_hash)`.
 
 **Verdict.** Fully bounded; L1 + G3 closures verified.
 
-### `CommitPayload::decode` ([tx/commit.rs:142](../../../crates/hidden-volume/src/tx/commit.rs))
+### `CommitPayload::decode` ([tx/commit.rs:142](../../../../crates/hidden-volume/src/tx/commit.rs))
 
 Decodes `num_roots × (namespace, kind, index_slot, payload_hash) ‖
 tx_root_hash`.
@@ -213,7 +213,7 @@ tx_root_hash`.
 **Verdict.** Fully bounded. R-NSKIND v2 layout (added `kind` byte
 per IndexRoot) is correctly handled.
 
-### `decode_batch` ([space/log.rs:196](../../../crates/hidden-volume/src/space/log.rs))
+### `decode_batch` ([space/log.rs:196](../../../../crates/hidden-volume/src/space/log.rs))
 
 Decompresses + decodes a zstd-compressed DataBatch payload.
 
@@ -229,7 +229,7 @@ Decompresses + decodes a zstd-compressed DataBatch payload.
 **Verdict.** Fully bounded with the M5 compression-bomb cap as
 the load-bearing defense.
 
-### `ChunkKind::from_u8` ([chunk/kind.rs:37](../../../crates/hidden-volume/src/chunk/kind.rs))
+### `ChunkKind::from_u8` ([chunk/kind.rs:37](../../../../crates/hidden-volume/src/chunk/kind.rs))
 
 Single-byte discriminator.
 
@@ -239,7 +239,7 @@ Single-byte discriminator.
 
 **Verdict.** Trivial.
 
-### `NamespaceKind::from_u8` ([tx/commit.rs:74](../../../crates/hidden-volume/src/tx/commit.rs))
+### `NamespaceKind::from_u8` ([tx/commit.rs:74](../../../../crates/hidden-volume/src/tx/commit.rs))
 
 Single-byte R-NSKIND discriminator (0 = Kv, 1 = Log).
 

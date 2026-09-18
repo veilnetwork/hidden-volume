@@ -30,12 +30,15 @@ for the canonical byte layout.
 
 ## Status
 
-**v1.0.0 released (2026-05-28).** On-disk format and public API
-are now frozen — any subsequent breaking change requires a v2.0
-major bump and a proper migration tool. See [`TASKS.md`](TASKS.md)
+**v2.6.0 released (2026-09-17).** The on-disk format has been
+generation **3** since v1.0.0 (2026-05-28) and has not moved since:
+v2.0.0 (2026-08-12) broke APIs, not bytes, so a container written
+by 1.2.x still opens — see [`docs/en/guide/migration.md`](docs/en/guide/migration.md).
+A change to the layout itself would need a v4 generation and a
+migration tool. See [`TASKS.md`](TASKS.md)
 for the milestone roadmap, [`DESIGN.md`](DESIGN.md) for design
 rationale, and [`docs/en/reference/format.md`](docs/en/reference/format.md) for the
-canonical byte-level wire format spec (frozen as of v1.0).
+canonical byte-level wire format spec.
 Host-app integration guide:
 [`docs/en/guide/integration.md`](docs/en/guide/integration.md). Formal threat model:
 [`docs/en/security/threat-model.md`](docs/en/security/threat-model.md). Operations playbook
@@ -462,8 +465,8 @@ cargo bench                       # see docs/en/contributing/benchmarks.md for b
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-43 integration test files (39 in `hidden-volume`, 3 in
-`hidden-volume-async`, 1 in `hidden-volume-ffi`) plus unit tests;
+81 integration test files (71 in `hidden-volume`, 6 in
+`hidden-volume-async`, 4 in `hidden-volume-ffi`) plus unit tests;
 **397 tests** green on the dev machine. Highlights:
 
 - **Crash recovery**: 8 hand-written truncate scenarios + property-
