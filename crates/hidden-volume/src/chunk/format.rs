@@ -30,12 +30,13 @@ pub const PLAINTEXT_HEADER_LEN: usize = 4 + 1 + 1 + 8 + 2;
 pub const PAYLOAD_CAP: usize = PLAINTEXT_LEN - PLAINTEXT_HEADER_LEN;
 
 // Byte 5 (offset 5 within the plaintext header) is reserved for
-// forward-compat flags. v1 requires this byte == 0; non-zero values
+// forward-compat flags. v3 requires this byte == 0; non-zero values
 // are rejected as `Error::Malformed("non-zero reserved flags")`.
 // Future format generations may use individual bits for compression,
-// continuation, etc. — strict validation here ensures a v2 reader
-// can detect a forward-format chunk and a v1 reader explicitly fails
-// rather than silently accepting unknown semantics.
+// continuation, etc. — strict validation here ensures a reader of
+// this generation detects a forward-format chunk and fails explicitly
+// rather than silently accepting unknown semantics. See
+// `docs/en/reference/format.md` §9.
 
 /// Decrypted chunk frame (`MAGIC` + `kind` + reserved-flags-byte +
 /// `seq` + `payload_len` + `payload` + random pad). See
