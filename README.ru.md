@@ -31,14 +31,16 @@ messenger.store
 
 ## Статус
 
-**v1.0.0 выпущен (2026-05-28).** On-disk формат и публичный API
-теперь заморожены — любое последующее breaking change требует
-major-bump v2.0 и полноценного migration tool'а. См.
+**v2.6.0 выпущен (2026-09-17).** On-disk формат держит поколение
+**3** с v1.0.0 (2026-05-28) и с тех пор не двигался: v2.0.0
+(2026-08-12) сломал API, но не байты, поэтому контейнер, записанный
+1.2.x, по-прежнему открывается — см.
+[`docs/ru/guide/migration.md`](docs/ru/guide/migration.md). Изменение
+самой раскладки потребовало бы поколения v4 и migration tool'а. См.
 [`TASKS.md`](TASKS.md) для milestone-roadmap,
 [`DESIGN.ru.md`](DESIGN.ru.md) для design-rationale, а
 [`docs/ru/reference/format.md`](docs/ru/reference/format.md) — для
-канонической байтовой спецификации on-wire формата (заморожена на
-v1.0). Гайд по интеграции в host-app:
+канонической байтовой спецификации on-wire формата. Гайд по интеграции в host-app:
 [`docs/ru/guide/integration.md`](docs/ru/guide/integration.md). Формальная
 модель угроз: [`docs/ru/security/threat-model.md`](docs/ru/security/threat-model.md).
 Operations playbook (бэкап, восстановление, ротация ключей, recovery,
@@ -471,8 +473,8 @@ cargo bench                       # baseline'ы — docs/ru/contributing/benchma
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-43 файла integration-тестов (39 в `hidden-volume`, 3 в
-`hidden-volume-async`, 1 в `hidden-volume-ffi`) плюс unit-тесты;
+81 файл integration-тестов (71 в `hidden-volume`, 6 в
+`hidden-volume-async`, 4 в `hidden-volume-ffi`) плюс unit-тесты;
 **397 тестов** зелёные на dev-машине. Хайлайты:
 
 - **Crash recovery**: 8 ручных truncate-сценариев + property-based

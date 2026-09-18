@@ -144,7 +144,7 @@ For one-shot top-level operations (header inspection, password rotation,
 container compaction), use `headerInfoAsync` / `changePasswordsAsync` /
 `compactKnownAsync`.
 
-See the parent project's [Integration guide](../../docs/en/guide/integration.md)
+See the parent project's [Integration guide](../../../docs/en/guide/integration.md)
 for the conceptual model (spaces, transactions, deniability invariants)
-and [Flutter guide](../../docs/en/guide/flutter.md) for messenger
+and [Flutter guide](../../../docs/en/guide/flutter.md) for messenger
 integration patterns.

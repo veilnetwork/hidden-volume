@@ -43,12 +43,12 @@ INFO observation:
   finding gate'а; fuzz findings surfaced бы как
   `fuzz-crashes` artifacts, а не блокировали бы release.
   Trade-off документирован в [`docs/ru/security/audits/fsync.md`](fsync.md)
-  + [TASKS.md F-3 v1.x](../../../TASKS.md). Не current bug;
+  + [TASKS.md F-3 v1.x](../../../../TASKS.md). Не current bug;
   noted для полноты.
 
 ## Инвентарь: существующее fuzz / proptest coverage
 
-### cargo-fuzz targets ([`crates/hidden-volume/fuzz/fuzz_targets/`](../../../crates/hidden-volume/fuzz/fuzz_targets/))
+### cargo-fuzz targets ([`crates/hidden-volume/fuzz/fuzz_targets/`](../../../../crates/hidden-volume/fuzz/fuzz_targets/))
 
 | Target | Что fuzz'ит | Достигает post-AEAD code? |
 |---|---|---|
@@ -59,7 +59,7 @@ INFO observation:
 Trigger: nightly `fuzz-smoke` job в `.github/workflows/ci.yml`
 (continue-on-error). Local run: `cargo +nightly fuzz run <target>`.
 
-### proptest properties ([`crates/hidden-volume/tests/parser_fuzz.rs`](../../../crates/hidden-volume/tests/parser_fuzz.rs))
+### proptest properties ([`crates/hidden-volume/tests/parser_fuzz.rs`](../../../../crates/hidden-volume/tests/parser_fuzz.rs))
 
 | Property | Decoder | Phase | Cases per CI run |
 |---|---|---|---|
@@ -83,11 +83,11 @@ Trigger: каждый `cargo test` run (workspace test gate).
 
 ### Дополнительные crash / property тесты
 
-- [`tests/crash_recovery.rs`](../../../crates/hidden-volume/tests/crash_recovery.rs) —
+- [`tests/crash_recovery.rs`](../../../../crates/hidden-volume/tests/crash_recovery.rs) —
   detereministic crash-injection тесты для 3-fsync protocol'а.
-- [`tests/crash_proptest.rs`](../../../crates/hidden-volume/tests/crash_proptest.rs) —
+- [`tests/crash_proptest.rs`](../../../../crates/hidden-volume/tests/crash_proptest.rs) —
   proptest с crash-injection на arbitrary byte boundaries.
-- [`tests/property_full.rs`](../../../crates/hidden-volume/tests/property_full.rs) —
+- [`tests/property_full.rs`](../../../../crates/hidden-volume/tests/property_full.rs) —
   end-to-end property test на KV + log namespaces.
 
 ## Per-decoder boundary enumeration
@@ -96,7 +96,7 @@ Trigger: каждый `cargo test` run (workspace test gate).
 перечислить, где в коде они отвергаются, и какой тест упражняет
 каждую.
 
-### `Plaintext::decode` ([chunk/format.rs:91](../../../crates/hidden-volume/src/chunk/format.rs))
+### `Plaintext::decode` ([chunk/format.rs:91](../../../../crates/hidden-volume/src/chunk/format.rs))
 
 Decode'ит 4040-байтный post-AEAD plaintext frame.
 
@@ -114,7 +114,7 @@ Decode'ит 4040-байтный post-AEAD plaintext frame.
 valid-range; каждый out-of-range case мапит к `Err(Malformed)`,
 не panic.
 
-### `Argon2Params::decode` ([crypto/kdf.rs:237](../../../crates/hidden-volume/src/crypto/kdf.rs))
+### `Argon2Params::decode` ([crypto/kdf.rs:237](../../../../crates/hidden-volume/src/crypto/kdf.rs))
 
 Decode'ит 16-байтный Argon2-params block из cleartext header'а.
 
@@ -127,7 +127,7 @@ Decode'ит 16-байтный Argon2-params block из cleartext header'а.
 **Verdict.** Decoder unconditionally panic-free; semantic
 validation в `validate()` покрыта отдельно.
 
-### `Header::decode` ([container/header.rs:49](../../../crates/hidden-volume/src/container/header.rs))
+### `Header::decode` ([container/header.rs:49](../../../../crates/hidden-volume/src/container/header.rs))
 
 Decode'ит 48-байтный container-header (`salt ‖ Argon2Params`). v3
 убрал 32-байтное поле `container_id`, которое в v2 лежало между
@@ -142,7 +142,7 @@ salt и params; в v3 `container_id` деривится per-space внутри
 
 **Verdict.** Fully bounded.
 
-### `Superblock::decode` ([space/superblock.rs:52](../../../crates/hidden-volume/src/space/superblock.rs))
+### `Superblock::decode` ([space/superblock.rs:52](../../../../crates/hidden-volume/src/space/superblock.rs))
 
 Decode'ит 48-байтный superblock payload.
 
@@ -153,7 +153,7 @@ Decode'ит 48-байтный superblock payload.
 
 **Verdict.** Fully bounded.
 
-### `IndexNode::decode` ([space/index.rs:156](../../../crates/hidden-volume/src/space/index.rs))
+### `IndexNode::decode` ([space/index.rs:156](../../../../crates/hidden-volume/src/space/index.rs))
 
 Dispatcher: читает leading discriminator byte и route'ит к
 `LeafNode::decode` или `InternalNode::decode`.
@@ -165,7 +165,7 @@ Dispatcher: читает leading discriminator byte и route'ит к
 
 **Verdict.** Fully bounded.
 
-### `LeafNode::decode` ([space/index.rs:234](../../../crates/hidden-volume/src/space/index.rs))
+### `LeafNode::decode` ([space/index.rs:234](../../../../crates/hidden-volume/src/space/index.rs))
 
 Decode'ит Leaf с `num_entries × (klen, key, vlen, value)`.
 
@@ -183,7 +183,7 @@ Decode'ит Leaf с `num_entries × (klen, key, vlen, value)`.
 **Verdict.** Fully bounded с explicit pre-allocation budget check
 (G2). Нет panic site.
 
-### `InternalNode::decode` ([space/index.rs:384](../../../crates/hidden-volume/src/space/index.rs))
+### `InternalNode::decode` ([space/index.rs:384](../../../../crates/hidden-volume/src/space/index.rs))
 
 Decode'ит Internal-node с `num_children × (klen, first_key,
 child_slot, child_hash)`.
@@ -200,7 +200,7 @@ child_slot, child_hash)`.
 
 **Verdict.** Fully bounded; L1 + G3 closures verified.
 
-### `CommitPayload::decode` ([tx/commit.rs:142](../../../crates/hidden-volume/src/tx/commit.rs))
+### `CommitPayload::decode` ([tx/commit.rs:142](../../../../crates/hidden-volume/src/tx/commit.rs))
 
 Decode'ит `num_roots × (namespace, kind, index_slot, payload_hash) ‖
 tx_root_hash`.
@@ -217,7 +217,7 @@ tx_root_hash`.
 **Verdict.** Fully bounded. R-NSKIND v2 layout (added `kind`
 byte per IndexRoot) корректно handled.
 
-### `decode_batch` ([space/log.rs:196](../../../crates/hidden-volume/src/space/log.rs))
+### `decode_batch` ([space/log.rs:196](../../../../crates/hidden-volume/src/space/log.rs))
 
 Decompress'ит + decode'ит zstd-compressed DataBatch payload.
 
@@ -233,7 +233,7 @@ Decompress'ит + decode'ит zstd-compressed DataBatch payload.
 **Verdict.** Fully bounded с M5 compression-bomb cap'ом как load-
 bearing defense'ом.
 
-### `ChunkKind::from_u8` ([chunk/kind.rs:37](../../../crates/hidden-volume/src/chunk/kind.rs))
+### `ChunkKind::from_u8` ([chunk/kind.rs:37](../../../../crates/hidden-volume/src/chunk/kind.rs))
 
 Single-byte discriminator.
 
@@ -243,7 +243,7 @@ Single-byte discriminator.
 
 **Verdict.** Trivial.
 
-### `NamespaceKind::from_u8` ([tx/commit.rs:74](../../../crates/hidden-volume/src/tx/commit.rs))
+### `NamespaceKind::from_u8` ([tx/commit.rs:74](../../../../crates/hidden-volume/src/tx/commit.rs))
 
 Single-byte R-NSKIND discriminator (0 = Kv, 1 = Log).
 
