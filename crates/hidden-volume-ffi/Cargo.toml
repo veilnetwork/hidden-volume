@@ -4,7 +4,7 @@ version = "2.6.0"
 edition = "2024"
 rust-version = "1.89"
 description = "uniffi-based FFI bindings for the hidden-volume container library — generates Kotlin/Swift/Python bindings."
-license = "Apache-2.0"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/hidden-volume/hidden-volume"
 publish = false
 
