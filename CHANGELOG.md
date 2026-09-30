@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.6.1 — 2026-09-30
+
+### Changed
+
+- The workspace and its license files now consistently state `MIT OR Apache-2.0`.
+- Documentation checks catch broken links and stale version references before a release.
+- Corrected the format specification, test count, and links in the English and Russian guides.
+
+The container format and FFI behavior are unchanged from 2.6.0.
+
 ## 2.6.0 — 2026-09-17
 
 Report27's hidden-volume findings, each closed with a break-check: an open that
