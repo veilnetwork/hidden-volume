@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.6.2 — 2026-10-21
+
+### Fixed
+
+- Return an internal error for inconsistent free-pool selection and restore
+  partially sampled slots instead of relying on an unchecked invariant.
+- Parse Argon2 CLI parameters with a single fallible parser.
+- Validate release target names before building or clearing artifact paths;
+  strengthen workflow dependency pin checks.
+- Remove secret-value output from the lifecycle example and correct public
+  documentation links and localization-tool guidance.
+
+The container format and public FFI remain compatible with 2.6.1.
+
 ## 2.6.1 — 2026-09-30
 
 ### Changed
