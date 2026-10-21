@@ -136,9 +136,8 @@ append-only контейнер, примитив хранения для мес�
 
 Released, 2.x. The on-disk format is shipped and changing it is a major
 version. External crypto review is still outstanding. See
-[`TASKS.md`](../TASKS.md) for the full backlog (project file, mixed
-Russian/English).
+[`SECURITY.md`](../SECURITY.md) for known limitations and planned audits.
 
 Выпущено, 2.x. Формат на диске поставлен: его изменение — мажорная
-версия. Внешнее crypto-ревью ещё впереди. Полный backlog — в [`TASKS.md`](../TASKS.md)
-(внутренний рабочий файл, смесь русского и английского).
+версия. Внешнее crypto-ревью ещё впереди. Известные ограничения и запланированные аудиты — в
+[`SECURITY.ru.md`](../SECURITY.ru.md).

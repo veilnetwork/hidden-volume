@@ -37,7 +37,6 @@ messenger.store
 1.2.x, по-прежнему открывается — см.
 [`docs/ru/guide/migration.md`](docs/ru/guide/migration.md). Изменение
 самой раскладки потребовало бы поколения v4 и migration tool'а. См.
-[`TASKS.md`](TASKS.md) для milestone-roadmap,
 [`DESIGN.ru.md`](DESIGN.ru.md) для design-rationale, а
 [`docs/ru/reference/format.md`](docs/ru/reference/format.md) — для
 канонической байтовой спецификации on-wire формата. Гайд по интеграции в host-app:

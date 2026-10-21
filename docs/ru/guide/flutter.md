@@ -317,7 +317,7 @@ iCloud Keychain + Documents). Файл контейнера — это **еди�
 
 - **Hot reload Rust-кода в Flutter dev mode** — не поддерживается
   uniffi; требуется перезапуск приложения при изменениях в Rust.
-- **iOS xcframework packaging** — см. [`TASKS.md`](../../../TASKS.md) v0.8;
+- **iOS xcframework packaging**;
   рецепт отложен до первого iOS-интегратора.
 - **Android `.aar` packaging** — то же самое, рецепт в
   [`bindings/README.md`](../../../bindings/README.md) §Kotlin.

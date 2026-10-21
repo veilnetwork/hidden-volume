@@ -41,7 +41,7 @@ enumerate maps to a specific test. The single INFO observation:
   CI-failure-on-fuzz-finding gate; fuzz findings would surface
   as `fuzz-crashes` artifacts rather than blocking the release.
   Trade-off documented in [`docs/en/security/audits/fsync.md`](fsync.md)
-  + [TASKS.md F-3 v1.x](../../../../TASKS.md). Not a current bug;
+  + historical F-3 note. Not a current bug;
   noted for completeness.
 
 ## Inventory: existing fuzz / proptest coverage

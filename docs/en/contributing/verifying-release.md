@@ -104,8 +104,7 @@ workflow on this exact repo at a SemVer tag could have signed it.*
   [`docs/en/reference/semver.md`](../reference/semver.md) for the
   pre-1.0 stability posture.
 - **Crate publication on crates.io.** Every workspace crate is
-  `publish = false` until external crypto-review clears (see
-  [`TASKS.md`](../../../TASKS.md) v1.0). Verifying a release artifact
+  `publish = false` until external crypto-review clears. Verifying a release artifact
   is independent of whether the underlying library is on crates.io.
 
 ## What can go wrong

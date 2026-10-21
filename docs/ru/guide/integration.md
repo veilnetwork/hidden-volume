@@ -658,7 +658,7 @@ intermediate-snapshot deniability ослаблен (см. DESIGN §1 T2').
 | Аудит plaintext-leak | `docs/ru/security/audits/plaintext.md` |
 | Аудит порядка fsync | `docs/ru/security/audits/fsync.md` |
 | Бенчмарки / целевые числа | `docs/ru/contributing/benchmarks.md` |
-| Roadmap | `TASKS.md` |
+| Статус безопасности | [Политика безопасности](../../../SECURITY.ru.md) |
 | Per-API rustdoc | `cargo doc --open` |
 
 [`Argon2Params::LIGHT`]: ../src/crypto/kdf.rs

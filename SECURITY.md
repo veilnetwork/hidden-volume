@@ -198,13 +198,13 @@ sections. In short:
 
 ### Vulnerabilities fixed
 
-None published yet — this section will list CVEs / advisories once the
-project hits v1.0.
+None listed here. Published CVEs and advisories will be recorded in this
+section.
 
 ### Planned audits
 
-- External cryptographic review (Trail of Bits / Cure53 / NCC) before
-  v1.0 freeze. Tracked in [`TASKS.md`](TASKS.md) v1.0 milestone.
+- External cryptographic review remains outstanding; no independent
+  cryptographic audit has been published.
 - Fuzzing campaign (`cargo-fuzz` once we have CI infrastructure for
   multi-hour runs).
 
@@ -222,7 +222,7 @@ reaches a runtime code path of the shipped library.
 
 | Advisory | Crate | Why ignored | Removal path |
 |---|---|---|---|
-| [RUSTSEC-2024-0436](https://rustsec.org/advisories/RUSTSEC-2024-0436) | `paste 1.0.15` | The author archived the `paste` repo. Transitive compile-time dep of `uniffi_bindgen` and `uniffi_core`; used during proc-macro expansion for identifier concatenation (no runtime effect). The community drop-in replacement is [`pastey`](https://crates.io/crates/pastey), which is source-compatible. | Gated on uniffi migrating away from `paste` to a maintained alternative (R-DEPS in `TASKS.md`). |
+| [RUSTSEC-2024-0436](https://rustsec.org/advisories/RUSTSEC-2024-0436) | `paste 1.0.15` | The author archived the `paste` repo. Transitive compile-time dep of `uniffi_bindgen` and `uniffi_core`; used during proc-macro expansion for identifier concatenation (no runtime effect). The community drop-in replacement is [`pastey`](https://crates.io/crates/pastey), which is source-compatible. | Gated on uniffi migrating away from `paste` to a maintained alternative (upstream dependency migration). |
 
 > `RUSTSEC-2025-0141` (`bincode 1.3.3`) was previously ignored here
 > but was removed once the workspace moved to `uniffi 0.31`, which

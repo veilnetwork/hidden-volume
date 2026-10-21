@@ -279,7 +279,9 @@ impl DecoyPool {
             return Ok(None);
         }
         let rank = uniform_below(self.len)?;
-        let slot = self.select(rank).expect("rank < len");
+        let slot = self
+            .select(rank)
+            .ok_or(crate::Error::Internal("pool rank is inconsistent"))?;
         self.clear(slot);
         self.drift = self.drift.saturating_add(1);
         Ok(Some(slot))
@@ -311,7 +313,10 @@ impl DecoyPool {
         for _ in 0..k {
             match uniform_below(self.len) {
                 Ok(rank) => {
-                    let slot = self.select(rank).expect("rank < len");
+                    let Some(slot) = self.select(rank) else {
+                        failure = Some(crate::Error::Internal("pool rank is inconsistent"));
+                        break;
+                    };
                     self.clear(slot);
                     out.push(slot);
                 },

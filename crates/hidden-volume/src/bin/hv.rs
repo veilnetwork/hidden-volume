@@ -72,8 +72,8 @@ enum Cmd {
     Create {
         path: PathBuf,
         /// Argon2 cost preset.
-        #[arg(long, default_value = "default", value_parser = ["min", "light", "default", "heavy"])]
-        params: String,
+        #[arg(long, default_value = "default", value_parser = parse_params)]
+        params: Argon2Params,
         /// Initial garbage chunks (decoy size). 256 = 1 MiB.
         #[arg(long, default_value_t = 0)]
         initial_garbage: u64,
@@ -622,18 +622,13 @@ fn hex(b: &[u8]) -> String {
     s
 }
 
-fn parse_params(s: &str) -> Argon2Params {
-    // clap's `value_parser = ["min", "light", "default", "heavy"]` on
-    // the `--params` flag rejects everything else before reaching
-    // here. Audit F7 (2026-05-03): make the contract explicit so a
-    // future clap-config drift doesn't silently fall through to
-    // DEFAULT on unrecognized input.
+fn parse_params(s: &str) -> std::result::Result<Argon2Params, String> {
     match s {
-        "min" => Argon2Params::MIN,
-        "light" => Argon2Params::LIGHT,
-        "default" => Argon2Params::DEFAULT,
-        "heavy" => Argon2Params::HEAVY,
-        other => unreachable!("clap value_parser should reject {other:?}"),
+        "min" => Ok(Argon2Params::MIN),
+        "light" => Ok(Argon2Params::LIGHT),
+        "default" => Ok(Argon2Params::DEFAULT),
+        "heavy" => Ok(Argon2Params::HEAVY),
+        _ => Err("params must be min, light, default, or heavy".to_owned()),
     }
 }
 
@@ -672,9 +667,14 @@ fn cmd_info(path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn cmd_create(path: PathBuf, params: &str, initial_garbage: u64, replicas: u8) -> Result<()> {
+fn cmd_create(
+    path: PathBuf,
+    params: &Argon2Params,
+    initial_garbage: u64,
+    replicas: u8,
+) -> Result<()> {
     let options = ContainerOptions {
-        argon2: parse_params(params),
+        argon2: *params,
         initial_garbage_chunks: initial_garbage,
         padding_policy: hidden_volume::padding::PaddingPolicy::DEFAULT,
         superblock_replicas: replicas,
