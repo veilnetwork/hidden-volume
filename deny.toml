@@ -32,6 +32,15 @@ db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
 ignore = [
+    # Maintenance-only exception, reviewed 2026-10-21 (no vulnerability advisory).
+    # basic-toml 0.1.10 parses checked-in Askama template configuration at build
+    # time via uniffi_bindgen; it does not parse untrusted container/network data.
+    # Upstream UniFFI 0.32.2 / Askama 0.16.1 still require the same parser, so an
+    # upgrade alone cannot remove it. Keep the existing binding ABI/toolchain.
+    # Remove this exception when Askama replaces the archived parser and the
+    # compatible UniFFI dependency picks up that replacement. Vulnerabilities,
+    # yanked crates and every other unmaintained advisory remain checked.
+    "RUSTSEC-2026-0374",
     # NB: previous advisory ignores were retired once their targets
     # left the dependency tree:
     #
