@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.6.2 — 2026-10-21
+## 2.6.3 — 2026-10-21
 
 ### Fixed
 
@@ -12,7 +12,14 @@
 - Remove secret-value output from the lifecycle example and correct public
   documentation links and localization-tool guidance.
 
+- Document a maintenance-only cargo-deny exception for build-time basic-toml
+  (RUSTSEC-2026-0374). Both the existing and latest upstream UniFFI/Askama
+  still depend on it; it does not parse container/network input. All other
+  advisories remain enforced. Remove the exception after upstream replacement.
+
 The container format and public FFI remain compatible with 2.6.1.
+The v2.6.2 release attempt was superseded after the new maintenance advisory
+blocked its dependency-policy gate.
 
 ## 2.6.1 — 2026-09-30
 
