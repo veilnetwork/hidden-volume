@@ -242,7 +242,7 @@ Argon2 (create_space, open_space, repack), на соответствующее
 - DEFAULT (m=64 MiB, t=3): ~4× MIN
 - HEAVY (m=256 MiB, t=4, p=4): ~10-15× MIN
 
-## Валидация perf-target v0.6 (`TASKS.md` L538)
+## Валидация perf-target v0.6
 
 Майлстоун v0.6 стремился к:
 

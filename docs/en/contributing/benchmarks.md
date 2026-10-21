@@ -227,7 +227,7 @@ open_space, repack) by the relevant ratio:
 - DEFAULT (m=64 MiB, t=3): ~4× MIN
 - HEAVY (m=256 MiB, t=4, p=4): ~10-15× MIN
 
-## v0.6 perf-target validation (`TASKS.md` L538)
+## v0.6 perf-target validation
 
 The v0.6 milestone aspired to:
 

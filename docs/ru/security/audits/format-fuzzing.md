@@ -43,7 +43,7 @@ INFO observation:
   finding gate'а; fuzz findings surfaced бы как
   `fuzz-crashes` artifacts, а не блокировали бы release.
   Trade-off документирован в [`docs/ru/security/audits/fsync.md`](fsync.md)
-  + [TASKS.md F-3 v1.x](../../../../TASKS.md). Не current bug;
+  + историческая пометка F-3. Не current bug;
   noted для полноты.
 
 ## Инвентарь: существующее fuzz / proptest coverage

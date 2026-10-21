@@ -63,10 +63,10 @@ least as strong in *technical content* and *reproducibility*.
 
 | Layer | Mechanism | Evidence |
 |---|---|---|
-| **In-tree audit history** | 18 numbered audit passes (audit pass 1 through pass 18, 2026-05-02 → 2026-05-10) — each with a `Refactoring backlog — pass N` section in [`TASKS.md`](../../../../TASKS.md) listing every finding, severity, and the commit that closed it. | TASKS.md, git log |
+| **In-tree audit history** | 18 numbered internal audit passes (2026-05-02 → 2026-05-10). The original local tracker was not published; committed fixes can be reviewed in Git history. | git log |
 | **Topic-specific audits** | Four focused audits with full code refs and conclusions: [constant-time](constant-time.md), [fsync ordering](fsync.md), [memory hygiene](memory.md), [plaintext residency](plaintext.md). | Each file under this directory |
 | **Property-level review** | This document — explicit statements of every cryptographic invariant claimed in the threat model, the code that enforces each, what would break it, and how to verify. | §4 of this document |
-| **Read-only re-audit (2026-05-28)** | Independent pass against the same code, looking for missed/regressed findings. **0 critical/high/medium**, 7 LOW (all doc-accuracy); all 7 fixed in commits `f67281f` + `53b5720`. | Audit pass commits, [TASKS.md §Refactoring backlog](../../../../TASKS.md) |
+| **Read-only re-audit (2026-05-28)** | Independent pass against the same code, looking for missed/regressed findings. **0 critical/high/medium**, 7 LOW (all doc-accuracy); all 7 fixed in commits `f67281f` + `53b5720`. | Audit pass commits |
 | **Reproducible signed builds** | `cosign keyless` signatures on every SemVer-tagged release; no long-lived signing keys exist. | [`.github/workflows/release.yml`](../../../../.github/workflows/release.yml), [`docs/en/contributing/verifying-release.md`](../../contributing/verifying-release.md) |
 | **Public threat model** | Explicit T1/T2/T2'/T3 adversary tiers, D1/D2/I1/I2/I3/R1/M1/C1 invariants, out-of-scope mitigations enumerated. | [`docs/en/security/threat-model.md`](../threat-model.md) |
 | **Test suite** | 391 tests pass (unit + integration + proptest + crash-recovery + log-pagination + repack + property-full). | `cargo test --workspace` |
@@ -376,9 +376,9 @@ the signature is in the Sigstore Rekor transparency log.
 
 ### 7.4 Independent audit replay
 
-This document and the per-pass entries in [`TASKS.md`](../../../../TASKS.md)
-list every finding with code references. Anyone can re-walk the same
-diffs and confirm the closure.
+This document gives code references for the invariants it reviews.
+Use Git history to inspect the corresponding fixes; the historical local
+per-pass tracker is not included in this repository.
 
 ### 7.5 Format-spec verification
 

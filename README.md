@@ -35,8 +35,7 @@ generation **3** since v1.0.0 (2026-05-28) and has not moved since:
 v2.0.0 (2026-08-12) broke APIs, not bytes, so a container written
 by 1.2.x still opens — see [`docs/en/guide/migration.md`](docs/en/guide/migration.md).
 A change to the layout itself would need a v4 generation and a
-migration tool. See [`TASKS.md`](TASKS.md)
-for the milestone roadmap, [`DESIGN.md`](DESIGN.md) for design
+migration tool. See [`DESIGN.md`](DESIGN.md) for design
 rationale, and [`docs/en/reference/format.md`](docs/en/reference/format.md) for the
 canonical byte-level wire format spec.
 Host-app integration guide:

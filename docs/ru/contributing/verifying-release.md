@@ -108,8 +108,7 @@ Sigstore bundle пинит:
   [`docs/ru/reference/semver.md`](../reference/semver.md) для
   политики pre-1.0.
 - **Публикацию крейтов на crates.io.** Каждый workspace-крейт имеет
-  `publish = false` до завершения внешнего crypto-review (см.
-  [`TASKS.md`](../../../TASKS.md) v1.0). Верификация артефактов
+  `publish = false` до завершения внешнего crypto-review. Верификация артефактов
   независима от того, лежат ли крейты на crates.io.
 
 ## Что может пойти не так

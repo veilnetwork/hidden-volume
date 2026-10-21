@@ -63,10 +63,10 @@ record того, что верифицировано, кем, против ка�
 
 | Слой | Механизм | Доказательство |
 |---|---|---|
-| **In-tree audit history** | 18 нумерованных audit-проходов (audit pass 1 — pass 18, 2026-05-02 → 2026-05-10) — каждый с секцией `Refactoring backlog — pass N` в [`TASKS.md`](../../../../TASKS.md), перечисляющей каждое finding, severity и закрывающий коммит. | TASKS.md, git log |
+| **In-tree audit history** | 18 внутренних audit-проходов (2026-05-02 → 2026-05-10). Исходный локальный трекер не опубликован; внесённые исправления доступны в истории Git. | git log |
 | **Topic-specific audits** | Четыре focused аудита с полными code refs и выводами: [constant-time](constant-time.md), [fsync ordering](fsync.md), [memory hygiene](memory.md), [plaintext residency](plaintext.md). | Каждый файл под этой директорией |
 | **Property-level review** | Этот документ — явные statement'ы каждого криптографического инварианта из threat model, код который его enforce'ит, что его сломало бы, и как верифицировать. | §4 этого документа |
-| **Read-only re-audit (2026-05-28)** | Независимый pass против того же кода, ищущий пропущенные/регрессировавшие findings. **0 critical/high/medium**, 7 LOW (все doc-accuracy); все 7 поправлены в коммитах `f67281f` + `53b5720`. | Audit pass commits, [TASKS.md §Refactoring backlog](../../../../TASKS.md) |
+| **Read-only re-audit (2026-05-28)** | Независимый pass против того же кода, ищущий пропущенные/регрессировавшие findings. **0 critical/high/medium**, 7 LOW (все doc-accuracy); все 7 поправлены в коммитах `f67281f` + `53b5720`. | Audit pass commits |
 | **Reproducible signed builds** | `cosign keyless` подписи на каждом SemVer-tagged релизе; длительно-живущих signing-ключей не существует. | [`.github/workflows/release.yml`](../../../../.github/workflows/release.yml), [`docs/ru/contributing/verifying-release.md`](../../contributing/verifying-release.md) |
 | **Публичный threat model** | Явные тиры противника T1/T2/T2'/T3, инварианты D1/D2/I1/I2/I3/R1/M1/C1, out-of-scope mitigations перечислены. | [`docs/ru/security/threat-model.md`](../threat-model.md) |
 | **Тестовая база** | 391 тест проходит (unit + integration + proptest + crash-recovery + log-pagination + repack + property-full). | `cargo test --workspace` |
@@ -378,9 +378,9 @@ keyless; подпись лежит в Sigstore Rekor transparency log'е.
 
 ### 7.4 Independent audit replay
 
-Этот документ и per-pass-записи в [`TASKS.md`](../../../../TASKS.md)
-перечисляют каждое finding с code references. Любой может
-пройти заново те же diff'ы и подтвердить закрытие.
+В этом документе даны ссылки на код для разобранных инвариантов.
+Соответствующие исправления доступны в истории Git; исторический
+локальный трекер отдельных проходов в репозитории не опубликован.
 
 ### 7.5 Format-spec verification
 

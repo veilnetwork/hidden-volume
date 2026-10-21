@@ -639,7 +639,7 @@ intermediate-snapshot deniability is weakened (see DESIGN §1 T2').
 | Plaintext-leak audit | `docs/en/security/audits/plaintext.md` |
 | fsync ordering audit | `docs/en/security/audits/fsync.md` |
 | Benchmarks / target numbers | `docs/en/contributing/benchmarks.md` |
-| Roadmap | `TASKS.md` |
+| Security status | [Security policy](../../../SECURITY.md) |
 | Per-API rustdoc | `cargo doc --open` |
 
 [`Argon2Params::LIGHT`]: ../src/crypto/kdf.rs

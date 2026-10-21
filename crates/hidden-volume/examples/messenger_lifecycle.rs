@@ -173,13 +173,8 @@ fn main() -> hidden_volume::Result<()> {
             );
         }
         {
-            let mut hidden = container.open_space(hidden_password)?;
-            println!(
-                "   hidden: username={:?}",
-                hidden
-                    .get(Namespace::SETTINGS, b"username")?
-                    .map(|v| String::from_utf8_lossy(&v).into_owned()),
-            );
+            let _hidden = container.open_space(hidden_password)?;
+            println!("   hidden space reopened successfully");
         }
     }
 

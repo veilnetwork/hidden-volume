@@ -187,8 +187,8 @@ advisory после выхода проекта на v1.0.
 
 ### Запланированные аудиты
 
-- Внешний криптографический ревью (Trail of Bits / Cure53 / NCC) до
-  заморозки v1.0. Отслеживается в [`TASKS.md`](TASKS.md), milestone v1.0.
+- Внешний криптографический аудит ещё не проведён; независимый
+  криптографический отчёт пока не опубликован.
 - Fuzzing-кампания (`cargo-fuzz`, как только появится CI-инфраструктура
   для многочасовых прогонов).
 
@@ -206,7 +206,7 @@ compile-time-only транзитивная зависимость proc-macro too
 
 | Advisory | Крейт | Почему игнор | Путь устранения |
 |---|---|---|---|
-| [RUSTSEC-2024-0436](https://rustsec.org/advisories/RUSTSEC-2024-0436) | `paste 1.0.15` | Автор архивировал репозиторий `paste`. Транзитивная compile-time зависимость `uniffi_bindgen` и `uniffi_core`; используется при раскрытии proc-macro для конкатенации идентификаторов (без runtime-эффекта). Community drop-in замена — [`pastey`](https://crates.io/crates/pastey), source-совместимая. | Gate на миграцию uniffi с `paste` на поддерживаемую альтернативу (R-DEPS в `TASKS.md`). |
+| [RUSTSEC-2024-0436](https://rustsec.org/advisories/RUSTSEC-2024-0436) | `paste 1.0.15` | Автор архивировал репозиторий `paste`. Транзитивная compile-time зависимость `uniffi_bindgen` и `uniffi_core`; используется при раскрытии proc-macro для конкатенации идентификаторов (без runtime-эффекта). Community drop-in замена — [`pastey`](https://crates.io/crates/pastey), source-совместимая. | Gate на миграцию uniffi с `paste` на поддерживаемую альтернативу (миграция зависимости upstream). |
 
 > `RUSTSEC-2025-0141` (`bincode 1.3.3`) ранее игнорировался здесь, но
 > был удалён после перехода workspace на `uniffi 0.31`, который заменил

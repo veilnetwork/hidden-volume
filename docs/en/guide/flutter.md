@@ -316,7 +316,7 @@ opaque blob** — back up the whole thing. See
 
 - **Hot reload of Rust code in Flutter dev mode** — not supported by
   uniffi; requires app restart on Rust changes.
-- **iOS xcframework packaging** — see [`TASKS.md`](../../../TASKS.md) v0.8;
+- **iOS xcframework packaging**;
   recipe deferred until first iOS integrator commits.
 - **Android `.aar` packaging** — same, recipe in
   [`bindings/README.md`](../../../bindings/README.md) §Kotlin.

@@ -44,7 +44,7 @@ CONFIG = {
     # Each exception is a FACT about the repository, not a way to quieten the
     # gate. The first pass of this list was written against one developer's
     # working copy and CI caught it immediately, which is the whole point:
-    # `bindings/swift/` and `TASKS.md` exist on that machine and in no clone.
+    # `bindings/swift/` exists only after local binding generation.
     "allowed_dangling": {
         # uniffi output — .gitignored on purpose (audit C4, 2026-05-03) and
         # regenerated locally; absent in a fresh clone by design.
@@ -56,30 +56,10 @@ CONFIG = {
         },
         "docs/en/guide/flutter.md": {
             "../../../bindings/kotlin/", "../../../bindings/swift/",
-            "../../../TASKS.md",
         },
         "docs/ru/guide/flutter.md": {
             "../../../bindings/kotlin/", "../../../bindings/swift/",
-            "../../../TASKS.md",
         },
-        # TASKS.md and TASKS_ARCHIVE.md have NEVER been committed to this
-        # repository — `git log --all -- TASKS.md` is empty. Ten documents link
-        # to them anyway, so for anyone who clones, the roadmap those sentences
-        # promise does not exist. Listed here so the gate stays honest about a
-        # known gap rather than failing every build over it; the gap itself is
-        # the owner's to close, by publishing the file or by rewording the
-        # sentences that point at it.
-        "README.md": {"TASKS.md"},
-        "README.ru.md": {"TASKS.md"},
-        "SECURITY.md": {"TASKS.md"},
-        "SECURITY.ru.md": {"TASKS.md"},
-        "docs/README.md": {"../TASKS.md"},
-        "docs/en/contributing/verifying-release.md": {"../../../TASKS.md"},
-        "docs/ru/contributing/verifying-release.md": {"../../../TASKS.md"},
-        "docs/en/security/audits/format-fuzzing.md": {"../../../../TASKS.md"},
-        "docs/ru/security/audits/format-fuzzing.md": {"../../../../TASKS.md"},
-        "docs/en/security/audits/self-audit.md": {"../../../../TASKS.md"},
-        "docs/ru/security/audits/self-audit.md": {"../../../../TASKS.md"},
     },
     # No docs/<lang>/index.md in this repo — docs/README.md is a different shape.
     "index_langs": [],

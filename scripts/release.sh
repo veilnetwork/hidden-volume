@@ -34,6 +34,10 @@ cd "$REPO_ROOT"
 
 # Default to native target if not specified.
 TARGET="${TARGET:-}"
+if [[ -n "$TARGET" && ! "$TARGET" =~ ^[A-Za-z0-9_]+(-[A-Za-z0-9_]+)+$ ]]; then
+    echo "error: TARGET must be a Rust target triple, not a path" >&2
+    exit 1
+fi
 DIST="$REPO_ROOT/dist${TARGET:+/$TARGET}"
 
 # Pick a sha256 tool that exists on the host.
