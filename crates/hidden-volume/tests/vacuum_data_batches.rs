@@ -22,6 +22,75 @@ mod common;
 use common::{fast_params, scratch_path};
 
 #[test]
+fn partial_batch_replace_scrubs_superseded_payload_and_preserves_live_neighbor() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fixture.hv");
+    let mut c = Container::create(&path, fast_params()).unwrap();
+    let mut s = c.create_space(b"pw").unwrap();
+    let ns = Namespace::MESSAGE_LOG;
+    let mut tx = s.begin_tx();
+    tx.append_log(ns, 1, b"old private body").unwrap();
+    tx.append_log(ns, 2, b"live neighbor").unwrap();
+    tx.commit().unwrap();
+    let mut tx = s.begin_tx();
+    tx.append_log(ns, 1, b"replacement").unwrap();
+    tx.commit().unwrap();
+    assert!(s.vacuum_data_batches().unwrap() > 0);
+    assert_eq!(s.read_log(ns, 1).unwrap().unwrap(), b"replacement");
+    assert_eq!(s.read_log(ns, 2).unwrap().unwrap(), b"live neighbor");
+    assert_eq!(s.vacuum_data_batches().unwrap(), 0);
+    s.verify_integrity().unwrap();
+    drop(s);
+    drop(c);
+    let mut c = Container::open(&path).unwrap();
+    let mut s = c.open_space(b"pw").unwrap();
+    assert_eq!(s.read_log(ns, 2).unwrap().unwrap(), b"live neighbor");
+    s.verify_integrity().unwrap();
+}
+
+#[test]
+fn partial_batch_delete_scrubs_removed_payload_and_preserves_live_neighbor() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fixture.hv");
+    let mut c = Container::create(&path, fast_params()).unwrap();
+    let mut s = c.create_space(b"pw").unwrap();
+    let ns = Namespace::MESSAGE_LOG;
+    let mut tx = s.begin_tx();
+    tx.append_log(ns, 1, b"deleted private body").unwrap();
+    tx.append_log(ns, 2, b"live neighbor").unwrap();
+    tx.commit().unwrap();
+    let mut tx = s.begin_tx();
+    tx.delete_log(ns, 1).unwrap();
+    tx.commit().unwrap();
+    assert!(s.vacuum_data_batches().unwrap() > 0);
+    assert!(s.read_log(ns, 1).unwrap().is_none());
+    assert_eq!(s.read_log(ns, 2).unwrap().unwrap(), b"live neighbor");
+    assert_eq!(s.vacuum_data_batches().unwrap(), 0);
+    s.verify_integrity().unwrap();
+}
+
+#[test]
+fn duplicate_id_is_already_coalesced_before_the_batch_is_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fixture.hv");
+    let mut c = Container::create(&path, fast_params()).unwrap();
+    let mut s = c.create_space(b"pw").unwrap();
+    let ns = Namespace::MESSAGE_LOG;
+    let mut tx = s.begin_tx();
+    tx.append_log(ns, 1, b"superseded inside one batch")
+        .unwrap();
+    tx.append_log(ns, 1, b"current body").unwrap();
+    tx.append_log(ns, 2, b"live neighbor").unwrap();
+    tx.commit().unwrap();
+    // commit_tx coalesces duplicate ids before encoding: there is no stale
+    // on-disk payload here, so this must remain a no-op.
+    assert_eq!(s.vacuum_data_batches().unwrap(), 0);
+    assert_eq!(s.read_log(ns, 1).unwrap().unwrap(), b"current body");
+    assert_eq!(s.read_log(ns, 2).unwrap().unwrap(), b"live neighbor");
+    assert_eq!(s.vacuum_data_batches().unwrap(), 0);
+}
+
+#[test]
 fn empty_space_vacuum_data_batches_is_noop() {
     let path = scratch_path();
     let mut c = Container::create(&path, fast_params()).unwrap();
