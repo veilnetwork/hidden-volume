@@ -352,7 +352,7 @@ const Map<String, int> _methodChecksums = <String, int>{
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_vacuum_after_open':
       23213,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_vacuum_data_batches':
-      48307,
+      56095,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_verify_integrity':
       55085,
 };
@@ -1976,8 +1976,9 @@ class SpaceHandleBindings {
     });
   }
 
-  /// Reclaim DataBatch chunk slots that no longer have any live
-  /// log entries. Returns the count of slots scrubbed.
+  /// Repack partially-live DataBatches, then reclaim unreachable originals.
+  /// Returns slots scrubbed. Repacking can advance commit sequence/history;
+  /// audit rollback anchors before maintenance or retain a pre-pass reading.
   int vacuumDataBatches() {
     _ensureOpen();
     final h = _cloneHandle();
@@ -2370,7 +2371,8 @@ class MultiSpaceHandleBindings {
     return rustCall<int>((s) => _msCommitSeq(h, sid, s));
   }
 
-  /// Reclaim DataBatch slots orphaned by edit/delete in space [id].
+  /// Repack partially-live batches and reclaim old slots in space [id].
+  /// Repacking may advance that space's commit sequence/history.
   int vacuumDataBatches(int id) {
     _ensureOpen();
     final sid = _sid(id);

@@ -1664,7 +1664,10 @@ impl SpaceHandle {
     /// owned `DataBatch` chunk that is no longer referenced by a live
     /// KV entry — eliminates the on-disk plaintext of "deleted" log
     /// entries that ordinary `vacuum_orphans` (auto-run on `open`)
-    /// leaves untouched. Returns the number of chunks scrubbed.
+    /// leaves untouched. Re-publishes surviving records in partially-live
+    /// batches before scrubbing the originals. Returns the number of chunks
+    /// scrubbed. Repacking may advance the commit sequence/history; judge
+    /// rollback anchors before this pass or retain a pre-maintenance reading.
     ///
     /// Errors with [`HvError::ReadOnly`] on a handle opened via
     /// `open` of a read-only container path. Audit pass 11 R-FFI-1

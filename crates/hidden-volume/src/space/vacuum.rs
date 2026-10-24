@@ -9,9 +9,12 @@ use crate::{Error, Result};
 
 use super::Space;
 use super::index::IndexNode;
+use super::log;
 use super::slots::DenseSlotSet;
+use super::slots::OwnedSet;
 use super::superblock::{NO_RECORD, Superblock};
 use super::walk::TreeWalk;
+use std::collections::BTreeSet;
 
 /// How many `(log_id_key, batch_slot)` entries
 /// [`Space::vacuum_data_batches`] pulls out of a namespace at a time
@@ -288,9 +291,8 @@ impl<'f> Space<'f> {
         self.vacuum_orphans()
     }
 
-    /// Scrub `DataBatch` chunks owned by this space that are no longer
-    /// referenced by any current namespace's KV index. Returns the
-    /// number of chunks scrubbed.
+    /// Repack partially-live log batches and scrub unreachable `DataBatch`
+    /// chunks. Returns the number of old chunks scrubbed.
     ///
     /// ## Why this exists
     ///
@@ -308,19 +310,17 @@ impl<'f> Space<'f> {
     /// on disk, AEAD-decryptable, leaking the original payloads to
     /// anyone who later obtains the password.
     ///
-    /// `vacuum_data_batches` walks the live KV index of every
-    /// namespace, builds the set of currently-referenced batch slots
-    /// (any 8-byte KV value is treated as a candidate batch_slot
-    /// pointer — a heuristic, but values that *aren't* batch slots
-    /// just won't match owned DataBatch slots and so the heuristic
-    /// only causes false negatives, never wrongful scrub), then
-    /// scrubs every owned DataBatch chunk that isn't referenced.
+    /// A shared batch can retain an old payload even while another record
+    /// still references it. First publish its current records through normal
+    /// transactions, then rebuild the set of referenced slots from Log-kind
+    /// namespaces and scrub the unreachable batches. KV values are never
+    /// interpreted as log pointers.
     ///
     /// ## Cost
     ///
-    /// One full walk of every namespace's tree (≤ Σ count(ns)) plus
-    /// O(M) chunk reads where M is the number of owned chunks. On a
-    /// 100 K-message log this is a few ms.
+    /// Walks log pointers and decodes live batches, with one decoded batch and
+    /// bounded pointer pages resident at a time. Partially-live batches incur
+    /// durable commits; run outside latency-sensitive/UI threads.
     ///
     /// ## Read-only handles
     ///
@@ -342,8 +342,10 @@ impl<'f> Space<'f> {
     /// - Cheaper than [`crate::Container::compact_known`] for
     ///   forward-secrecy alone — compaction additionally rewrites the
     ///   whole container with a fresh `container_id` and resets
-    ///   `commit_history`, both of which `vacuum_data_batches`
-    ///   leaves alone.
+    ///   `commit_history`. This pass keeps the container id but advances the
+    ///   commit sequence/history when repacking partially-live batches. Hosts
+    ///   must judge rollback anchors before maintenance, or retain a pre-pass
+    ///   reading: enough internal commits can age an anchor out of its window.
     pub fn vacuum_data_batches(&mut self) -> Result<usize> {
         // Same refusal as `vacuum_orphans`, and it was missing here (report9
         // HV-09). A superblock NEWER than the one we settled on decrypted under
@@ -368,6 +370,12 @@ impl<'f> Space<'f> {
         if self.state.superblock.root_slot == NO_RECORD {
             return Ok(0);
         }
+
+        // A referenced batch can still hold superseded/deleted records beside
+        // live neighbors. Move just its current records through normal durable
+        // publication first; only then can the orphan pass erase the old batch.
+        // Each rewrite is bounded to one decoded batch, never a whole log.
+        self.repack_partial_data_batches()?;
 
         // 1. Build the set of currently-referenced batch_slot
         //    pointers. R-NSKIND (format v2): each `IndexRoot` carries
@@ -478,6 +486,104 @@ impl<'f> Space<'f> {
             }
         }
         Ok(scrubbed)
+    }
+
+    fn repack_partial_data_batches(&mut self) -> Result<()> {
+        let roots = self.load_prior_roots()?;
+        for root in roots {
+            if root.kind != crate::tx::NamespaceKind::Log {
+                continue;
+            }
+            // One bit per physical slot, per namespace. Grow only after the
+            // pointer has passed the file bound; new commits can extend it.
+            let mut seen = OwnedSet::with_capacity(self.file.slot_count());
+            let mut cursor: Option<Vec<u8>> = None;
+            loop {
+                let page =
+                    self.list_after(root.namespace, cursor.as_deref(), BATCH_POINTER_PAGE)?;
+                let Some((last_key, _)) = page.last() else {
+                    break;
+                };
+                cursor = Some(last_key.clone());
+                for (key, value) in &page {
+                    let slot = log::parse_batch_slot_value(value)?;
+                    if slot >= self.file.slot_count() {
+                        return Err(Error::Malformed("log batch pointer is outside the file"));
+                    }
+                    if !seen.insert(slot) {
+                        continue;
+                    }
+                    let pt = self.read_owned_chunk(slot)?;
+                    if pt.kind != ChunkKind::DataBatch {
+                        return Err(Error::WrongNamespaceKind(
+                            "log pointer not a DataBatch chunk",
+                        ));
+                    }
+                    let hash = *blake3::hash(&pt.payload).as_bytes();
+                    if log::parse_batch_content_hash(value).is_some_and(|expected| expected != hash)
+                    {
+                        return Err(Error::Malformed(
+                            "log batch content hash mismatch during vacuum",
+                        ));
+                    }
+                    let records = log::decode_batch(&pt.payload)?;
+                    let primary = log::parse_log_id_key(key)?;
+                    if log::find_in_batch(&records, primary).is_none() {
+                        return Err(Error::Malformed("log_id not found in pointed batch"));
+                    }
+                    let mut ids = BTreeSet::new();
+                    let mut live = Vec::new();
+                    let mut stale = false;
+                    // Match read_log's last-write-wins rule even for duplicate
+                    // ids supplied in ONE original transaction.
+                    for (id, payload) in records.iter().rev() {
+                        if !ids.insert(*id) {
+                            stale = true;
+                            continue;
+                        }
+                        // Reuse this authenticated pointer page. Most records
+                        // are adjacent; avoid a fresh tree descent for each
+                        // neighbor when checking an entirely-live batch.
+                        let id_key = log::log_id_key(*id);
+                        let fetched;
+                        let current =
+                            match page.binary_search_by(|(key, _)| key.as_slice().cmp(&id_key)) {
+                                Ok(at) => Some(page[at].1.as_slice()),
+                                Err(_) => {
+                                    fetched = self.get(root.namespace, &id_key)?;
+                                    fetched.as_deref()
+                                },
+                            };
+                        let Some(current) = current else {
+                            stale = true;
+                            continue;
+                        };
+                        if log::parse_batch_slot_value(current)? != slot {
+                            stale = true;
+                            continue;
+                        }
+                        if log::parse_batch_content_hash(current)
+                            .is_some_and(|expected| expected != hash)
+                        {
+                            return Err(Error::Malformed(
+                                "log batch content hash mismatch during vacuum",
+                            ));
+                        }
+                        live.push((*id, payload));
+                    }
+                    if stale && !live.is_empty() {
+                        let mut tx = self.begin_tx();
+                        for (id, payload) in live.into_iter().rev() {
+                            tx.append_log(root.namespace, id, payload)?;
+                        }
+                        // On any failure (including PublishUncertain) stop
+                        // before the scrub phase; reopen resolves publication.
+                        tx.commit()?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Walk the tree rooted at `slot`, admitting every IndexNode chunk
