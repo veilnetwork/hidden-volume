@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Update Tokio to 1.53.3 for RUSTSEC-2026-0386 without adding an advisory
+  exception.
 - Scrub stale records inside log batches that still contain live entries.
   Preserve the live records while retiring deleted values from partially live
   batches, including through the FFI and Flutter bindings.
