@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.6.4 — 2026-10-25
+
+### Fixed
+
+- Scrub stale records inside log batches that still contain live entries.
+  Preserve the live records while retiring deleted values from partially live
+  batches, including through the FFI and Flutter bindings.
+- Add regression coverage for mixed live/deleted batch vacuuming.
+
+The container format and public FFI remain compatible with 2.6.3.
+
 ## 2.6.3 — 2026-10-21
 
 ### Fixed
