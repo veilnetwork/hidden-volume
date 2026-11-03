@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Verify each v2 log index commitment during exact reads, cached batch reads,
+  and full integrity checks. A valid AEAD DataBatch with a different recorded
+  content hash is refused, including after a legacy unhashed reference.
+  Retain legacy 8-byte references and the existing container/FFI formats.
+- Account for retained batch digests in the iterator cache's byte budget;
+  bound integrity commitment tracking by the owned chunk count;
+  update the English and Russian format reference for the existing 40-byte
+  v2 log index values.
+
 ## 2.6.4 — 2026-10-25
 
 ### Fixed

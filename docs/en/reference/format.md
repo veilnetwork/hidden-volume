@@ -416,13 +416,21 @@ Constraints (raw, before compression):
 - The compressed result MUST fit in `PAYLOAD_CAP = 4040` bytes after
   zstd; oversize → `Error::PayloadTooLarge`.
 
-Each DataBatch is referenced from the namespace's KV index by an
-8-byte LE slot pointer:
+Each DataBatch is referenced from the namespace's KV index. Current writers
+use a 40-byte v2 value; readers also accept the legacy 8-byte value:
 
 ```
-KV value for log entry: u64 LE = batch_slot
-KV key for log entry:   u64 BE = log_id (big-endian for natural sort order)
+KV value, v1:          u64_le(batch_slot)
+KV value, v2:          u64_le(batch_slot) || BLAKE3(compressed DataBatch payload)
+KV key for log entry:  u64_be(log_id) (big-endian for natural sort order)
 ```
+
+Every v2 reference must match the actual payload digest, including exact
+`read_log` reads, references to an already decoded batch, and the full integrity
+walk. References to the same batch must not disagree. A legacy reference has
+no digest: it neither supplies a hash nor suppresses checks on another v2
+reference to that batch. This describes the existing layouts; it does not
+change the container format.
 
 ### 4.5 Checkpoint (`kind = 0x07`) — open-scan acceleration (optional)
 

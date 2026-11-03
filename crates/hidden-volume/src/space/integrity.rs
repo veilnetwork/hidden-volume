@@ -11,9 +11,12 @@ use crate::{Error, Result};
 use super::IntegrityReport;
 use super::Space;
 use super::index::{IndexNode, Namespace};
-use super::log::{decode_batch, parse_batch_slot_value, parse_log_id_key};
+use super::log::{
+    decode_batch, parse_batch_content_hash, parse_batch_slot_value, parse_log_id_key,
+};
 use super::superblock::NO_RECORD;
 use super::walk::TreeWalk;
+use std::collections::hash_map::Entry;
 
 /// Walk-wide mutable state, threaded through the recursion as one
 /// parameter so the per-node arguments stay reviewable.
@@ -33,6 +36,12 @@ struct VerifyCtx {
     /// all of them — 16 bytes per log record in the container (audit
     /// HV-03).
     log_pairs: Vec<(u64, u64)>,
+    /// One expected commitment per distinct v2 batch, not per log record.
+    /// At most the owned chunk count; reject forged distinct pointers before
+    /// they can amplify this metadata. Cleared with `log_pairs` per namespace.
+    /// Legacy references do not
+    /// create a commitment or erase one learned from a v2 reference.
+    log_hashes: std::collections::HashMap<u64, [u8; 32]>,
     report: IntegrityReport,
 }
 
@@ -124,6 +133,7 @@ impl<'f> Space<'f> {
         let mut ctx = VerifyCtx {
             walk: self.new_tree_walk(),
             log_pairs: Vec::new(),
+            log_hashes: std::collections::HashMap::new(),
             report: IntegrityReport {
                 namespaces_verified: 0,
                 chunks_verified: 0,
@@ -239,13 +249,17 @@ impl<'f> Space<'f> {
     /// at `read_log` time.
     ///
     /// Algorithm:
-    ///   1. Sort the `(batch_slot, log_id)` pairs the tree walk
+    ///   1. Collect each v2 slot's expected hash while walking leaves;
+    ///      conflicting commitments fail immediately. Then sort the
+    ///      `(batch_slot, log_id)` pairs the tree walk
     ///      collected, so every record claiming to live in one chunk
     ///      groups together, and drop exact duplicates.
     ///   2. For each unique slot: admit it to the traversal guard
     ///      (so a batch chunk shared with the index tree, or claimed by
     ///      two namespaces, is a failure), AEAD-decrypt, kind-check,
-    ///      decode, and check every claimed `log_id` is present.
+    ///      verify the recorded content hash when present, decode, and check
+    ///      every claimed `log_id` is present. Expected hashes are retained
+    ///      once per distinct v2 batch and cleared with this namespace's pairs.
     ///
     /// Called once per Log-kind namespace root, immediately after that
     /// root's subtree walk, and takes the buffer with it — see the call
@@ -257,6 +271,7 @@ impl<'f> Space<'f> {
         // Taken out of `ctx` so the loop below can hold a slice of the
         // pairs while still mutating the guard and the report.
         let mut pairs = std::mem::take(&mut ctx.log_pairs);
+        let hashes = std::mem::take(&mut ctx.log_hashes);
         pairs.sort_unstable();
         pairs.dedup();
 
@@ -273,6 +288,15 @@ impl<'f> Space<'f> {
             if pt.kind != ChunkKind::DataBatch {
                 return Err(Error::IntegrityFailure {
                     detail: "Log leaf entry references chunk that is not DataBatch",
+                    slot,
+                });
+            }
+            if hashes
+                .get(&slot)
+                .is_some_and(|expected| *expected != blake3_of(&pt.payload))
+            {
+                return Err(Error::IntegrityFailure {
+                    detail: "DataBatch content hash does not match its log index",
                     slot,
                 });
             }
@@ -426,6 +450,28 @@ impl<'f> Space<'f> {
                                 detail: "log leaf entry value not 8 bytes (batch_slot)",
                                 slot: exp.slot,
                             })?;
+                        if let Some(expected) = parse_batch_content_hash(value) {
+                            let full = ctx.log_hashes.len() >= self.state.owned_slots.len();
+                            match ctx.log_hashes.entry(batch_slot) {
+                                Entry::Occupied(entry) => {
+                                    if *entry.get() != expected {
+                                        return Err(Error::IntegrityFailure {
+                                            detail: "conflicting DataBatch hashes in log index",
+                                            slot: batch_slot,
+                                        });
+                                    }
+                                },
+                                Entry::Vacant(entry) => {
+                                    if full {
+                                        return Err(Error::IntegrityFailure {
+                                            detail: "log batch hash commitments exceed owned chunk count",
+                                            slot: batch_slot,
+                                        });
+                                    }
+                                    entry.insert(expected);
+                                },
+                            }
+                        }
                         ctx.log_pairs.push((batch_slot, log_id));
                     }
                 }
@@ -1141,6 +1187,189 @@ mod tests {
         assert_eq!(got.len(), 1, "the honest batch did not read back");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    enum LogHashProbe {
+        Exact,
+        CachedV2,
+        CachedLegacy,
+        IntegrityConflict,
+        IntegrityMismatch,
+    }
+
+    fn assert_log_hash_mismatch_refused(probe: LogHashProbe) {
+        let exact = matches!(probe, LogHashProbe::Exact);
+        let first_v2 = !matches!(probe, LogHashProbe::CachedLegacy);
+        let integrity = matches!(
+            probe,
+            LogHashProbe::IntegrityConflict | LogHashProbe::IntegrityMismatch
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("log-hash.hv");
+        let mut container = Container::create(&path, Argon2Params::MIN).unwrap();
+        let mut space = container.create_space(b"pw").unwrap();
+        let ns = Namespace::MESSAGE_LOG;
+        let payload = super::super::log::encode_batches_split(&[
+            (7, zeroize::Zeroizing::new(b"seven".to_vec())),
+            (8, zeroize::Zeroizing::new(b"eight".to_vec())),
+        ])
+        .unwrap()
+        .pop()
+        .unwrap()
+        .1;
+        let slot = space
+            .place_chunk(ChunkKind::DataBatch, 1, &payload)
+            .unwrap();
+        let hash = blake3_of(&payload);
+        let mut wrong = hash;
+        wrong[0] ^= 0xff;
+        let first = if first_v2 {
+            let first_hash = if matches!(probe, LogHashProbe::IntegrityMismatch) {
+                &wrong
+            } else {
+                &hash
+            };
+            super::super::log::encode_batch_slot_value_v2(slot, first_hash).to_vec()
+        } else {
+            super::super::log::encode_batch_slot_value(slot).to_vec()
+        };
+        let key7 = super::super::log::log_id_key(7);
+        let key8 = super::super::log::log_id_key(8);
+        let second = super::super::log::encode_batch_slot_value_v2(slot, &wrong);
+        let (root, root_hash) = seal_node(
+            &mut space,
+            &leaf(ns, &[(&key7, &first), (&key8, &second)]),
+            1,
+        );
+        publish(
+            &mut space,
+            vec![IndexRoot {
+                namespace: ns,
+                kind: NamespaceKind::Log,
+                index_slot: root,
+                payload_hash: root_hash,
+            }],
+            1,
+        );
+
+        // Optional private, synthetic fixture for a cross-FFI regression.
+        // Only this exact-reader case writes it, so parallel tests cannot race.
+        if exact && let Some(destination) = std::env::var_os("HV_LOG_HASH_FIXTURE") {
+            std::fs::copy(&path, destination).unwrap();
+        }
+        let result = if integrity {
+            space.verify_integrity().map(|_| Vec::new())
+        } else if exact {
+            space
+                .read_log(ns, 8)
+                .map(|value| value.into_iter().collect::<Vec<_>>())
+        } else {
+            space
+                .iter_log_after(ns, None, 10)
+                .map(|rows| rows.into_iter().map(|(_, value)| value).collect())
+        };
+        let refused = if integrity {
+            matches!(&result, Err(Error::IntegrityFailure { detail, .. }) if detail.contains("hash"))
+        } else {
+            matches!(&result, Err(Error::Malformed(message)) if message.contains("hash"))
+        };
+        assert!(
+            refused,
+            "a mismatching per-entry hash must not return record bytes: {result:?}"
+        );
+
+        // Honest references, including a legacy first reference, remain valid.
+        let first = if first_v2 {
+            super::super::log::encode_batch_slot_value_v2(slot, &hash).to_vec()
+        } else {
+            super::super::log::encode_batch_slot_value(slot).to_vec()
+        };
+        let second = super::super::log::encode_batch_slot_value_v2(slot, &hash);
+        let (root, root_hash) = seal_node(
+            &mut space,
+            &leaf(ns, &[(&key7, &first), (&key8, &second)]),
+            2,
+        );
+        publish(
+            &mut space,
+            vec![IndexRoot {
+                namespace: ns,
+                kind: NamespaceKind::Log,
+                index_slot: root,
+                payload_hash: root_hash,
+            }],
+            2,
+        );
+        assert_eq!(space.read_log(ns, 8).unwrap().unwrap(), b"eight");
+        let rows = space.iter_log_after(ns, None, 10).unwrap();
+        assert_eq!(rows, vec![(7, b"seven".to_vec()), (8, b"eight".to_vec())]);
+        assert_eq!(space.verify_integrity().unwrap().data_batches_verified, 1);
+    }
+
+    #[test]
+    fn log_hash_exact_read_refuses_a_mismatching_index_commitment() {
+        assert_log_hash_mismatch_refused(LogHashProbe::Exact);
+    }
+
+    #[test]
+    fn log_hash_cached_batch_checks_every_v2_reference() {
+        assert_log_hash_mismatch_refused(LogHashProbe::CachedV2);
+    }
+
+    #[test]
+    fn log_hash_legacy_cache_entry_does_not_bypass_a_later_v2_hash() {
+        assert_log_hash_mismatch_refused(LogHashProbe::CachedLegacy);
+    }
+
+    #[test]
+    fn log_hash_integrity_walk_checks_every_batch_commitment() {
+        assert_log_hash_mismatch_refused(LogHashProbe::IntegrityConflict);
+    }
+
+    #[test]
+    fn log_hash_integrity_walk_checks_agreeing_but_incorrect_commitments() {
+        assert_log_hash_mismatch_refused(LogHashProbe::IntegrityMismatch);
+    }
+
+    #[test]
+    fn log_hash_integrity_tracking_is_bounded_before_following_forged_slots() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("log-hash-budget.hv");
+        let mut container = Container::create(&path, Argon2Params::MIN).unwrap();
+        let mut space = container.create_space(b"pw").unwrap();
+        let ns = Namespace::MESSAGE_LOG;
+        let rows: Vec<_> = (0..32u64)
+            .map(|id| {
+                (
+                    super::super::log::log_id_key(id).to_vec(),
+                    super::super::log::encode_batch_slot_value_v2(1_000_000 + id, &[0; 32])
+                        .to_vec(),
+                )
+            })
+            .collect();
+        let refs: Vec<_> = rows
+            .iter()
+            .map(|(key, value)| (key.as_slice(), value.as_slice()))
+            .collect();
+        let (root, root_hash) = seal_node(&mut space, &leaf(ns, &refs), 1);
+        publish(
+            &mut space,
+            vec![IndexRoot {
+                namespace: ns,
+                kind: NamespaceKind::Log,
+                index_slot: root,
+                payload_hash: root_hash,
+            }],
+            1,
+        );
+        assert!(
+            rows.len() > space.state.owned_slots.len(),
+            "budget precondition was not exercised"
+        );
+        assert!(
+            matches!(space.verify_integrity(), Err(Error::IntegrityFailure { detail, .. })
+            if detail == "log batch hash commitments exceed owned chunk count")
+        );
     }
 
     /// The guard is not the integrity walk's alone. `list` / `count` /

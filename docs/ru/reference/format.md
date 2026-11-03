@@ -424,13 +424,20 @@ raw layout (input to zstd):
 - Сжатый результат ОБЯЗАН помещаться в `PAYLOAD_CAP = 4040` байт
   после zstd; превышение → `Error::PayloadTooLarge`.
 
-На каждый DataBatch ссылается KV-index namespace через 8-байтовый
-LE slot-указатель:
+На каждый DataBatch ссылается KV-index namespace. Текущие writers используют
+40-байтовое значение v2; readers также принимают прежнее 8-байтовое значение:
 
 ```
-KV value for log entry: u64 LE = batch_slot
-KV key for log entry:   u64 BE = log_id (big-endian for natural sort order)
+KV value, v1:          u64_le(batch_slot)
+KV value, v2:          u64_le(batch_slot) || BLAKE3(compressed DataBatch payload)
+KV key for log entry:  u64_be(log_id) (big-endian for natural sort order)
 ```
+
+Каждая ссылка v2 обязана совпадать с фактическим хешем payload, включая
+точечный `read_log`, ссылки на уже декодированный batch и полный обход
+целостности. Ссылки на один batch не могут задавать разные хеши. У ссылки v1
+хеша нет: она не задаёт его и не отменяет проверку другой ссылки v2 на этот
+же batch. Здесь описаны уже существующие раскладки; формат контейнера не меняется.
 
 ### 4.5 Checkpoint (`kind = 0x07`) — ускорение open-скана (опционально)
 

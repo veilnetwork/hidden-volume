@@ -20,8 +20,22 @@ use super::walk::TreeWalk;
 type LogRecord = (u64, log::LogPayload);
 /// A decoded `DataBatch`'s records, in append order.
 type DecodedBatch = Vec<LogRecord>;
-/// A resident cache entry: the tick of its last use plus the batch.
-type CachedBatch = (u64, DecodedBatch);
+/// The digest of the exact compressed payload is needed even when another
+/// index entry already caused this batch to be decoded.
+struct CachedBatch {
+    last_use: u64,
+    hash: [u8; 32],
+    records: DecodedBatch,
+}
+
+fn verify_batch_reference(value: &[u8], actual: &[u8; 32]) -> Result<()> {
+    if log::parse_batch_content_hash(value).is_some_and(|expected| expected != *actual) {
+        return Err(Error::Malformed(
+            "log batch does not match the hash its index value commits to",
+        ));
+    }
+    Ok(())
+}
 
 /// Per-call cache of decoded `DataBatch` chunks, bounded in both bytes
 /// and entries ([`log::MAX_CACHED_BATCH_BYTES`],
@@ -35,9 +49,9 @@ type CachedBatch = (u64, DecodedBatch);
 /// re-read and re-decoded — so results never depend on what stayed
 /// resident.
 struct BatchCache {
-    /// `batch_slot -> (last-use tick, decoded records)`.
+    /// `batch_slot -> authenticated payload digest and decoded records`.
     entries: std::collections::HashMap<u64, CachedBatch>,
-    /// Sum of [`log::batch_footprint`] over `entries`.
+    /// Decoded-record footprint plus one 32-byte digest per entry.
     bytes: usize,
     max_bytes: usize,
     max_entries: usize,
@@ -56,27 +70,31 @@ impl BatchCache {
     }
 
     /// Look up a decoded batch, marking it most-recently-used.
-    fn get(&mut self, slot: u64) -> Option<&[LogRecord]> {
+    fn get(&mut self, slot: u64) -> Option<(&[LogRecord], [u8; 32])> {
         self.tick += 1;
         let tick = self.tick;
-        let (last_use, records) = self.entries.get_mut(&slot)?;
-        *last_use = tick;
-        Some(records.as_slice())
+        let entry = self.entries.get_mut(&slot)?;
+        entry.last_use = tick;
+        Some((entry.records.as_slice(), entry.hash))
+    }
+
+    fn cost(records: &[LogRecord]) -> usize {
+        log::batch_footprint(records).saturating_add(std::mem::size_of::<[u8; 32]>())
     }
 
     /// Admit a decoded batch, evicting least-recently-used entries until
     /// it fits. A batch too large for the whole budget is simply not
     /// cached — it was already decoded for this one lookup, and holding
     /// it would evict everything for a single-use entry.
-    fn insert(&mut self, slot: u64, records: DecodedBatch) {
-        let cost = log::batch_footprint(&records);
+    fn insert(&mut self, slot: u64, records: DecodedBatch, hash: [u8; 32]) {
+        let cost = Self::cost(&records);
         if cost > self.max_bytes || self.max_entries == 0 {
             return;
         }
         // Re-inserting a slot already resident (possible only if a
         // caller decoded it twice) must not double-count its bytes.
-        if let Some((_, old)) = self.entries.remove(&slot) {
-            self.bytes = self.bytes.saturating_sub(log::batch_footprint(&old));
+        if let Some(old) = self.entries.remove(&slot) {
+            self.bytes = self.bytes.saturating_sub(Self::cost(&old.records));
         }
         while self.entries.len() >= self.max_entries
             || self.bytes.saturating_add(cost) > self.max_bytes
@@ -87,7 +105,14 @@ impl BatchCache {
         }
         self.tick += 1;
         self.bytes = self.bytes.saturating_add(cost);
-        self.entries.insert(slot, (self.tick, records));
+        self.entries.insert(
+            slot,
+            CachedBatch {
+                last_use: self.tick,
+                hash,
+                records,
+            },
+        );
     }
 
     /// Drop the least-recently-used entry. Returns `false` when there
@@ -96,13 +121,13 @@ impl BatchCache {
         let Some(oldest) = self
             .entries
             .iter()
-            .min_by_key(|(_, (last_use, _))| *last_use)
+            .min_by_key(|(_, entry)| entry.last_use)
             .map(|(slot, _)| *slot)
         else {
             return false;
         };
-        if let Some((_, records)) = self.entries.remove(&oldest) {
-            self.bytes = self.bytes.saturating_sub(log::batch_footprint(&records));
+        if let Some(entry) = self.entries.remove(&oldest) {
+            self.bytes = self.bytes.saturating_sub(Self::cost(&entry.records));
         }
         true
     }
@@ -292,13 +317,18 @@ impl<'f> Space<'f> {
             let log_id = u64::from_be_bytes(id_buf);
             let batch_slot = log::parse_batch_slot_value(&value)?;
 
-            // `map`, not `and_then`: the outer Option is "was the batch
+            // The outer Option is "was the batch
             // resident", the inner is "did it hold this id". Collapsing
             // them would send a cached-but-id-absent entry down the
             // decode path instead of straight to the error.
-            let hit = batch_cache
-                .get(batch_slot)
-                .map(|batch| log::find_in_batch(batch, log_id).cloned());
+            let hit = if let Some((batch, hash)) = batch_cache.get(batch_slot) {
+                // A cached payload does not authorize a different reference's
+                // commitment, including after a legacy unhashed reference.
+                verify_batch_reference(&value, &hash)?;
+                Some(log::find_in_batch(batch, log_id).cloned())
+            } else {
+                None
+            };
             let payload = match hit {
                 Some(found) => found,
                 None => {
@@ -310,29 +340,13 @@ impl<'f> Space<'f> {
                             "log pointer not a DataBatch chunk (namespace is not a log)",
                         ));
                     }
-                    // THE HASH IN THE INDEX VALUE, CHECKED.
-                    //
-                    // Every 40-byte index value carries `slot || BLAKE3(batch)`
-                    // so the namespace root — and the commit root through it —
-                    // describes WHAT was appended and not merely where it
-                    // landed. Nothing read it back: `parse_batch_content_hash`
-                    // had no callers at all, so a reader could return the
-                    // contents of a different AEAD-valid batch occupying that
-                    // slot and the integrity walk would not notice THAT
-                    // mismatch (report27 H01). A v1 8-byte value carries no
-                    // hash and is left exactly as it was.
-                    if let Some(expected) = log::parse_batch_content_hash(&value) {
-                        let actual = *blake3::hash(&pt.payload).as_bytes();
-                        if actual != expected {
-                            return Err(Error::Malformed(
-                                "log batch does not match the hash its index \
-                                 value commits to",
-                            ));
-                        }
-                    }
+                    // Retain the actual digest for subsequent references even
+                    // when this first reference uses the unhashed v1 layout.
+                    let hash = *blake3::hash(&pt.payload).as_bytes();
+                    verify_batch_reference(&value, &hash)?;
                     let records = log::decode_batch(&pt.payload)?;
                     let found = log::find_in_batch(&records, log_id).cloned();
-                    batch_cache.insert(batch_slot, records);
+                    batch_cache.insert(batch_slot, records, hash);
                     found
                 },
             };
@@ -405,6 +419,9 @@ impl<'f> Space<'f> {
             return Err(Error::WrongNamespaceKind(
                 "log pointer not a DataBatch chunk (namespace is not a log)",
             ));
+        }
+        if log::parse_batch_content_hash(&value_bytes).is_some() {
+            verify_batch_reference(&value_bytes, blake3::hash(&pt.payload).as_bytes())?;
         }
         let records = log::decode_batch(&pt.payload)?;
         // Audit pass 7 (L3): align `read_log` with `iter_log_*`.
@@ -702,6 +719,19 @@ impl<'f> Space<'f> {
 mod batch_cache_tests {
     use super::*;
 
+    #[test]
+    fn the_digest_is_retained_and_charged_even_for_an_empty_batch() {
+        let mut cache = BatchCache::new(8, 32);
+        cache.insert(1, Vec::new(), [1; 32]);
+        assert_eq!(cache.bytes, 32);
+        cache.insert(2, Vec::new(), [2; 32]);
+        assert_eq!(cache.bytes, 32);
+        assert!(cache.get(1).is_none());
+        let (records, hash) = cache.get(2).unwrap();
+        assert!(records.is_empty());
+        assert_eq!(hash, [2; 32]);
+    }
+
     /// `n` records of `payload_len` bytes each, ids `0..n`.
     fn records(n: usize, payload_len: usize) -> DecodedBatch {
         (0..n)
@@ -716,7 +746,7 @@ mod batch_cache_tests {
         let budget = 64 * 1024;
         let mut c = BatchCache::new(1024, budget);
         for slot in 0..200u64 {
-            c.insert(slot, records(4, 1024));
+            c.insert(slot, records(4, 1024), [0; 32]);
             assert!(
                 c.bytes <= budget,
                 "slot {slot}: {} bytes resident, budget {budget}",
@@ -733,7 +763,7 @@ mod batch_cache_tests {
     fn the_entry_cap_bounds_batches_that_weigh_nothing() {
         let mut c = BatchCache::new(8, 1024 * 1024);
         for slot in 0..100u64 {
-            c.insert(slot, Vec::new());
+            c.insert(slot, Vec::new(), [0; 32]);
         }
         assert_eq!(c.entries.len(), 8);
     }
@@ -743,9 +773,9 @@ mod batch_cache_tests {
     #[test]
     fn an_oversized_batch_is_not_admitted() {
         let mut c = BatchCache::new(16, 8 * 1024);
-        c.insert(1, records(1, 512));
+        c.insert(1, records(1, 512), [0; 32]);
         let resident_before = c.entries.len();
-        c.insert(2, records(1, 64 * 1024));
+        c.insert(2, records(1, 64 * 1024), [0; 32]);
         assert_eq!(c.entries.len(), resident_before, "the small entry survived");
         assert!(c.get(2).is_none(), "the oversized batch was not cached");
         assert!(c.get(1).is_some());
@@ -760,14 +790,14 @@ mod batch_cache_tests {
         let one = log::batch_footprint(&records(1, 1000));
         let mut c = BatchCache::new(16, one * 3 + one / 2);
 
-        c.insert(1, records(1, 1000));
-        c.insert(2, records(1, 1000));
-        c.insert(3, records(1, 1000));
+        c.insert(1, records(1, 1000), [0; 32]);
+        c.insert(2, records(1, 1000), [0; 32]);
+        c.insert(3, records(1, 1000), [0; 32]);
         // Touch 1 and 3, leaving 2 as the least recently used.
         assert!(c.get(1).is_some());
         assert!(c.get(3).is_some());
 
-        c.insert(4, records(1, 1000));
+        c.insert(4, records(1, 1000), [0; 32]);
         assert!(c.get(2).is_none(), "the least recently used should go");
         assert!(c.get(1).is_some());
         assert!(c.get(3).is_some());
@@ -780,9 +810,9 @@ mod batch_cache_tests {
     #[test]
     fn re_inserting_a_resident_slot_does_not_double_count() {
         let mut c = BatchCache::new(16, 1024 * 1024);
-        c.insert(7, records(2, 500));
+        c.insert(7, records(2, 500), [0; 32]);
         let after_first = c.bytes;
-        c.insert(7, records(2, 500));
+        c.insert(7, records(2, 500), [0; 32]);
         assert_eq!(c.bytes, after_first);
         assert_eq!(c.entries.len(), 1);
     }
