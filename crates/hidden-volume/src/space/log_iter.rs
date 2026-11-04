@@ -134,6 +134,58 @@ impl BatchCache {
 }
 
 impl<'f> Space<'f> {
+    /// Read at most eight exact-ID groups and 64 records in total. Each group
+    /// is concatenated in requested order under its own byte ceiling. None
+    /// means a missing or over-budget record; no subsequent record is read.
+    /// Errors retain the scalar read contract. Partial output is scrubbed.
+    pub fn read_log_groups(
+        &mut self,
+        namespace: Namespace,
+        groups: &[log::LogReadGroup<'_>],
+    ) -> Result<Option<Vec<Vec<u8>>>> {
+        if groups.len() > log::MAX_LOG_READ_GROUPS {
+            return Err(Error::Malformed("too many log read groups"));
+        }
+        let mut remaining = log::MAX_LOG_READ_RECORDS;
+        for group in groups {
+            remaining = remaining
+                .checked_sub(group.log_ids.len())
+                .ok_or(Error::Malformed("too many requested log records"))?;
+        }
+        if groups.iter().any(|group| !group.log_ids.is_empty())
+            && self.find_log_root_slot(namespace)?.is_none()
+        {
+            return Ok(None);
+        }
+        let mut cache = BatchCache::new(log::MAX_CACHED_BATCHES, log::MAX_CACHED_BATCH_BYTES);
+        let mut out = Vec::with_capacity(groups.len());
+        for group in groups {
+            // Reserve a bounded ceiling once: growing a Vec could free an old
+            // plaintext allocation before Zeroizing sees it. The total request
+            // cap bounds all output capacities to 64 * MAX_LOG_PAYLOAD_LEN.
+            let capacity = group
+                .max_bytes
+                .min(group.log_ids.len() * log::MAX_LOG_PAYLOAD_LEN);
+            let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(capacity));
+            for &id in group.log_ids {
+                let Some(value) = self.get(namespace, &log::log_id_key(id))? else {
+                    return Ok(None);
+                };
+                let record = self.log_payload_from_reference(id, &value, &mut cache)?;
+                if record.len() > group.max_bytes.saturating_sub(bytes.len()) {
+                    return Ok(None);
+                }
+                bytes.extend_from_slice(&record);
+            }
+            out.push(bytes);
+        }
+        Ok(Some(
+            out.into_iter()
+                .map(|mut bytes| std::mem::take(&mut *bytes))
+                .collect(),
+        ))
+    }
+
     /// Enumerate all log entries in `namespace`, in ascending log_id
     /// order. Each entry's containing DataBatch chunk is read at most
     /// once (cached during iteration).
@@ -315,42 +367,7 @@ impl<'f> Space<'f> {
             let mut id_buf = [0u8; 8];
             id_buf.copy_from_slice(&key);
             let log_id = u64::from_be_bytes(id_buf);
-            let batch_slot = log::parse_batch_slot_value(&value)?;
-
-            // The outer Option is "was the batch
-            // resident", the inner is "did it hold this id". Collapsing
-            // them would send a cached-but-id-absent entry down the
-            // decode path instead of straight to the error.
-            let hit = if let Some((batch, hash)) = batch_cache.get(batch_slot) {
-                // A cached payload does not authorize a different reference's
-                // commitment, including after a legacy unhashed reference.
-                verify_batch_reference(&value, &hash)?;
-                Some(log::find_in_batch(batch, log_id).cloned())
-            } else {
-                None
-            };
-            let payload = match hit {
-                Some(found) => found,
-                None => {
-                    let pt = self.read_owned_chunk(batch_slot)?;
-                    if pt.kind != ChunkKind::DataBatch {
-                        // Pointed slot exists but isn't DataBatch —
-                        // namespace is not a log.
-                        return Err(Error::WrongNamespaceKind(
-                            "log pointer not a DataBatch chunk (namespace is not a log)",
-                        ));
-                    }
-                    // Retain the actual digest for subsequent references even
-                    // when this first reference uses the unhashed v1 layout.
-                    let hash = *blake3::hash(&pt.payload).as_bytes();
-                    verify_batch_reference(&value, &hash)?;
-                    let records = log::decode_batch(&pt.payload)?;
-                    let found = log::find_in_batch(&records, log_id).cloned();
-                    batch_cache.insert(batch_slot, records, hash);
-                    found
-                },
-            };
-            let payload = payload.ok_or(Error::Malformed("log_id not found in pointed batch"))?;
+            let payload = self.log_payload_from_reference(log_id, &value, &mut batch_cache)?;
             out.push((log_id, payload));
         }
         // Handed over only here. Until this point `out` is a vector of
@@ -362,6 +379,51 @@ impl<'f> Space<'f> {
             .into_iter()
             .map(|(id, mut payload)| (id, std::mem::take(&mut *payload)))
             .collect())
+    }
+
+    fn log_payload_from_reference(
+        &mut self,
+        log_id: u64,
+        value: &[u8],
+        batch_cache: &mut BatchCache,
+    ) -> Result<log::LogPayload> {
+        let batch_slot = log::parse_batch_slot_value(value)?;
+
+        // The outer Option is "was the batch
+        // resident", the inner is "did it hold this id". Collapsing
+        // them would send a cached-but-id-absent entry down the
+        // decode path instead of straight to the error.
+        let hit = if let Some((batch, hash)) = batch_cache.get(batch_slot) {
+            // A cached payload does not authorize a different reference's
+            // commitment, including after a legacy unhashed reference.
+            verify_batch_reference(value, &hash)?;
+            Some(log::find_in_batch(batch, log_id).cloned())
+        } else {
+            None
+        };
+        let payload = match hit {
+            Some(found) => found,
+            None => {
+                let pt = self.read_owned_chunk(batch_slot)?;
+                if pt.kind != ChunkKind::DataBatch {
+                    // Pointed slot exists but isn't DataBatch —
+                    // namespace is not a log.
+                    return Err(Error::WrongNamespaceKind(
+                        "log pointer not a DataBatch chunk (namespace is not a log)",
+                    ));
+                }
+                // Retain the actual digest for subsequent references even
+                // when this first reference uses the unhashed v1 layout.
+                let hash = *blake3::hash(&pt.payload).as_bytes();
+                verify_batch_reference(value, &hash)?;
+                let records = log::decode_batch(&pt.payload)?;
+                let found = log::find_in_batch(&records, log_id).cloned();
+                batch_cache.insert(batch_slot, records, hash);
+                found
+            },
+        };
+        let payload = payload.ok_or(Error::Malformed("log_id not found in pointed batch"))?;
+        Ok(payload)
     }
 
     /// Resolve the root slot for a log namespace, enforcing that the
@@ -815,5 +877,172 @@ mod batch_cache_tests {
         c.insert(7, records(2, 500), [0; 32]);
         assert_eq!(c.bytes, after_first);
         assert_eq!(c.entries.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod exact_group_read_tests {
+    use super::super::CHUNK_READS;
+    use super::*;
+    use crate::{Container, crypto::kdf::Argon2Params};
+
+    fn counted<T>(body: impl FnOnce() -> T) -> (u64, T) {
+        CHUNK_READS.with(|count| count.set(0));
+        let result = body();
+        (CHUNK_READS.with(|count| count.get()), result)
+    }
+
+    #[test]
+    fn exact_groups_share_actual_batch_chunk_reads() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut container =
+            Container::create(directory.path().join("cost.hv"), Argon2Params::MIN).unwrap();
+        let mut space = container.create_space(b"pw").unwrap();
+        let ns = Namespace::MESSAGE_LOG;
+        let mut tx = space.begin_tx();
+        for id in 0..32 {
+            tx.append_log(ns, id, &[id as u8; 128]).unwrap();
+        }
+        tx.commit().unwrap();
+        let ids: Vec<_> = (0..32).collect();
+        // Warm the index before either counter; a one-read cache warmup is not batch reuse.
+        space.read_log(ns, 0).unwrap().unwrap();
+        let (scalar_reads, expected) = counted(|| {
+            ids.iter()
+                .flat_map(|&id| space.read_log(ns, id).unwrap().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let groups = [
+            log::LogReadGroup {
+                log_ids: &ids[..16],
+                max_bytes: 2048,
+            },
+            log::LogReadGroup {
+                log_ids: &ids[16..],
+                max_bytes: 2048,
+            },
+        ];
+        let (group_reads, actual) =
+            counted(|| space.read_log_groups(ns, &groups).unwrap().unwrap());
+        assert_eq!(actual.concat(), expected);
+        assert!(
+            scalar_reads.saturating_sub(group_reads) >= 31,
+            "grouped {group_reads}, scalar {scalar_reads}: the 32-record shared batch must save at least 31 chunk reads"
+        );
+    }
+
+    #[test]
+    fn exact_groups_keep_order_duplicates_bounds_and_freshness() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut container =
+            Container::create(directory.path().join("groups.hv"), Argon2Params::MIN).unwrap();
+        let mut space = container.create_space(b"pw").unwrap();
+        let ns = Namespace::MESSAGE_LOG;
+        let mut tx = space.begin_tx();
+        tx.append_log(ns, 1, b"a").unwrap();
+        tx.append_log(ns, 2, b"bc").unwrap();
+        tx.commit().unwrap();
+        let groups = [
+            log::LogReadGroup {
+                log_ids: &[2, 1, 2],
+                max_bytes: 5,
+            },
+            log::LogReadGroup {
+                log_ids: &[],
+                max_bytes: 0,
+            },
+        ];
+        assert_eq!(
+            space.read_log_groups(ns, &groups).unwrap(),
+            Some(vec![b"bcabc".to_vec(), vec![]])
+        );
+        assert!(
+            space
+                .read_log_groups(
+                    ns,
+                    &[log::LogReadGroup {
+                        log_ids: &[2, 1],
+                        max_bytes: 2
+                    }]
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            space
+                .read_log_groups(
+                    ns,
+                    &[log::LogReadGroup {
+                        log_ids: &[2, 99],
+                        max_bytes: 5
+                    }]
+                )
+                .unwrap()
+                .is_none()
+        );
+        let mut tx = space.begin_tx();
+        tx.delete_log(ns, 2).unwrap();
+        tx.commit().unwrap();
+        assert!(space.read_log_groups(ns, &groups).unwrap().is_none());
+        let mut tx = space.begin_tx();
+        tx.append_log(ns, 2, b"de").unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            space.read_log_groups(ns, &groups).unwrap().unwrap()[0],
+            b"deade"
+        );
+        let (reads, result) = counted(|| {
+            space.read_log_groups(
+                ns,
+                &vec![
+                    log::LogReadGroup {
+                        log_ids: &[],
+                        max_bytes: 0
+                    };
+                    9
+                ],
+            )
+        });
+        assert!(result.is_err());
+        assert_eq!(reads, 0);
+        // A valid huge caller ceiling must not become an allocation size.
+        let bounded = space
+            .read_log_groups(
+                ns,
+                &[log::LogReadGroup {
+                    log_ids: &[1; 64],
+                    max_bytes: usize::MAX,
+                }],
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(bounded[0], b"a".repeat(64));
+        let kv = Namespace(44);
+        let mut tx = space.begin_tx();
+        tx.put(kv, b"key", b"value").unwrap();
+        tx.commit().unwrap();
+        assert!(matches!(
+            space.read_log_groups(
+                kv,
+                &[log::LogReadGroup {
+                    log_ids: &[1],
+                    max_bytes: 8
+                }]
+            ),
+            Err(Error::WrongNamespaceKind(_))
+        ));
+        assert_eq!(space.read_log_groups(kv, &[]).unwrap(), Some(vec![]));
+        let ids = [1; 65];
+        let (reads, result) = counted(|| {
+            space.read_log_groups(
+                ns,
+                &[log::LogReadGroup {
+                    log_ids: &ids,
+                    max_bytes: usize::MAX,
+                }],
+            )
+        });
+        assert!(result.is_err());
+        assert_eq!(reads, 0);
     }
 }

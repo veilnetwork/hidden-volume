@@ -53,6 +53,7 @@ export 'src/bindings.dart'
         HvHeaderInfo,
         HvIntegrityResult,
         HvLogEntry,
+        HvLogReadGroup,
         HvNamespaceCount,
         HvPasswordRotation,
         HvStatsInfo,
@@ -281,6 +282,14 @@ class HvSpace {
   Uint8List? readLog(int namespace, int logId) =>
       _inner.readLog(namespace, logId);
 
+  /// Ordered exact-ID groups under byte caps (8 groups / 64 records total).
+  /// Requires a matching native library; null refuses a missing/oversized row.
+  List<Uint8List>? readLogGroups(
+    int namespace,
+    List<ffi.HvLogReadGroup> groups,
+  ) =>
+      _inner.readLogGroups(namespace, groups);
+
   /// All namespace tags currently in use. One `u8` per namespace.
   Uint8List listNamespaces() => _inner.listNamespaces();
 
@@ -465,6 +474,14 @@ class HvMultiSpace {
   /// Read one log entry from space [id] by [logId], or null if absent.
   Uint8List? readLog(int id, int namespace, int logId) =>
       _inner.readLog(id, namespace, logId);
+
+  /// Ordered exact-ID groups within one hosted space (8 groups / 64 records).
+  List<Uint8List>? readLogGroups(
+    int id,
+    int namespace,
+    List<ffi.HvLogReadGroup> groups,
+  ) =>
+      _inner.readLogGroups(id, namespace, groups);
 
   /// Half-open range query over a log namespace of space [id].
   List<ffi.HvLogEntry> iterLogRange({

@@ -139,6 +139,13 @@ class _EraseNamespaceRequest extends _Request {
   final int namespace;
 }
 
+class _ReadLogGroupsRequest extends _Request {
+  const _ReadLogGroupsRequest(this.namespace, this.groups, SendPort reply)
+      : super(reply);
+  final int namespace;
+  final List<HvLogReadGroup> groups;
+}
+
 class _ReadLogRequest extends _Request {
   const _ReadLogRequest({
     required this.namespace,
@@ -639,6 +646,8 @@ void _dispatch(SpaceHandleBindings space, _Request msg, ReceivePort rx) {
       run(() => space.count(namespace));
     case _EraseNamespaceRequest(:final namespace):
       run(() => space.eraseNamespace(namespace));
+    case _ReadLogGroupsRequest(:final namespace, :final groups):
+      run(() => space.readLogGroups(namespace, groups));
     case _ReadLogRequest(:final namespace, :final logId):
       run(() => space.readLog(namespace, logId));
     case _ListNamespacesRequest():
@@ -1186,6 +1195,17 @@ class HvAsyncSpace {
     requireU64(logId, 'logId');
     return _call<Uint8List?>((reply) =>
         _ReadLogRequest(namespace: namespace, logId: logId, reply: reply));
+  }
+
+  /// Exact-ID groups under independent byte ceilings, snapshotted before dispatch.
+  Future<List<Uint8List>?> readLogGroups(
+    int namespace,
+    List<HvLogReadGroup> groups,
+  ) {
+    final request = snapshotLogReadGroups(groups);
+    return _call<List<Uint8List>?>(
+      (reply) => _ReadLogGroupsRequest(namespace, request, reply),
+    );
   }
 
   /// All namespace tags currently in use.

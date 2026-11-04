@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Bounded exact-ID log groups in the sync core, sync/async FFI handles,
+  explicit multi-space handle, and Dart sync/async facades: at most 8 groups / 64 requested records, independent byte
+  ceilings, early refusal on a missing/oversized record, and one per-call
+  decoded-batch cache. Every reference still verifies its content commitment;
+  no data persists between calls. Matching native/Dart bindings are required.
+  The on-disk format and existing methods are unchanged.
+
+
 ### Fixed
 
 - Verify each v2 log index commitment during exact reads, cached batch reads,
