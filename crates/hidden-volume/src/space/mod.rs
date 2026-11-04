@@ -11,6 +11,7 @@ pub(crate) mod checkpoint;
 mod commit;
 mod integrity;
 mod log_iter;
+mod point_read;
 pub(crate) mod pool;
 #[cfg(test)]
 mod reuse_tests;
@@ -1050,33 +1051,7 @@ impl<'f> Space<'f> {
             Some(s) => s,
             None => return Ok(None),
         };
-        // Walk down to the leaf containing `key` under the same guard
-        // every other walker uses — a `get` is a one-path walk, but the
-        // path is still attacker-shaped: a cyclic Internal→Internal
-        // chain would otherwise loop forever. The guard is consulted on
-        // *entry* to each node — BEFORE matching Leaf vs Internal — so
-        // a forged tree presenting a `Leaf` below the depth bound is
-        // rejected identically to `collect_leaves_at` /
-        // `count_leaves_at` (audit pass 20: the prior placement inside
-        // the `Internal` arm let `get` accept a Leaf one level deeper
-        // than every other walker).
-        // `read_index_node_at_expected` additionally gates
-        // `IndexNode.namespace == namespace` (audit pass 19 round 6
-        // root-relabel closure).
-        let mut walk = self.new_tree_walk();
-        let mut depth: u8 = 0;
-        let mut slot = root_slot;
-        loop {
-            walk.admit(slot, depth)?;
-            match self.read_index_node_at_expected(slot, namespace)? {
-                IndexNode::Leaf(l) => return Ok(l.get(key).map(|v| v.to_vec())),
-                IndexNode::Internal(i) => {
-                    let idx = i.child_index_for(key);
-                    slot = i.children[idx].child_slot;
-                    depth += 1;
-                },
-            }
-        }
+        self.get_from_root(namespace, key, root_slot, None)
     }
 
     /// List all `(key, value)` pairs in `namespace`, sorted by key.
@@ -1720,15 +1695,7 @@ impl<'f> Space<'f> {
         expected: Namespace,
     ) -> Result<IndexNode> {
         let node = self.read_index_node_at(slot)?;
-        let node_ns = match &node {
-            IndexNode::Leaf(l) => l.namespace,
-            IndexNode::Internal(i) => i.namespace,
-        };
-        if node_ns != expected {
-            return Err(Error::Malformed(
-                "IndexNode.namespace != expected (relabel attempt or writer bug)",
-            ));
-        }
+        node.check_namespace(expected)?;
         Ok(node)
     }
 

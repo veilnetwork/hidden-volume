@@ -9,6 +9,7 @@ use crate::{Error, Result};
 use super::Space;
 use super::index::{IndexNode, Namespace};
 use super::log;
+use super::point_read::PointIndexCache;
 use super::walk::TreeWalk;
 
 /// One decoded log record: `(log_id, payload)`.
@@ -152,11 +153,16 @@ impl<'f> Space<'f> {
                 .checked_sub(group.log_ids.len())
                 .ok_or(Error::Malformed("too many requested log records"))?;
         }
-        if groups.iter().any(|group| !group.log_ids.is_empty())
-            && self.find_log_root_slot(namespace)?.is_none()
-        {
+        let has_records = groups.iter().any(|group| !group.log_ids.is_empty());
+        let root = if has_records {
+            self.find_log_root_slot(namespace)?
+        } else {
+            None
+        };
+        if has_records && root.is_none() {
             return Ok(None);
         }
+        let mut index_cache = PointIndexCache::new();
         let mut cache = BatchCache::new(log::MAX_CACHED_BATCHES, log::MAX_CACHED_BATCH_BYTES);
         let mut out = Vec::with_capacity(groups.len());
         for group in groups {
@@ -168,7 +174,16 @@ impl<'f> Space<'f> {
                 .min(group.log_ids.len() * log::MAX_LOG_PAYLOAD_LEN);
             let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(capacity));
             for &id in group.log_ids {
-                let Some(value) = self.get(namespace, &log::log_id_key(id))? else {
+                let Some(root_slot) = root else {
+                    return Ok(None);
+                };
+                let Some(value) = self.get_from_root(
+                    namespace,
+                    &log::log_id_key(id),
+                    root_slot,
+                    Some(&mut index_cache),
+                )?
+                else {
                     return Ok(None);
                 };
                 let record = self.log_payload_from_reference(id, &value, &mut cache)?;
@@ -928,6 +943,47 @@ mod exact_group_read_tests {
         assert!(
             scalar_reads.saturating_sub(group_reads) >= 31,
             "grouped {group_reads}, scalar {scalar_reads}: the 32-record shared batch must save at least 31 chunk reads"
+        );
+    }
+
+    #[test]
+    fn exact_group_reads_share_index_nodes() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut container =
+            Container::create(directory.path().join("index-cost.hv"), Argon2Params::MIN).unwrap();
+        let mut space = container.create_space(b"pw").unwrap();
+        let ns = Namespace::MESSAGE_LOG;
+        let mut tx = space.begin_tx();
+        for id in 0..32 {
+            tx.append_log(ns, id, &[id as u8; 128]).unwrap();
+        }
+        tx.commit().unwrap();
+        // One leaf and one compressed DataBatch, with the commit-root cache warm.
+        let root = space.find_root_slot(ns).unwrap().unwrap();
+        assert!(matches!(
+            space.read_index_node_at_expected(root, ns).unwrap(),
+            IndexNode::Leaf(_)
+        ));
+        space.read_log(ns, 0).unwrap().unwrap();
+        let ids: Vec<_> = (0..32).collect();
+        let groups = [
+            log::LogReadGroup {
+                log_ids: &ids[..16],
+                max_bytes: 2048,
+            },
+            log::LogReadGroup {
+                log_ids: &ids[16..],
+                max_bytes: 2048,
+            },
+        ];
+        let (reads, actual) = counted(|| space.read_log_groups(ns, &groups).unwrap().unwrap());
+        assert_eq!(
+            actual.concat(),
+            (0..32).flat_map(|id| [id as u8; 128]).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            reads, 2,
+            "one fresh leaf and one batch must serve all exact IDs; got {reads} chunk reads"
         );
     }
 

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Performance
+
+- Reuse decoded index pages within one bounded exact-ID log-group read (64
+  nodes / 1 MiB accounted node memory). Every key keeps its own traversal
+  guards; namespace and log-reference digest checks still apply on cache hits.
+  The cache never survives the call. A 32-record shared-leaf/batch fixture
+  drops from 33 chunk reads to two; application latency requires separate
+  qualification. No file format, public API, or network changes.
+
 ### Added
 
 - Bounded exact-ID log groups in the sync core, sync/async FFI handles,
