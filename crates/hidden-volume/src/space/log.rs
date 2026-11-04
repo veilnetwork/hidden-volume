@@ -53,6 +53,22 @@ use zeroize::Zeroizing;
 use crate::chunk::format::PAYLOAD_CAP;
 use crate::{Error, Result};
 
+/// Maximum exact-read groups in one call; independent byte ceilings apply.
+pub const MAX_LOG_READ_GROUPS: usize = 8;
+/// Maximum requested records in all exact-read groups together.
+pub const MAX_LOG_READ_RECORDS: usize = 64;
+
+/// One ordered exact-ID read. Duplicate ids are preserved, payloads are
+/// concatenated, and a missing/over-budget record refuses the whole call
+/// before any later requested record is read.
+#[derive(Clone, Copy, Debug)]
+pub struct LogReadGroup<'a> {
+    /// Exact ids in caller order; no ranges or implicit namespace scan.
+    pub log_ids: &'a [u64],
+    /// Maximum total payload bytes returned for this group.
+    pub max_bytes: usize,
+}
+
 /// Maximum log records per batch (sanity bound; usually limited earlier
 /// by the compressed payload exceeding `PAYLOAD_CAP`).
 pub const MAX_RECORDS_PER_BATCH: usize = 1024;

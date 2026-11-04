@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-09-17T09:18:44Z
+# Captured: 2026-11-04T00:38:39Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -273,6 +273,9 @@ space/index.rs:   pub fn encode(&self) -> Result<Vec<u8>> {
 space/index.rs:   pub fn decode(bytes: &[u8]) -> Result<Self> {
 space/index.rs:   pub fn child_index_for(&self, key: &[u8]) -> usize {
 space/integrity.rs:   pub fn verify_integrity(&mut self) -> Result<IntegrityReport> {
+space/log.rs: pub const MAX_LOG_READ_GROUPS: usize = 8;
+space/log.rs: pub const MAX_LOG_READ_RECORDS: usize = 64;
+space/log.rs: pub struct LogReadGroup<'a> {
 space/log.rs: pub const MAX_RECORDS_PER_BATCH: usize = 1024;
 space/log.rs: pub const MAX_LOG_PAYLOAD_LEN: usize = 8 * 1024;
 space/log.rs: pub const MAX_DECODED_BATCH_LEN: usize = 4 + MAX_RECORDS_PER_BATCH * (12 + MAX_LOG_PAYLOAD_LEN);
@@ -295,6 +298,7 @@ space/log.rs: pub const BATCH_SLOT_VALUE_V1_LEN: usize = 8;
 space/log.rs: pub const BATCH_SLOT_VALUE_LEN: usize = 40;
 space/log.rs: pub fn encode_batch_slot_value_v2(
 space/log.rs: pub fn encode_batch_slot_value(batch_slot: u64) -> [u8; 8] {
+space/log_iter.rs:   pub fn read_log_groups(
 space/log_iter.rs:   pub fn iter_log(&mut self, namespace: Namespace) -> Result<Vec<(u64, Vec<u8>)>> {
 space/log_iter.rs:   pub fn iter_log_after(
 space/log_iter.rs:   pub fn iter_log_before(
@@ -489,6 +493,7 @@ lib.rs:     variant Delete {
 lib.rs:     variant AppendLog {
 lib.rs:     variant DeleteLog {
 lib.rs: pub struct LogEntry {
+lib.rs: pub struct LogReadGroup {
 lib.rs: pub enum HardeningStepKind {
 lib.rs:     variant Padding,
 lib.rs:     variant Churn,
@@ -523,6 +528,7 @@ lib.rs:   pub fn kv_keys(&self, namespace: u8) -> HvResult<Vec<u8>> {
 lib.rs:   pub fn kv_keys_page(
 lib.rs:   pub fn get(&self, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
 lib.rs:   pub fn read_log(&self, namespace: u8, log_id: u64) -> HvResult<Option<Vec<u8>>> {
+lib.rs:   pub fn read_log_groups(
 lib.rs:   pub fn iter_log_range(
 lib.rs:   pub fn commit(&self, ops: Vec<WriteOp>) -> HvResult<u64> {
 lib.rs:   pub fn stats(&self) -> HvResult<StatsInfo> {
@@ -547,6 +553,7 @@ lib.rs:   pub async fn kv_keys(&self, namespace: u8) -> HvResult<Vec<u8>> {
 lib.rs:   pub async fn kv_keys_page(
 lib.rs:   pub async fn get(&self, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
 lib.rs:   pub async fn read_log(&self, namespace: u8, log_id: u64) -> HvResult<Option<Vec<u8>>> {
+lib.rs:   pub async fn read_log_groups(
 lib.rs:   pub async fn iter_log_range(
 lib.rs:   pub async fn commit(&self, ops: Vec<WriteOp>) -> HvResult<u64> {
 lib.rs:   pub async fn stats(&self) -> HvResult<StatsInfo> {
@@ -570,6 +577,7 @@ lib.rs:   pub fn space_keys(&self, id: u32) -> HvResult<Vec<u8>> {
 lib.rs:   pub fn commit(&self, id: u32, ops: Vec<WriteOp>) -> HvResult<u64> {
 lib.rs:   pub fn get(&self, id: u32, namespace: u8, key: Vec<u8>) -> HvResult<Option<Vec<u8>>> {
 lib.rs:   pub fn read_log(&self, id: u32, namespace: u8, log_id: u64) -> HvResult<Option<Vec<u8>>> {
+lib.rs:   pub fn read_log_groups(
 lib.rs:   pub fn iter_log_range(
 lib.rs:   pub fn count(&self, id: u32, namespace: u8) -> HvResult<u64> {
 lib.rs:   pub fn kv_keys(&self, id: u32, namespace: u8) -> HvResult<Vec<u8>> {
@@ -591,6 +599,7 @@ hidden_volume.dart:   List<Uint8List> kvKeys(int namespace) => _inner.kvKeys(nam
 hidden_volume.dart:   List<Uint8List> kvKeysPage(int namespace, Uint8List? after, int limit) =>
 hidden_volume.dart:   int eraseNamespace(int namespace) => _inner.eraseNamespace(namespace);
 hidden_volume.dart:   Uint8List? readLog(int namespace, int logId) =>
+hidden_volume.dart:   List<Uint8List>? readLogGroups(
 hidden_volume.dart:   Uint8List listNamespaces() => _inner.listNamespaces();
 hidden_volume.dart:   void setPaddingPolicy(ffi.PaddingPreset preset) =>
 hidden_volume.dart:   void acknowledgeHardeningError() => _inner.acknowledgeHardeningError();
@@ -612,6 +621,7 @@ hidden_volume.dart:   Uint8List spaceKeys(int id) => _inner.spaceKeys(id);
 hidden_volume.dart:   int commit(int id, List<ffi.HvWriteOp> ops) => _inner.commit(id, ops);
 hidden_volume.dart:   Uint8List? get(int id, int namespace, Uint8List key) =>
 hidden_volume.dart:   Uint8List? readLog(int id, int namespace, int logId) =>
+hidden_volume.dart:   List<Uint8List>? readLogGroups(
 hidden_volume.dart:   int count(int id, int namespace) => _inner.count(id, namespace);
 hidden_volume.dart:   List<Uint8List> kvKeys(int id, int namespace) => _inner.kvKeys(id, namespace);
 hidden_volume.dart:   List<Uint8List> kvKeysPage(
@@ -675,6 +685,7 @@ src/async_bindings.dart:   Future<int> eraseNamespace(int namespace) async =>
 src/async_bindings.dart:   eraseNamespaceOperation(namespace).result;
 src/async_bindings.dart:   HvOperation<int> eraseNamespaceOperation(int namespace) => _submit<int>(
 src/async_bindings.dart:   Future<Uint8List?> readLog(int namespace, int logId) {
+src/async_bindings.dart:   Future<List<Uint8List>?> readLogGroups(
 src/async_bindings.dart:   Future<Uint8List> listNamespaces() =>
 src/async_bindings.dart:   Future<void> setPaddingPolicy(PaddingPreset preset) async =>
 src/async_bindings.dart:   setPaddingPolicyOperation(preset).result;
@@ -769,6 +780,15 @@ src/bindings.dart:   final int argonTCost;
 src/bindings.dart:   final int argonPCost;
 src/bindings.dart:   final int fileSizeBytes;
 src/bindings.dart:   String toString() => 'HvHeaderInfo(salt=${saltHex.substring(0, 16)}…, '
+src/bindings.dart: class HvLogReadGroup {
+src/bindings.dart:   final List<int> logIds;
+src/bindings.dart:   final int maxBytes;
+src/bindings.dart: List<HvLogReadGroup> snapshotLogReadGroups(List<HvLogReadGroup> groups) {
+src/bindings.dart:   var remaining = 64;
+src/bindings.dart:   final snapshot = <HvLogReadGroup>[];
+src/bindings.dart:   final tag = reader.readU8();
+src/bindings.dart:   final count = reader.readI32();
+src/bindings.dart:   final result = <Uint8List>[];
 src/bindings.dart: class HvLogEntry {
 src/bindings.dart:   final int logId;
 src/bindings.dart:   final Uint8List payload;
@@ -849,6 +869,7 @@ src/bindings.dart:   List<Uint8List> kvKeys(int namespace) {
 src/bindings.dart:   List<Uint8List> kvKeysPage(int namespace, Uint8List? after, int limit) {
 src/bindings.dart:   int eraseNamespace(int namespace) {
 src/bindings.dart:   Uint8List? readLog(int namespace, int logId) {
+src/bindings.dart:   List<Uint8List>? readLogGroups(int namespace, List<HvLogReadGroup> groups) {
 src/bindings.dart:   Uint8List listNamespaces() {
 src/bindings.dart:   void setPaddingPolicy(PaddingPreset preset) {
 src/bindings.dart:   HvStatsInfo stats() {
@@ -870,6 +891,7 @@ src/bindings.dart:   Uint8List spaceKeys(int id) {
 src/bindings.dart:   int commit(int id, List<HvWriteOp> ops) {
 src/bindings.dart:   Uint8List? get(int id, int namespace, Uint8List key) {
 src/bindings.dart:   Uint8List? readLog(int id, int namespace, int logId) {
+src/bindings.dart:   List<Uint8List>? readLogGroups(
 src/bindings.dart:   List<HvLogEntry> iterLogRange({
 src/bindings.dart:   int count(int id, int namespace) {
 src/bindings.dart:   List<Uint8List> kvKeys(int id, int namespace) {

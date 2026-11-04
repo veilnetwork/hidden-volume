@@ -1193,13 +1193,18 @@ mod tests {
         Exact,
         CachedV2,
         CachedLegacy,
+        ExactGroupsV2,
+        ExactGroupsLegacy,
         IntegrityConflict,
         IntegrityMismatch,
     }
 
     fn assert_log_hash_mismatch_refused(probe: LogHashProbe) {
         let exact = matches!(probe, LogHashProbe::Exact);
-        let first_v2 = !matches!(probe, LogHashProbe::CachedLegacy);
+        let first_v2 = !matches!(
+            probe,
+            LogHashProbe::CachedLegacy | LogHashProbe::ExactGroupsLegacy
+        );
         let integrity = matches!(
             probe,
             LogHashProbe::IntegrityConflict | LogHashProbe::IntegrityMismatch
@@ -1263,6 +1268,39 @@ mod tests {
             space
                 .read_log(ns, 8)
                 .map(|value| value.into_iter().collect::<Vec<_>>())
+        } else if matches!(
+            probe,
+            LogHashProbe::ExactGroupsV2 | LogHashProbe::ExactGroupsLegacy
+        ) {
+            // A cached honest first group must not authorize the next reference.
+            let group = |ids| super::super::log::LogReadGroup {
+                log_ids: ids,
+                max_bytes: 10,
+            };
+            assert!(
+                space
+                    .read_log_groups(ns, &[group(&[99]), group(&[8])])
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                space
+                    .read_log_groups(
+                        ns,
+                        &[
+                            super::super::log::LogReadGroup {
+                                log_ids: &[7],
+                                max_bytes: 4
+                            },
+                            group(&[8])
+                        ]
+                    )
+                    .unwrap()
+                    .is_none()
+            );
+            space
+                .read_log_groups(ns, &[group(&[7]), group(&[8])])
+                .map(Option::unwrap)
         } else {
             space
                 .iter_log_after(ns, None, 10)
@@ -1319,6 +1357,16 @@ mod tests {
     #[test]
     fn log_hash_legacy_cache_entry_does_not_bypass_a_later_v2_hash() {
         assert_log_hash_mismatch_refused(LogHashProbe::CachedLegacy);
+    }
+
+    #[test]
+    fn log_hash_exact_groups_check_v2_hash_on_cache_hit() {
+        assert_log_hash_mismatch_refused(LogHashProbe::ExactGroupsV2);
+    }
+
+    #[test]
+    fn log_hash_exact_groups_check_v2_hash_after_legacy_reference() {
+        assert_log_hash_mismatch_refused(LogHashProbe::ExactGroupsLegacy);
     }
 
     #[test]

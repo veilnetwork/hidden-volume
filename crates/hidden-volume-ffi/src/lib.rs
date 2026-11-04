@@ -855,6 +855,46 @@ impl core::fmt::Debug for LogEntry {
     }
 }
 
+/// One bounded exact-ID log read. At most eight groups / 64 ids per call.
+#[derive(uniffi::Record, Clone)]
+pub struct LogReadGroup {
+    /// Requested record ids, including deliberate duplicates, in caller order.
+    pub log_ids: Vec<u64>,
+    /// Maximum concatenated payload bytes returned for this group.
+    pub max_bytes: u64,
+}
+
+impl core::fmt::Debug for LogReadGroup {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("LogReadGroup")
+            .field("records", &self.log_ids.len())
+            .field("max_bytes", &self.max_bytes)
+            .finish()
+    }
+}
+
+fn borrow_log_read_groups(
+    groups: &[LogReadGroup],
+) -> HvResult<Vec<hidden_volume::space::log::LogReadGroup<'_>>> {
+    if groups.len() > hidden_volume::space::log::MAX_LOG_READ_GROUPS
+        || groups
+            .iter()
+            .try_fold(0usize, |sum, group| sum.checked_add(group.log_ids.len()))
+            .is_none_or(|count| count > hidden_volume::space::log::MAX_LOG_READ_RECORDS)
+    {
+        return Err(
+            hidden_volume::Error::Malformed("bounded log read request exceeds limit").into(),
+        );
+    }
+    Ok(groups
+        .iter()
+        .map(|group| hidden_volume::space::log::LogReadGroup {
+            log_ids: &group.log_ids,
+            max_bytes: usize::try_from(group.max_bytes).unwrap_or(usize::MAX),
+        })
+        .collect())
+}
+
 // ---------- Stats record ----------
 
 /// Which post-commit hardening step failed. Mirrors
@@ -1552,6 +1592,20 @@ impl SpaceHandle {
         Ok(g.with_space_mut(|s| s.read_log(Namespace(namespace), log_id))?)
     }
 
+    /// Ordered exact-id reads under independent byte ceilings. Missing or
+    /// over-budget records return None before later records are read. Decoded
+    /// batches are shared only inside this call; no payload cache survives it.
+    pub fn read_log_groups(
+        &self,
+        namespace: u8,
+        groups: Vec<LogReadGroup>,
+    ) -> HvResult<Option<Vec<Vec<u8>>>> {
+        check_namespace(namespace)?;
+        let borrowed = borrow_log_read_groups(&groups)?;
+        let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
+        Ok(g.with_space_mut(|s| s.read_log_groups(Namespace(namespace), &borrowed))?)
+    }
+
     /// Half-open range query over a log namespace.
     /// `start` is inclusive (None = unbounded below), `end` is exclusive
     /// (None = unbounded above), result capped at `limit`.
@@ -2095,6 +2149,23 @@ impl AsyncSpaceHandle {
         .await
     }
 
+    /// Async counterpart of [`SpaceHandle::read_log_groups`], with the same
+    /// limits, exact-ID ordering and short-lived decoded-batch cache.
+    pub async fn read_log_groups(
+        &self,
+        namespace: u8,
+        groups: Vec<LogReadGroup>,
+    ) -> HvResult<Option<Vec<Vec<u8>>>> {
+        check_namespace(namespace)?;
+        // Refuse an oversized request before admitting a blocking operation.
+        borrow_log_read_groups(&groups)?;
+        self.run_op(move |s, _cancel| -> HvResult<Option<Vec<Vec<u8>>>> {
+            let borrowed = borrow_log_read_groups(&groups)?;
+            Ok(s.read_log_groups(Namespace(namespace), &borrowed)?)
+        })
+        .await
+    }
+
     /// Half-open range query over a log namespace.
     pub async fn iter_log_range(
         &self,
@@ -2483,6 +2554,22 @@ impl MultiSpaceHandle {
         check_namespace(namespace)?;
         let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
         Ok(g.with_space(id as usize, |s| s.read_log(Namespace(namespace), log_id))??)
+    }
+
+    /// Exact-ID groups within the selected hosted space. The cache cannot
+    /// cross space boundaries and lasts only for this one read call.
+    pub fn read_log_groups(
+        &self,
+        id: u32,
+        namespace: u8,
+        groups: Vec<LogReadGroup>,
+    ) -> HvResult<Option<Vec<Vec<u8>>>> {
+        check_namespace(namespace)?;
+        let borrowed = borrow_log_read_groups(&groups)?;
+        let mut g = self.inner.lock().map_err(|_| poisoned_mutex())?;
+        Ok(g.with_space(id as usize, |s| {
+            s.read_log_groups(Namespace(namespace), &borrowed)
+        })??)
     }
 
     /// Half-open `[start, end)` range query over a log namespace of space `id`,
@@ -3239,6 +3326,42 @@ mod tests {
             Some(&b"bob"[..])
         );
 
+        // Identical logical ids must stay in the explicitly selected space.
+        for (id, payload) in [(ida, b"alice".to_vec()), (idb, b"bob".to_vec())] {
+            ms.commit(
+                id,
+                vec![WriteOp::AppendLog {
+                    namespace: 3,
+                    log_id: 1,
+                    payload: payload.clone(),
+                }],
+            )
+            .unwrap();
+            assert_eq!(
+                ms.read_log_groups(
+                    id,
+                    3,
+                    vec![LogReadGroup {
+                        log_ids: vec![1, 1],
+                        max_bytes: 10
+                    }]
+                )
+                .unwrap(),
+                Some(vec![[payload.clone(), payload].concat()])
+            );
+        }
+        assert!(
+            ms.read_log_groups(
+                99,
+                3,
+                vec![LogReadGroup {
+                    log_ids: vec![1],
+                    max_bytes: 10
+                }]
+            )
+            .is_err()
+        );
+
         // Error paths.
         match ms.open_space(vec![7u8; SPACE_KEYS_LEN]) {
             Err(HvError::AuthFailed) => {},
@@ -3323,6 +3446,60 @@ mod tests {
         assert!(info.argon_m_cost_kib > 0);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn exact_log_groups_through_ffi() {
+        let directory = tempfile::tempdir().unwrap();
+        let h = SpaceHandle::create(
+            directory
+                .path()
+                .join("groups.hv")
+                .to_string_lossy()
+                .into_owned(),
+            b"pw".to_vec(),
+            ArgonPreset::Min,
+            0,
+            1,
+        )
+        .unwrap();
+        h.commit(vec![
+            WriteOp::AppendLog {
+                namespace: 3,
+                log_id: 9,
+                payload: b"nine".to_vec(),
+            },
+            WriteOp::AppendLog {
+                namespace: 3,
+                log_id: 10,
+                payload: b"ten".to_vec(),
+            },
+        ])
+        .unwrap();
+        let group = |ids, max_bytes| LogReadGroup {
+            log_ids: ids,
+            max_bytes,
+        };
+        assert_eq!(
+            h.read_log_groups(3, vec![group(vec![10, 9, 10], 10), group(vec![], 0)])
+                .unwrap(),
+            Some(vec![b"tennineten".to_vec(), vec![]])
+        );
+        assert!(
+            h.read_log_groups(3, vec![group(vec![9], 3), group(vec![10], 3)])
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            h.read_log_groups(3, vec![group(vec![99], 3)])
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            h.read_log_groups(3, vec![group(vec![9; 65], u64::MAX)])
+                .is_err()
+        );
+        assert!(!format!("{:?}", group(vec![123456789], 1)).contains("123456789"));
     }
 
     #[test]
@@ -3868,6 +4045,73 @@ mod tests {
         assert_eq!(ids, vec![5, 6, 7, 8, 9]);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exact_log_groups_async_through_ffi() {
+        let directory = tempfile::tempdir().unwrap();
+        let h = AsyncSpaceHandle::create(
+            directory
+                .path()
+                .join("async-groups.hv")
+                .to_string_lossy()
+                .into_owned(),
+            b"pw".to_vec(),
+            ArgonPreset::Min,
+            0,
+            1,
+        )
+        .await
+        .unwrap();
+        h.commit(vec![
+            WriteOp::AppendLog {
+                namespace: 3,
+                log_id: 1,
+                payload: b"a".to_vec(),
+            },
+            WriteOp::AppendLog {
+                namespace: 3,
+                log_id: 2,
+                payload: b"bc".to_vec(),
+            },
+        ])
+        .await
+        .unwrap();
+        assert_eq!(
+            h.read_log_groups(
+                3,
+                vec![LogReadGroup {
+                    log_ids: vec![2, 1, 2],
+                    max_bytes: 5
+                }]
+            )
+            .await
+            .unwrap(),
+            Some(vec![b"bcabc".to_vec()])
+        );
+        assert!(
+            h.read_log_groups(
+                3,
+                vec![LogReadGroup {
+                    log_ids: vec![1, 2],
+                    max_bytes: 1
+                }]
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            h.read_log_groups(
+                3,
+                vec![LogReadGroup {
+                    log_ids: vec![1; 65],
+                    max_bytes: u64::MAX
+                }]
+            )
+            .await
+            .is_err()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

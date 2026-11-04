@@ -302,40 +302,31 @@ const Map<String, int> _methodChecksums = <String, int>{
   'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_add_space': 26649,
   'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_create': 32815,
   'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_open': 49007,
-  'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_open_with_keys':
-      38449,
+  'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_open_with_keys': 38449,
   'uniffi_hidden_volume_ffi_checksum_func_change_passwords': 12821,
   'uniffi_hidden_volume_ffi_checksum_func_compact_known': 9495,
   'uniffi_hidden_volume_ffi_checksum_func_header_info': 40142,
-  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_acknowledge_hardening_error':
-      28324,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_acknowledge_hardening_error': 28324,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_commit': 27479,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_commit_seq': 20495,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_count': 7841,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_get': 65186,
-  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_iter_log_range':
-      14894,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_iter_log_range': 14894,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_kv_keys': 32138,
-  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_kv_keys_page':
-      65359,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_kv_keys_page': 65359,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_open_space': 38306,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_read_log': 27036,
-  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_set_padding_policy':
-      49029,
-  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_space_count':
-      64423,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_read_log_groups': 58414,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_set_padding_policy': 49029,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_space_count': 64423,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_space_keys': 15090,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_stats': 46401,
-  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_vacuum_data_batches':
-      40066,
-  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_vacuum_space':
-      35449,
-  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_acknowledge_hardening_error':
-      23895,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_vacuum_data_batches': 40066,
+  'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_vacuum_space': 35449,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_acknowledge_hardening_error': 23895,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_commit': 59696,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_commit_history': 53412,
-  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_commit_history_with_roots':
-      32008,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_commit_history_with_roots': 32008,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_commit_seq': 53179,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_count': 3982,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_erase_namespace': 7530,
@@ -345,16 +336,13 @@ const Map<String, int> _methodChecksums = <String, int>{
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_kv_keys_page': 45476,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_list_namespaces': 63954,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_read_log': 59826,
-  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_set_padding_policy':
-      6532,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_read_log_groups': 16948,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_set_padding_policy': 6532,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_space_keys': 38453,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_stats': 53120,
-  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_vacuum_after_open':
-      23213,
-  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_vacuum_data_batches':
-      56095,
-  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_verify_integrity':
-      55085,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_vacuum_after_open': 23213,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_vacuum_data_batches': 56095,
+  'uniffi_hidden_volume_ffi_checksum_method_spacehandle_verify_integrity': 55085,
 };
 // END GENERATED CHECKSUMS
 
@@ -949,6 +937,71 @@ HvHeaderInfo _readHeaderInfo(Uint8List bytes) {
     argonPCost: r.readU32(),
     fileSizeBytes: r.readU64(),
   );
+}
+
+/// One bounded exact-ID group. Payloads concatenate in caller order.
+class HvLogReadGroup {
+  const HvLogReadGroup({required this.logIds, required this.maxBytes});
+  final List<int> logIds;
+  final int maxBytes;
+}
+
+/// Own every nested request list before an asynchronous dispatch.
+@internal
+List<HvLogReadGroup> snapshotLogReadGroups(List<HvLogReadGroup> groups) {
+  if (groups.length > 8) throw ArgumentError('too many log read groups');
+  var remaining = 64;
+  final snapshot = <HvLogReadGroup>[];
+  for (final group in groups) {
+    if (group.logIds.length > remaining) {
+      throw ArgumentError('too many log records');
+    }
+    remaining -= group.logIds.length;
+    requireU64(group.maxBytes, 'maxBytes');
+    for (final id in group.logIds) {
+      requireU64(id, 'logId');
+    }
+    snapshot.add(
+      HvLogReadGroup(
+        logIds: List<int>.unmodifiable(group.logIds),
+        maxBytes: group.maxBytes,
+      ),
+    );
+  }
+  return snapshot;
+}
+
+RustBuffer _writeLogReadGroups(List<HvLogReadGroup> groups) {
+  final writer = _Writer()..writeI32(groups.length);
+  for (final group in groups) {
+    writer.writeI32(group.logIds.length);
+    for (final id in group.logIds) {
+      writer.writeU64(id);
+    }
+    writer.writeU64(group.maxBytes);
+  }
+  return _bufferFromBytes(writer.toBytes());
+}
+
+List<Uint8List>? _readLogReadGroups(
+  Uint8List bytes,
+  List<HvLogReadGroup> groups,
+) {
+  final reader = _Reader(bytes);
+  final tag = reader.readU8();
+  if (tag == 0) return null;
+  if (tag != 1) throw StateError('unexpected log group option');
+  final count = reader.readI32();
+  if (count != groups.length) throw StateError('unexpected log group count');
+  final result = <Uint8List>[];
+  for (var i = 0; i < count; i++) {
+    final bytes = reader.readByteVec();
+    if (bytes.length > groups[i].maxBytes) {
+      throw StateError('log group exceeds byte limit');
+    }
+    result.add(bytes);
+  }
+  return result;
 }
 
 /// One log entry returned by [SpaceHandleBindings.iterLogRange].
@@ -1587,6 +1640,16 @@ final _spReadLog = _dylib.lookupFunction<
         RustBuffer Function(int, int, int, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_spacehandle_read_log');
 
+final _spReadLogGroups = _dylib.lookupFunction<
+        RustBuffer Function(
+          ffi.Uint64,
+          ffi.Uint8,
+          RustBuffer,
+          ffi.Pointer<RustCallStatus>,
+        ),
+        RustBuffer Function(int, int, RustBuffer, ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_method_spacehandle_read_log_groups');
+
 final _spListNamespaces = _dylib.lookupFunction<
         RustBuffer Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
         RustBuffer Function(int, ffi.Pointer<RustCallStatus>)>(
@@ -1926,6 +1989,19 @@ class SpaceHandleBindings {
     return _readOptByteVec(_bufferToBytes(out));
   }
 
+  /// At most eight groups / 64 exact records, with independent byte caps.
+  /// Null at the first missing or over-budget record, before later reads.
+  List<Uint8List>? readLogGroups(int namespace, List<HvLogReadGroup> groups) {
+    _ensureOpen();
+    final ns = _ns(namespace), request = snapshotLogReadGroups(groups);
+    final args = _writeLogReadGroups(request);
+    final handle = _cloneHandle();
+    final out = rustCall<RustBuffer>(
+      (status) => _spReadLogGroups(handle, ns, args, status),
+    );
+    return _readLogReadGroups(_bufferToBytes(out), request);
+  }
+
   /// All namespace tags currently in use. Returned as raw bytes (one
   /// `u8` per namespace) — small footprint, no per-element framing.
   Uint8List listNamespaces() {
@@ -2123,6 +2199,22 @@ final _msGet = _dylib.lookupFunction<
             int, int, int, RustBuffer, ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_method_multispacehandle_get');
 
+final _msReadLogGroups = _dylib.lookupFunction<
+    RustBuffer Function(
+      ffi.Uint64,
+      ffi.Uint32,
+      ffi.Uint8,
+      RustBuffer,
+      ffi.Pointer<RustCallStatus>,
+    ),
+    RustBuffer Function(
+      int,
+      int,
+      int,
+      RustBuffer,
+      ffi.Pointer<RustCallStatus>,
+    )>('uniffi_hidden_volume_ffi_fn_method_multispacehandle_read_log_groups');
+
 final _msReadLog = _dylib.lookupFunction<
         RustBuffer Function(ffi.Uint64, ffi.Uint32, ffi.Uint8, ffi.Uint64,
             ffi.Pointer<RustCallStatus>),
@@ -2305,6 +2397,23 @@ class MultiSpaceHandleBindings {
     final h = _clone();
     final out = rustCall<RustBuffer>((s) => _msReadLog(h, sid, ns, lid, s));
     return _decodeOptionBytes(out);
+  }
+
+  /// Ordered exact-ID groups, bound to one explicit hosted space.
+  List<Uint8List>? readLogGroups(
+    int id,
+    int namespace,
+    List<HvLogReadGroup> groups,
+  ) {
+    _ensureOpen();
+    final sid = _sid(id),
+        ns = _ns(namespace),
+        request = snapshotLogReadGroups(groups);
+    final args = _writeLogReadGroups(request), handle = _clone();
+    final out = rustCall<RustBuffer>(
+      (status) => _msReadLogGroups(handle, sid, ns, args, status),
+    );
+    return _readLogReadGroups(_bufferToBytes(out), request);
   }
 
   /// Half-open range query over a log namespace of space [id].
