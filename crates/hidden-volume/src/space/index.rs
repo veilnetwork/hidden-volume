@@ -337,6 +337,19 @@ pub enum IndexNode {
 }
 
 impl IndexNode {
+    pub(super) fn check_namespace(&self, expected: Namespace) -> Result<()> {
+        let namespace = match self {
+            Self::Leaf(leaf) => leaf.namespace,
+            Self::Internal(internal) => internal.namespace,
+        };
+        if namespace != expected {
+            return Err(Error::Malformed(
+                "IndexNode.namespace != expected (relabel attempt or writer bug)",
+            ));
+        }
+        Ok(())
+    }
+
     /// Encode this node into the IndexNode-chunk plaintext payload
     /// (≤ [`crate::chunk::format::PAYLOAD_CAP`]).
     pub fn encode(&self) -> Result<Vec<u8>> {

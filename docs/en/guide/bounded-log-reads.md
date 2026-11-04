@@ -31,3 +31,12 @@ Output buffers reserve only the bounded request ceiling up front (at most
 64 maximum record payloads in total), avoiding plaintext copies freed by Vec
 reallocation before zeroization. Caller byte ceilings do not become unbounded
 allocation sizes.
+
+Within the same call, decoded index pages also have a separate LRU cache: at
+most 64 nodes and 1 MiB of accounted node storage (including vector capacity
+and key/value allocations), plus the entry-bounded hash-table overhead. An
+oversized node is read without retaining it; eviction only costs a reread.
+Each exact key still starts a fresh guarded descent: cache hits retain cycle,
+slot, depth and namespace checks. Decoded pages use the existing redacted
+buffers and scrub when the last reference drops. No index page survives the
+call or is reused across spaces or commits.
