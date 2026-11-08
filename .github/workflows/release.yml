@@ -227,6 +227,13 @@ jobs:
             SHA256SUMS
           ls -la SHA256SUMS.cosign.bundle
 
+      - name: Scan release artifacts for private identifiers
+        env:
+          PATTERNS: |
+            ${{ secrets.LEAK_PATTERNS }}
+            ${{ secrets.RELEASE_PRIVATE_PATTERNS }}
+        run: python3 scripts/scan-artifacts.py dist
+
       - name: Create GitHub Release
         # Always create on tag push; skip on workflow_dispatch+dry_run.
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
