@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## 2.7.0 — 2026-11-09
+
 ### Performance
 
 - Reuse decoded index pages within one bounded exact-ID log-group read (64
