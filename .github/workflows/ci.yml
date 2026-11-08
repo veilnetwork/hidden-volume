@@ -111,6 +111,7 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+      - run: python3 -m unittest discover -s scripts -p test_scan_artifacts.py
 
   doc:
     name: rustdoc (workspace, all features)
