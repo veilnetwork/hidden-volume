@@ -2,7 +2,7 @@
 
 🇬🇧 **English** · [🇷🇺 Русский](../../ru/security/threat-model.md)
 
-**Status.** Working document, current as of crate v2.6.x. The shape
+**Status.** Working document, current as of crate v2.7.x. The shape
 does not change between releases — only specific findings are filled in.
 This line described the project as pre-release long after v2 shipped,
 which reads as a document nobody has revisited (report16 HV16-L1). No
@@ -83,6 +83,12 @@ The library exposes per-space KV (`Tx::put` / `delete` / `get` /
 (`Container::compact_known`, `Container::change_passwords`,
 `Space::erase_namespace`, `Space::vacuum_data_batches`,
 `Space::verify_integrity`).
+
+`Space::read_log_groups` adds bounded exact-ID reads: at most eight groups and
+64 requested records per call, with independent byte ceilings. Its index and
+decoded-batch caches are call-local. Cache hits retain namespace and log-reference
+digest checks; they do not confer authorization or persist across calls. This API
+does not change the container format or the isolation boundary between spaces.
 
 ### 1.2 What `hidden-volume` is NOT
 
