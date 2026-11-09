@@ -4,6 +4,14 @@
 
 ## 2.7.0 — 2026-11-09
 
+### Dependencies
+
+- Update zstd and its safe/sys wrappers to the patched 0.13.4 / 7.4.0 / 2.1.2
+  releases. Keep the advisory gate enabled without new exceptions. Current
+  log compression uses fresh encode/read-decoder contexts; the reported reused
+  context, seekable, write-decoder and wasm conditions are not all exercised
+  by that path. The container format is unchanged.
+
 ### Performance
 
 - Reuse decoded index pages within one bounded exact-ID log-group read (64
