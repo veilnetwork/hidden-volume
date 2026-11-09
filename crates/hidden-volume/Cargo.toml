@@ -81,7 +81,7 @@ thiserror = "1"
 # In-memory chunk encoding (fixed-size, deterministic).
 byteorder = "1.5"
 # DataBatch compression for the message log namespace (DESIGN §11.4).
-zstd = "0.13"
+zstd = "0.13.4"
 # Optional: argument parsing for the `hv` CLI binary.
 clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"], optional = true }
 # Optional: data-parallelism for the open-time discovery scan. Uses
