@@ -9,6 +9,12 @@ use hidden_volume::crypto::kdf::Argon2Params;
 use hidden_volume::space::index::Namespace;
 use hidden_volume::{Container, Error};
 
+// A subprocess can briefly inherit another thread's close-on-exec file
+// descriptors before exec, retaining their flock after that thread closes it.
+// Keep process-launch/crash cases exclusive; ordinary fixtures still run in
+// parallel under shared guards. This is test isolation, not a storage retry.
+static PROCESS_LAUNCH: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
 const PASSWORDS: &[&[u8]] = &[b"child-fixture", b"master-fixture"];
 const BODY: &[u8] = b"actual child payload retained across publication";
 
@@ -75,6 +81,7 @@ fn repair(plan: &PreparedCompaction) {
 
 #[test]
 fn publish_contains_repaired_references_and_still_rotates_keys() {
+    let _launch_gate = PROCESS_LAUNCH.read().unwrap();
     let (dir, path, _) = fixture();
     let old = verify_master(&path);
     let before = std::fs::read(&path).unwrap();
@@ -99,6 +106,7 @@ fn publish_contains_repaired_references_and_still_rotates_keys() {
 
 #[test]
 fn abort_after_staged_metadata_edits_preserves_original_bytes() {
+    let _launch_gate = PROCESS_LAUNCH.read().unwrap();
     let (dir, path, before) = fixture();
     let plan =
         Container::prepare_compact_known(&path, PASSWORDS, RepackOptions::default()).unwrap();
@@ -111,6 +119,7 @@ fn abort_after_staged_metadata_edits_preserves_original_bytes() {
 
 #[test]
 fn invalid_password_never_exposes_a_partial_replacement() {
+    let _launch_gate = PROCESS_LAUNCH.read().unwrap();
     let (dir, path, before) = fixture();
     match Container::prepare_compact_known(&path, &[b"wrong-fixture"], RepackOptions::default()) {
         Err(Error::AuthFailed) => {},
@@ -126,6 +135,7 @@ fn invalid_password_never_exposes_a_partial_replacement() {
 
 #[test]
 fn cancellation_before_publish_keeps_original_references() {
+    let _launch_gate = PROCESS_LAUNCH.read().unwrap();
     let (dir, path, before) = fixture();
     let token = CancelToken::new();
     let plan = Container::prepare_compact_known_cancellable(
@@ -145,6 +155,7 @@ fn cancellation_before_publish_keeps_original_references() {
 
 #[test]
 fn open_staged_handle_refuses_publication() {
+    let _launch_gate = PROCESS_LAUNCH.read().unwrap();
     let (_dir, path, before) = fixture();
     let plan =
         Container::prepare_compact_known(&path, PASSWORDS, RepackOptions::default()).unwrap();
@@ -161,6 +172,7 @@ fn open_staged_handle_refuses_publication() {
 
 #[test]
 fn invalid_staged_header_does_not_replace_source() {
+    let _launch_gate = PROCESS_LAUNCH.read().unwrap();
     let (_dir, path, before) = fixture();
     let plan =
         Container::prepare_compact_known(&path, PASSWORDS, RepackOptions::default()).unwrap();
@@ -172,6 +184,7 @@ fn invalid_staged_header_does_not_replace_source() {
 
 #[test]
 fn already_cancelled_preparation_never_changes_source() {
+    let _launch_gate = PROCESS_LAUNCH.read().unwrap();
     let (dir, path, before) = fixture();
     let token = CancelToken::new();
     token.cancel();
@@ -190,6 +203,7 @@ fn already_cancelled_preparation_never_changes_source() {
 
 #[test]
 fn qualified_alias_warning_still_publishes_repaired_references() {
+    let _launch_gate = PROCESS_LAUNCH.read().unwrap();
     let (dir, path, before) = fixture();
     let alias = dir.path().join("alias.hv");
     std::fs::hard_link(&path, &alias).unwrap();
@@ -240,6 +254,7 @@ fn crash_case(test_name: &str, publish: bool) {
         }
     }
 
+    let _launch_gate = PROCESS_LAUNCH.write().unwrap();
     let (_dir, path, _) = fixture();
     let old = verify_master(&path);
     let before = std::fs::read(&path).unwrap();
