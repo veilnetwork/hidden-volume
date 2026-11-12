@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-11-04T00:38:39Z
+# Captured: 2026-11-12T20:31:00Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -81,6 +81,7 @@ container/header.rs:   pub fn decode(bytes: &[u8]) -> Result<Self> {
 container/header.rs:   pub fn encode_first_chunk(&self) -> Result<[u8; CHUNK_SIZE]> {
 container/mod.rs: pub mod file;
 container/mod.rs: pub mod header;
+container/mod.rs: pub use prepared::PreparedCompaction;
 container/mod.rs: pub use file::{ContainerFile, DEFAULT_SUPERBLOCK_REPLICAS};
 container/mod.rs: pub use header::Header;
 container/mod.rs: pub struct ContainerOptions {
@@ -122,6 +123,12 @@ container/mod.rs:   pub fn compact_known(
 container/mod.rs:   pub fn compact_known_cancellable(
 container/mod.rs:   pub fn change_passwords(
 container/mod.rs:   pub fn change_passwords_cancellable(
+container/prepared.rs: pub struct PreparedCompaction {
+container/prepared.rs:   pub fn staged_path(&self) -> &Path {
+container/prepared.rs:   pub fn commit(mut self) -> Result<()> {
+container/prepared.rs:   pub fn abort(mut self) -> Result<()> {
+container/prepared.rs:   pub fn prepare_compact_known(
+container/prepared.rs:   pub fn prepare_compact_known_cancellable(
 crypto/aead.rs: pub struct ChunkAead {
 crypto/aead.rs:   pub fn new(key: &[u8; 32]) -> Self {
 crypto/aead.rs:   pub fn seal(&self, plaintext: &[u8], aad: [u8; AAD_LEN]) -> Result<([u8; NONCE_LEN], Vec<u8>)> {
@@ -446,6 +453,7 @@ lib.rs:   pub fn stream_log_pages_range(
 crate: hidden-volume-ffi
 ==========================================
 
+lib.rs: pub use prepared_compaction::PreparedCompactionHandle;
 lib.rs: pub enum HvError {
 lib.rs:     variant Io(String),
 lib.rs:     variant AuthFailed,
@@ -584,6 +592,11 @@ lib.rs:   pub fn kv_keys(&self, id: u32, namespace: u8) -> HvResult<Vec<u8>> {
 lib.rs:   pub fn kv_keys_page(
 lib.rs:   pub fn commit_seq(&self, id: u32) -> HvResult<u64> {
 lib.rs:   pub fn vacuum_data_batches(&self, id: u32) -> HvResult<u64> {
+prepared_compaction.rs: pub struct PreparedCompactionHandle {
+prepared_compaction.rs:   pub fn new() -> Arc<Self> {
+prepared_compaction.rs:   pub fn prepare(&self, path: String, passwords: Vec<Vec<u8>>) -> HvResult<String> {
+prepared_compaction.rs:   pub fn commit(&self) -> HvResult<()> {
+prepared_compaction.rs:   pub fn abort(&self) -> HvResult<()> {
 
 ==========================================
 dart: hidden_volume (flutter plugin)
@@ -852,6 +865,8 @@ src/bindings.dart: void changePasswords(String path, List<HvPasswordRotation> ro
 src/bindings.dart:   rustCall<void>((s) {
 src/bindings.dart: void compactKnown(String path, List<Uint8List> passwords) {
 src/bindings.dart:   rustCall<void>((s) {
+src/bindings.dart: Future<void> compactKnownPreparedAsync(
+src/bindings.dart:   final copies = [
 src/bindings.dart: void requireOptU64PairForTest(int? a, String an, int? b, String bn) {
 src/bindings.dart: class SpaceHandleBindings {
 src/bindings.dart:   static SpaceHandleBindings create({
