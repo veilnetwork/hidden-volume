@@ -38,6 +38,10 @@ if [[ -n "$TARGET" && ! "$TARGET" =~ ^[A-Za-z0-9_]+(-[A-Za-z0-9_]+)+$ ]]; then
     echo "error: TARGET must be a Rust target triple, not a path" >&2
     exit 1
 fi
+if [[ "$TARGET" == *apple-darwin || "$(uname -s)" == Darwin ]]; then
+    # Keep Mach-O loadable; Apple's staging tools strip and re-sign below.
+    export CARGO_PROFILE_RELEASE_STRIP=none
+fi
 DIST="$REPO_ROOT/dist${TARGET:+/$TARGET}"
 
 # Pick a sha256 tool that exists on the host.
@@ -51,17 +55,20 @@ else
 fi
 
 CARGO_TARGET_FLAG=()
-RELEASE_DIR="$REPO_ROOT/target/release"
 if [ -n "$TARGET" ]; then
     CARGO_TARGET_FLAG=(--target "$TARGET")
-    RELEASE_DIR="$REPO_ROOT/target/$TARGET/release"
 fi
 
 echo "==> building hv CLI (release)"
-cargo build -p hidden-volume --release --features cli "${CARGO_TARGET_FLAG[@]}"
+cargo build -p hidden-volume --release --locked --features cli "${CARGO_TARGET_FLAG[@]}"
 
 echo "==> building hidden-volume-ffi cdylib (release)"
-cargo build -p hidden-volume-ffi --release "${CARGO_TARGET_FLAG[@]}"
+cargo build -p hidden-volume-ffi --release --locked "${CARGO_TARGET_FLAG[@]}"
+
+cargo_output="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) cargo_output="${cargo_output//\\//}" ;; esac
+cargo_output="$(cd "$cargo_output" && pwd)"
+RELEASE_DIR="$cargo_output/${TARGET:+$TARGET/}release"
 
 # Locate the cdylib (varies by OS).
 CDYLIB=""
@@ -86,7 +93,7 @@ echo "==> regenerating bindings against the freshly-built cdylib"
 # silently swallowed failures, letting the release ship with
 # pre-existing bindings that may not match the just-built cdylib.
 for lang in kotlin swift python ruby; do
-    cargo run --bin uniffi-bindgen --features bindgen-cli -p hidden-volume-ffi -- \
+    cargo run --locked --bin uniffi-bindgen --features bindgen-cli -p hidden-volume-ffi -- \
         generate \
         --library "$CDYLIB" \
         --language "$lang" \
@@ -106,6 +113,12 @@ fi
 
 # cdylib.
 cp "$CDYLIB" "$DIST/"
+if [[ "$CDYLIB" == *.dylib ]]; then
+    for artifact in "$DIST/hv" "$DIST/$(basename "$CDYLIB")"; do
+        xcrun strip -S "$artifact"
+        codesign --force --sign - --timestamp=none "$artifact"
+    done
+fi
 
 # Bindings — copy the entire generated tree.
 cp -r bindings "$DIST/bindings"
