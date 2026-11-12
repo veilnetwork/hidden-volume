@@ -43,6 +43,18 @@ fn prepare(plan: &PreparedCompactionHandle, path: &str) -> String {
         .unwrap()
 }
 
+fn assert_source_protected_while_prepared(path: &str, before: &[u8]) {
+    #[cfg(not(windows))]
+    assert_eq!(std::fs::read(path).unwrap(), before);
+    #[cfg(windows)]
+    {
+        // Windows' mandatory lock prevents reads through a second handle.
+        let error = std::fs::read(path).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(33));
+        assert_eq!(std::fs::metadata(path).unwrap().len(), before.len() as u64);
+    }
+}
+
 #[test]
 fn borrowed_worker_reference_repairs_before_publication() {
     let (_dir, path) = fixture();
@@ -52,7 +64,7 @@ fn borrowed_worker_reference_repairs_before_publication() {
     let worker = owner.clone();
     let staged = prepare(&worker, &path);
     drop(worker); // A worker reply is not ownership of the underlying plan.
-    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_source_protected_while_prepared(&path, &before);
     let child = SpaceHandle::open(staged.clone(), b"child".to_vec()).unwrap();
     let keys = child.space_keys().unwrap();
     drop(child);
@@ -65,6 +77,26 @@ fn borrowed_worker_reference_repairs_before_publication() {
     assert_eq!(verify(&path), keys);
     assert!(owner.commit().is_err());
     assert!(owner.prepare(path, vec![b"master".to_vec()]).is_err());
+}
+
+#[test]
+fn abort_after_repair_preserves_original_bytes_and_keys() {
+    let (_dir, path) = fixture();
+    let old_keys = verify(&path);
+    let before = std::fs::read(&path).unwrap();
+    let owner = PreparedCompactionHandle::new();
+    let staged = prepare(&owner, &path);
+    let child = SpaceHandle::open(staged.clone(), b"child".to_vec()).unwrap();
+    let keys = child.space_keys().unwrap();
+    drop(child);
+    assert_ne!(keys, old_keys);
+    let master = SpaceHandle::open(staged, b"master".to_vec()).unwrap();
+    master.commit(vec![put(b"child", &keys)]).unwrap();
+    drop(master);
+    assert_source_protected_while_prepared(&path, &before);
+    owner.abort().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(verify(&path), old_keys);
 }
 
 #[test]

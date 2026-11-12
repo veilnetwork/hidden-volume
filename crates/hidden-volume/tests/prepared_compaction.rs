@@ -79,6 +79,19 @@ fn repair(plan: &PreparedCompaction) {
     tx.commit().unwrap();
 }
 
+fn assert_source_protected_while_prepared(path: &Path, before: &[u8]) {
+    #[cfg(not(windows))]
+    assert_eq!(std::fs::read(path).unwrap(), before);
+    #[cfg(windows)]
+    {
+        // LockFileEx is mandatory even for an unrelated raw read handle.
+        // Abort tests below compare the original bytes after releasing it.
+        let error = std::fs::read(path).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(33));
+        assert_eq!(std::fs::metadata(path).unwrap().len(), before.len() as u64);
+    }
+}
+
 #[test]
 fn publish_contains_repaired_references_and_still_rotates_keys() {
     let _launch_gate = PROCESS_LAUNCH.read().unwrap();
@@ -87,12 +100,12 @@ fn publish_contains_repaired_references_and_still_rotates_keys() {
     let before = std::fs::read(&path).unwrap();
     let plan =
         Container::prepare_compact_known(&path, PASSWORDS, RepackOptions::default()).unwrap();
-    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_source_protected_while_prepared(&path, &before);
     assert!(matches!(Container::open(&path), Err(Error::Busy)));
     assert_eq!(plan.staged_path().parent(), path.parent());
     assert!(!format!("{plan:?}").contains(&path.parent().unwrap().display().to_string()));
     repair(&plan);
-    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_source_protected_while_prepared(&path, &before);
     plan.commit().unwrap();
     let current = verify_master(&path);
     assert_ne!(old, current);
