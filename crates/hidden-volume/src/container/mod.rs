@@ -3,6 +3,9 @@
 
 pub mod file;
 pub mod header;
+mod prepared;
+
+pub use prepared::PreparedCompaction;
 
 use std::path::Path;
 use zeroize::Zeroizing;
