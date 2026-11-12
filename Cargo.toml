@@ -20,6 +20,13 @@ codegen-units = 1
 opt-level = 3
 panic = "abort"
 
+# Host proc macros are compiler inputs. Darwin can reject their LINKEDIT
+# layout when release builds strip them, even before the storage crate is
+# compiled. Keep these intermediate libraries intact; target profiles and
+# the on-disk storage format are unchanged.
+[profile.release.build-override]
+strip = "none"
+
 # Debug xVeil builds ship this cdylib too.  Leaving the storage core and its
 # crypto dependencies at opt-level 0 turns the constant-time discovery scan
 # into a multi-minute CPU loop on an aged container (about 311k 4-KiB slots in
