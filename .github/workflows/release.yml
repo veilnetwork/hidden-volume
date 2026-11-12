@@ -153,6 +153,11 @@ jobs:
           linker = "aarch64-linux-gnu-gcc"
           EOF
 
+      - name: Preserve loadable Mach-O during Rust linking
+        if: runner.os == 'macOS'
+        shell: bash
+        run: echo 'CARGO_PROFILE_RELEASE_STRIP=none' >> "$GITHUB_ENV"
+
       - name: Build hv CLI
         run: cargo build -p hidden-volume --release --features cli --target ${{ matrix.target }} --locked
       - name: Build FFI cdylib
@@ -174,6 +179,10 @@ jobs:
           elif [[ "${{ matrix.target }}" == *darwin* ]]; then
             cp "$tdir/hv" "dist/hv-${prefix}"
             cp "$tdir/libhidden_volume_ffi.dylib" "dist/libhidden_volume_ffi-${prefix}.dylib"
+            for artifact in dist/*; do
+              xcrun strip -S "$artifact"
+              codesign --force --sign - --timestamp=none "$artifact"
+            done
           else
             cp "$tdir/hv" "dist/hv-${prefix}"
             cp "$tdir/libhidden_volume_ffi.so" "dist/libhidden_volume_ffi-${prefix}.so"
