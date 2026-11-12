@@ -27,6 +27,7 @@ library;
 import 'dart:convert';
 import 'dart:ffi' as ffi;
 import 'dart:io' show File, Platform;
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:meta/meta.dart';
@@ -299,6 +300,7 @@ void _ensureAbiCompatible() {
 // BEGIN GENERATED CHECKSUMS — scripts/regen-dart-checksums.py
 const Map<String, int> _methodChecksums = <String, int>{
   'uniffi_hidden_volume_ffi_checksum_constructor_multispacehandle_open': 55952,
+  'uniffi_hidden_volume_ffi_checksum_constructor_preparedcompactionhandle_new': 25578,
   'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_add_space': 26649,
   'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_create': 32815,
   'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_open': 49007,
@@ -323,6 +325,9 @@ const Map<String, int> _methodChecksums = <String, int>{
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_stats': 46401,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_vacuum_data_batches': 40066,
   'uniffi_hidden_volume_ffi_checksum_method_multispacehandle_vacuum_space': 35449,
+  'uniffi_hidden_volume_ffi_checksum_method_preparedcompactionhandle_abort': 62157,
+  'uniffi_hidden_volume_ffi_checksum_method_preparedcompactionhandle_commit': 7011,
+  'uniffi_hidden_volume_ffi_checksum_method_preparedcompactionhandle_prepare': 55070,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_acknowledge_hardening_error': 23895,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_commit': 59696,
   'uniffi_hidden_volume_ffi_checksum_method_spacehandle_commit_history': 53412,
@@ -1525,6 +1530,176 @@ void compactKnown(String path, List<Uint8List> passwords) {
   rustCall<void>((s) {
     _fnCompactKnown(pathBuf, pwdsBuf, s);
   });
+}
+
+final _pcNew = _dylib
+    .lookupFunction<
+      ffi.Uint64 Function(ffi.Pointer<RustCallStatus>),
+      int Function(ffi.Pointer<RustCallStatus>)
+    >('uniffi_hidden_volume_ffi_fn_constructor_preparedcompactionhandle_new');
+final _pcClone = _dylib
+    .lookupFunction<
+      ffi.Uint64 Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
+      int Function(int, ffi.Pointer<RustCallStatus>)
+    >('uniffi_hidden_volume_ffi_fn_clone_preparedcompactionhandle');
+final _pcFree = _dylib
+    .lookupFunction<
+      ffi.Void Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
+      void Function(int, ffi.Pointer<RustCallStatus>)
+    >('uniffi_hidden_volume_ffi_fn_free_preparedcompactionhandle');
+final _pcPrepare = _dylib
+    .lookupFunction<
+      RustBuffer Function(
+        ffi.Uint64,
+        RustBuffer,
+        RustBuffer,
+        ffi.Pointer<RustCallStatus>,
+      ),
+      RustBuffer Function(
+        int,
+        RustBuffer,
+        RustBuffer,
+        ffi.Pointer<RustCallStatus>,
+      )
+    >('uniffi_hidden_volume_ffi_fn_method_preparedcompactionhandle_prepare');
+final _pcCommit = _dylib
+    .lookupFunction<
+      ffi.Void Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
+      void Function(int, ffi.Pointer<RustCallStatus>)
+    >('uniffi_hidden_volume_ffi_fn_method_preparedcompactionhandle_commit');
+final _pcAbort = _dylib
+    .lookupFunction<
+      ffi.Void Function(ffi.Uint64, ffi.Pointer<RustCallStatus>),
+      void Function(int, ffi.Pointer<RustCallStatus>)
+    >('uniffi_hidden_volume_ffi_fn_method_preparedcompactionhandle_abort');
+
+// This owner NEVER crosses isolates. Workers borrow its numeric token while
+// this scoped caller keeps the original reference alive, and clone on their
+// own side immediately before a consuming UniFFI method call.
+@pragma('vm:isolate-unsendable')
+class _PreparedCompactionOwner {
+  _PreparedCompactionOwner() : _handle = rustCall<int>(_pcNew) {
+    _finalizer.attach(this, _handle, detach: this);
+  }
+
+  final int _handle;
+
+  void close() {
+    _finalizer.detach(this);
+    rustCall<void>((status) => _pcFree(_handle, status));
+  }
+
+  static final Finalizer<int> _finalizer = Finalizer<int>((handle) {
+    // Best effort only. Normal cleanup is the explicit awaited abort below.
+    rustCall<void>((status) => _pcFree(handle, status));
+  });
+}
+
+enum _PreparedAction { prepare, commit, abort }
+
+typedef _PreparedCall = ({
+  int owner,
+  _PreparedAction action,
+  String path,
+  List<Uint8List> passwords,
+  String? dylibPath,
+});
+
+String? _preparedCallEntry(_PreparedCall call) {
+  try {
+    if (call.dylibPath != null) {
+      overrideDylib(ffi.DynamicLibrary.open(call.dylibPath!));
+    }
+    if (call.action == _PreparedAction.prepare) {
+      // Serialize before cloning: a local validation failure must not strand
+      // an Arc. Native methods consume exactly the clone they receive.
+      final path = _bufferFromBytes(utf8.encode(call.path));
+      final passwords = _writeBytesSequence(call.passwords);
+      final handle = rustCall<int>((s) => _pcClone(call.owner, s));
+      final out = rustCall<RustBuffer>(
+        (s) => _pcPrepare(handle, path, passwords, s),
+      );
+      return utf8.decode(_bufferToBytes(out));
+    }
+    final handle = rustCall<int>((s) => _pcClone(call.owner, s));
+    rustCall<void>((s) {
+      if (call.action == _PreparedAction.commit) {
+        _pcCommit(handle, s);
+      } else {
+        _pcAbort(handle, s);
+      }
+    });
+    return null;
+  } finally {
+    for (final password in call.passwords) {
+      password.fillRange(0, password.length, 0);
+    }
+  }
+}
+
+// A separate top-level helper prevents Isolate.run's closure from capturing
+// the owner or the application's (unsendable) metadata-repair callback.
+Future<String?> _runPreparedCall(_PreparedCall call) =>
+    Isolate.run(() => _preparedCallEntry(call));
+
+/// Compact with encrypted host metadata repaired BEFORE atomic publication.
+///
+/// [repairMetadata] must authenticate the staged path with ordinary space
+/// APIs, repair references to rotated keys, close every staged handle, and
+/// check the host's lifecycle lease before returning. Throwing aborts the
+/// replacement and preserves the original. Unlisted spaces are destroyed.
+///
+/// The original native owner stays in this isolate until every worker returns
+/// and an explicit abort has drained it. No owning wrapper is copied between
+/// isolates. Dropping/timeout of the returned Future does NOT cancel work;
+/// callers must keep their lifecycle barrier until this Future settles.
+/// Post-publication warnings still use [HvException.mayHaveApplied].
+Future<void> compactKnownPreparedAsync(
+  String path,
+  List<Uint8List> passwords, {
+  required Future<void> Function(String stagedPath) repairMetadata,
+  String? dylibPath,
+}) async {
+  if (dylibPath != null) {
+    overrideDylib(ffi.DynamicLibrary.open(dylibPath));
+  }
+  final copies = [
+    for (final password in passwords) Uint8List.fromList(password),
+  ];
+  final owner = _PreparedCompactionOwner();
+  try {
+    final staged = await _runPreparedCall((
+      owner: owner._handle,
+      action: _PreparedAction.prepare,
+      path: path,
+      passwords: copies,
+      dylibPath: dylibPath,
+    ));
+    if (staged == null) throw StateError('compaction returned no staged path');
+    await repairMetadata(staged);
+    await _runPreparedCall((
+      owner: owner._handle,
+      action: _PreparedAction.commit,
+      path: '',
+      passwords: <Uint8List>[],
+      dylibPath: dylibPath,
+    ));
+  } finally {
+    try {
+      await _runPreparedCall((
+        owner: owner._handle,
+        action: _PreparedAction.abort,
+        path: '',
+        passwords: <Uint8List>[],
+        dylibPath: dylibPath,
+      ));
+    } finally {
+      owner.close();
+      for (final password in copies) {
+        password.fillRange(0, password.length, 0);
+      }
+    }
+  }
 }
 
 // ------------------------------------------------------------------

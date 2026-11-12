@@ -9,7 +9,9 @@
   read-only and locked until commit or abort; abort waits for cleanup. This
   lets hosts update references to rotated space keys before publication,
   without storing passwords or an old-container backup journal on disk.
-  The application/foreign bindings still require integration.
+  UniFFI exposes an owned prepared capability; the Dart scoped async helper
+  keeps that owner alive across workers and drains it on failure. Application
+  integration is still required before this protects host roster references.
 
 ## 2.7.1 — 2026-11-12
 
