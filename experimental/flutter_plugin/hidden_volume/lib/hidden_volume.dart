@@ -45,6 +45,7 @@ export 'src/deferred_vacuum.dart' show DeferredVacuumWindow;
 // Re-export typed FFI types so callers don't import `src/`.
 export 'src/bindings.dart'
     show
+        compactKnownPreparedAsync,
         ArgonPreset,
         HvCommitEra,
         HvException,

@@ -97,6 +97,9 @@ use hidden_volume::padding::PaddingPolicy;
 use hidden_volume::space::index::Namespace;
 use hidden_volume_rt::{OpLedger, OwnedSpace};
 
+mod prepared_compaction;
+pub use prepared_compaction::PreparedCompactionHandle;
+
 /// Length of a serialized [`SpaceKeys`] across the FFI: `container_id` (32) ‖
 /// `aead_root` (32). These bytes are the per-space decryption root — opaque,
 /// sensitive, **never logged**; they live only inside a master space.
