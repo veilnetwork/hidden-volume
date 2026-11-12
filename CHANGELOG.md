@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## 2.7.2 — 2026-11-12
+
 ### Added
 
 - Rust hosts can prepare a compaction, repair authenticated metadata in its
