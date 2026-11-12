@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## 2.7.1 — 2026-11-12
+
+### Fixed
+
+- Keep Darwin host proc macros and staged native libraries loadable in release
+  builds. Strip and sign final Mach-O artifacts with Apple's tools.
+- Read local release artifacts from the actual Cargo target directory and use
+  locked dependency resolution when building the CLI and bindings.
+
+### Dependencies
+
+- Update rustix to 1.1.6 without adding vulnerability exceptions. The existing
+  build-time basic-toml maintenance exception remains unchanged.
+
+The container format and public FFI are unchanged from 2.7.0.
+
 ## 2.7.0 — 2026-11-09
 
 ### Dependencies

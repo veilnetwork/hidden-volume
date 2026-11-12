@@ -30,7 +30,7 @@ for the canonical byte layout.
 
 ## Status
 
-**v2.7.0 released (2026-11-09).** The on-disk format has been
+**v2.7.1 released (2026-11-12).** The on-disk format has been
 generation **3** since v1.0.0 (2026-05-28) and has not moved since:
 v2.0.0 (2026-08-12) broke APIs, not bytes, so a container written
 by 1.2.x still opens — see [`docs/en/guide/migration.md`](docs/en/guide/migration.md).
