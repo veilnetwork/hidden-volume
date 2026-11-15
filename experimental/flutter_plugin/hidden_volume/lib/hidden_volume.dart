@@ -111,7 +111,9 @@ class HvSpace {
   /// Create a fresh container at [path] and bootstrap a space inside it
   /// keyed by [password]. [argon] picks the KDF cost preset baked into
   /// the container header (cannot be changed in-place later — needs a
-  /// `repack` to migrate).
+  /// `repack` to migrate). An explicit [padding] is also persisted there,
+  /// unlike the session-only [setPaddingPolicy] override. Omitting it preserves
+  /// the ordinary hidden-storage default.
   ///
   /// Throws [HvException] with `kind == "Busy"` if another process holds
   /// the file lock; `kind == "SpaceAlreadyExists"` if [path] already has
@@ -123,7 +125,18 @@ class HvSpace {
     ffi.ArgonPreset argon = ffi.ArgonPreset.defaults,
     int initialGarbageChunks = 0,
     int superblockReplicas = 3,
+    ffi.PaddingPreset? padding,
   }) {
+    if (padding != null) {
+      return HvSpace._(ffi.SpaceHandleBindings.createWithPadding(
+        path: path,
+        password: password,
+        argon: argon,
+        initialGarbageChunks: initialGarbageChunks,
+        superblockReplicas: superblockReplicas,
+        padding: padding,
+      ));
+    }
     return HvSpace._(ffi.SpaceHandleBindings.create(
       path: path,
       password: password,
