@@ -200,6 +200,38 @@ Concurrent calls on the same handle serialize on an internal mutex
 Two `await space.get(...)` calls from different async functions will
 run sequentially under the hood.
 
+### Prepared compaction inside an existing storage worker
+
+When a worker also owns an application's profile locks or other metadata,
+`HvPreparedCompaction` keeps preparation, publication and abort in that same
+isolate. Each native step is synchronous; this API belongs on a storage
+worker, never on the UI isolate. It does not dispatch native work to a child
+isolate, and the capability cannot be sent in an isolate message.
+
+```dart
+final plan = HvPreparedCompaction.prepare(path, passwords);
+try {
+  await repairMetadata(plan.stagedPath);
+  checkHostAuthorization();
+  plan.commit();
+} finally {
+  plan.close();
+}
+```
+
+The host must retain its own filesystem grants throughout this scope, repair
+and close every staged handle, and durably prepare any references held in
+other files before committing. This primitive does not provide those host
+transactions or discover unknown hidden spaces. Only supplied passwords are
+kept; omitted spaces are destroyed.
+
+An unpublished close aborts the replacement and drains its source lock.
+Repeated close is idempotent. Commit is terminal even on an error; inspect
+`HvException.mayHaveApplied` and recover from the actual source rather than
+repeating publication. Always explicitly close: a finalizer is not a release
+witness. The existing `compactKnownPreparedAsync` API retains its separate
+offloaded-call contract for hosts that do not require this worker-local scope.
+
 ### Timeouts do not cancel (audit HV-07)
 
 A Dart `Future` cannot be cancelled. `await space.commit(ops)
