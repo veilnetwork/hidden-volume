@@ -88,6 +88,35 @@ export 'src/async_bindings.dart'
         changePasswordsAsync,
         compactKnownAsync;
 
+/// Maintenance proof for already-authorized exported keys. Returns false only
+/// when the keys match no space; I/O, format and integrity errors remain errors.
+/// Checks the complete authenticated tree and closes the native handle without
+/// arming deferred vacuum or calling any mutation/maintenance operation.
+///
+/// Uses the existing exclusive read/write open, NOT an OS-read-only descriptor.
+/// Run off the UI isolate under the host's profile-maintenance grant. This is
+/// not a discovery or password-unlock API: integrity work depends on the matched
+/// space's contents and is not a constant-duration proof. A successful result
+/// describes this open, not a freshness/rollback or future ownership guarantee.
+bool verifySpaceKeys({required String path, required Uint8List keys}) {
+  if (keys.length != 64) {
+    throw ArgumentError('Expected 64-byte space keys');
+  }
+  final ffi.SpaceHandleBindings handle;
+  try {
+    handle = ffi.SpaceHandleBindings.openWithKeys(path: path, keys: keys);
+  } on ffi.HvException catch (error) {
+    if (error.kind == 'AuthFailed') return false;
+    rethrow;
+  }
+  try {
+    handle.verifyIntegrity();
+    return true;
+  } finally {
+    handle.close();
+  }
+}
+
 /// A handle to one open space inside a `hidden-volume` container file.
 ///
 /// One [HvSpace] == one (container_file, password) pair. Multiple
