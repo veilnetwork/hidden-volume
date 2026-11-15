@@ -46,6 +46,7 @@ export 'src/deferred_vacuum.dart' show DeferredVacuumWindow;
 export 'src/bindings.dart'
     show
         compactKnownPreparedAsync,
+        HvPreparedCompaction,
         ArgonPreset,
         HvCommitEra,
         HvException,

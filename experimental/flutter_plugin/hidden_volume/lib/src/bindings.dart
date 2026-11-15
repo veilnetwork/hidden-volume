@@ -1643,6 +1643,105 @@ String? _preparedCallEntry(_PreparedCall call) {
 Future<String?> _runPreparedCall(_PreparedCall call) =>
     Isolate.run(() => _preparedCallEntry(call));
 
+/// An unpublished rewrite owned and executed by ONE storage-worker isolate.
+///
+/// Every native step is synchronous. Use this port when the same worker must
+/// retain other filesystem/lease capabilities through preparation, metadata
+/// repair and publication. It never dispatches a native step to a child
+/// isolate. Do not call it on a UI isolate.
+///
+/// Repair [stagedPath] with ordinary authenticated space APIs and close every
+/// staged handle before [commit]. Unlisted spaces are destroyed. Always call
+/// [close] in `finally`: dropping the Dart object is not a release witness.
+/// A failed commit is terminal too; typed post-publication warnings retain
+/// their existing meaning and cannot authorize repeating the rewrite.
+@pragma('vm:isolate-unsendable')
+final class HvPreparedCompaction {
+  HvPreparedCompaction._(this._owner, this.stagedPath);
+
+  final _PreparedCompactionOwner _owner;
+  final String stagedPath;
+  bool _closed = false;
+  bool _commitAttempted = false;
+
+  factory HvPreparedCompaction.prepare(
+    String path,
+    List<Uint8List> passwords,
+  ) {
+    final copies = [
+      for (final password in passwords) Uint8List.fromList(password)
+    ];
+    _PreparedCompactionOwner? owner;
+    try {
+      owner = _PreparedCompactionOwner();
+      final staged = _preparedCallEntry((
+        owner: owner._handle,
+        action: _PreparedAction.prepare,
+        path: path,
+        passwords: copies,
+        dylibPath: null,
+      ));
+      if (staged == null) {
+        throw StateError('compaction returned no staged path');
+      }
+      return HvPreparedCompaction._(owner, staged);
+    } catch (_) {
+      if (owner != null) {
+        try {
+          _preparedCallEntry((
+            owner: owner._handle,
+            action: _PreparedAction.abort,
+            path: '',
+            passwords: <Uint8List>[],
+            dylibPath: null
+          ));
+        } finally {
+          owner.close();
+        }
+      }
+      rethrow;
+    } finally {
+      for (final password in copies) {
+        password.fillRange(0, password.length, 0);
+      }
+    }
+  }
+
+  void commit() {
+    if (_closed || _commitAttempted) {
+      throw StateError('compaction capability is no longer prepared');
+    }
+    // The native commit consumes its plan even on failure. Never allow a
+    // caller to turn a lost/warning result into another publication attempt.
+    _commitAttempted = true;
+    _preparedCallEntry((
+      owner: _owner._handle,
+      action: _PreparedAction.commit,
+      path: '',
+      passwords: <Uint8List>[],
+      dylibPath: null
+    ));
+  }
+
+  /// Abort any unpublished work, then consume this owner's native reference.
+  /// Repeated close is local and never repeats a consuming UniFFI free.
+  void close() {
+    if (_closed) return;
+    _closed = true;
+    try {
+      _preparedCallEntry((
+        owner: _owner._handle,
+        action: _PreparedAction.abort,
+        path: '',
+        passwords: <Uint8List>[],
+        dylibPath: null
+      ));
+    } finally {
+      _owner.close();
+    }
+  }
+}
+
 /// Compact with encrypted host metadata repaired BEFORE atomic publication.
 ///
 /// [repairMetadata] must authenticate the staged path with ordinary space
