@@ -303,6 +303,7 @@ const Map<String, int> _methodChecksums = <String, int>{
   'uniffi_hidden_volume_ffi_checksum_constructor_preparedcompactionhandle_new': 25578,
   'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_add_space': 26649,
   'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_create': 32815,
+  'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_create_with_padding': 7392,
   'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_open': 49007,
   'uniffi_hidden_volume_ffi_checksum_constructor_spacehandle_open_with_keys': 38449,
   'uniffi_hidden_volume_ffi_checksum_func_change_passwords': 12821,
@@ -1713,6 +1714,13 @@ final _spCreate = _dylib.lookupFunction<
             ffi.Pointer<RustCallStatus>)>(
     'uniffi_hidden_volume_ffi_fn_constructor_spacehandle_create');
 
+final _spCreateWithPadding = _dylib.lookupFunction<
+        ffi.Uint64 Function(RustBuffer, RustBuffer, RustBuffer, ffi.Uint64,
+            ffi.Uint8, RustBuffer, ffi.Pointer<RustCallStatus>),
+        int Function(RustBuffer, RustBuffer, RustBuffer, int, int, RustBuffer,
+            ffi.Pointer<RustCallStatus>)>(
+    'uniffi_hidden_volume_ffi_fn_constructor_spacehandle_create_with_padding');
+
 final _spOpen =
     _dylib.lookupFunction<
             ffi.Uint64 Function(
@@ -1970,6 +1978,26 @@ class SpaceHandleBindings {
     final argonBuf = argon._toRustBuffer();
     final h = rustCall<int>(
         (s) => _spCreate(pathBuf, pwdBuf, argonBuf, garbage, replicas, s));
+    return SpaceHandleBindings._(h);
+  }
+
+  static SpaceHandleBindings createWithPadding({
+    required String path,
+    required Uint8List password,
+    required ArgonPreset argon,
+    required PaddingPreset padding,
+    int initialGarbageChunks = 0,
+    int superblockReplicas = 3,
+  }) {
+    // Validate scalars before any RustBuffer allocations, as in create().
+    final garbage = requireU64(initialGarbageChunks, 'initialGarbageChunks');
+    final replicas = _u8(superblockReplicas, 'superblockReplicas');
+    final pathBuf = _bufferFromBytes(utf8.encode(path));
+    final pwdBuf = _bufferFromByteVec(password);
+    final argonBuf = argon._toRustBuffer();
+    final paddingBuf = padding._toRustBuffer();
+    final h = rustCall<int>((s) => _spCreateWithPadding(
+        pathBuf, pwdBuf, argonBuf, garbage, replicas, paddingBuf, s));
     return SpaceHandleBindings._(h);
   }
 

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- A separate FFI space constructor and optional Dart `HvSpace.create(padding:)`
+  persist an explicitly chosen padding policy at creation. Ordinary hidden
+  creation retains the default policy. Unlike a session-only override, the
+  explicit choice survives cold reopen and native compaction. Updated Dart
+  bindings require the rebuilt native library and its new constructor checksum.
+
+
 ## 2.7.2 — 2026-11-12
 
 ### Added

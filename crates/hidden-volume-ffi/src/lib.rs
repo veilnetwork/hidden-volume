@@ -1282,6 +1282,43 @@ fn decode_space_keys(bytes: Vec<u8>) -> Result<SpaceKeys, HvError> {
 // Drop impl for the self-referential pattern lives on
 // `hidden_volume_rt::OwnedSpace`.
 
+impl SpaceHandle {
+    fn create_with_policy(
+        path: String,
+        password: Vec<u8>,
+        argon: ArgonPreset,
+        initial_garbage_chunks: u64,
+        superblock_replicas: u8,
+        padding_policy: PaddingPolicy,
+    ) -> HvResult<std::sync::Arc<Self>> {
+        // Audit pass 16: scrub the Rust-side password copy when this
+        // function returns. The foreign-side buffer is still owned
+        // by the caller and remains their hygiene responsibility
+        // (documented at the crate level + on PasswordRotation), but
+        // OUR copy now zeroizes deterministically on the normal-return
+        // path rather than dropping into uninitialized heap reuse.
+        // Under `panic = "abort"` (Cargo.toml [profile.release]) the
+        // panic path is process abort — destructors do NOT run on
+        // panic in release, so the OS process teardown is the scrub
+        // there. Zeroizing still buys us deterministic zeroing before
+        // the allocator could reuse the bytes for an unrelated
+        // allocation on the success path.
+        let password = zeroize::Zeroizing::new(password);
+        let p = PathBuf::from(path);
+        let opts = ContainerOptions {
+            argon2: argon.to_params(),
+            initial_garbage_chunks,
+            padding_policy,
+            superblock_replicas: superblock_replicas.max(1),
+        };
+        let container = Box::new(Container::create_with_options(&p, opts)?);
+        let inner = OwnedSpace::wrap_create(container, &password)?;
+        Ok(std::sync::Arc::new(Self {
+            inner: Mutex::new(inner),
+        }))
+    }
+}
+
 #[uniffi::export]
 impl SpaceHandle {
     /// Create a new container at `path` and bootstrap a fresh space
@@ -1302,31 +1339,36 @@ impl SpaceHandle {
         initial_garbage_chunks: u64,
         superblock_replicas: u8,
     ) -> HvResult<std::sync::Arc<Self>> {
-        // Audit pass 16: scrub the Rust-side password copy when this
-        // function returns. The foreign-side buffer is still owned
-        // by the caller and remains their hygiene responsibility
-        // (documented at the crate level + on PasswordRotation), but
-        // OUR copy now zeroizes deterministically on the normal-return
-        // path rather than dropping into uninitialized heap reuse.
-        // Under `panic = "abort"` (Cargo.toml [profile.release]) the
-        // panic path is process abort — destructors do NOT run on
-        // panic in release, so the OS process teardown is the scrub
-        // there. Zeroizing still buys us deterministic zeroing before
-        // the allocator could reuse the bytes for an unrelated
-        // allocation on the success path.
-        let password = zeroize::Zeroizing::new(password);
-        let p = PathBuf::from(path);
-        let opts = ContainerOptions {
-            argon2: argon.to_params(),
+        Self::create_with_policy(
+            path,
+            password,
+            argon,
             initial_garbage_chunks,
-            padding_policy: PaddingPolicy::DEFAULT,
-            superblock_replicas: superblock_replicas.max(1),
-        };
-        let container = Box::new(Container::create_with_options(&p, opts)?);
-        let inner = OwnedSpace::wrap_create(container, &password)?;
-        Ok(std::sync::Arc::new(Self {
-            inner: Mutex::new(inner),
-        }))
+            superblock_replicas,
+            PaddingPolicy::DEFAULT,
+        )
+    }
+
+    /// Create with an explicit policy persisted in the container header.
+    /// Unlike set_padding_policy, this survives reopen and is inherited by
+    /// compaction. The original constructor keeps the hidden-storage default.
+    #[uniffi::constructor]
+    pub fn create_with_padding(
+        path: String,
+        password: Vec<u8>,
+        argon: ArgonPreset,
+        initial_garbage_chunks: u64,
+        superblock_replicas: u8,
+        padding: PaddingPreset,
+    ) -> HvResult<std::sync::Arc<Self>> {
+        Self::create_with_policy(
+            path,
+            password,
+            argon,
+            initial_garbage_chunks,
+            superblock_replicas,
+            padding.to_policy(),
+        )
     }
 
     /// Add a **new parallel space** to an **existing** container at `path`,
