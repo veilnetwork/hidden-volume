@@ -259,6 +259,20 @@ if [[ -d "$DART_LIB" ]]; then
                 next
             }
             start_depth > 1 || private_type { next }
+            # Factories have no return type. In particular, preparation is
+            # the public entry point to HvPreparedCompaction; omitting its
+            # constructor would let a rename disappear from this API gate.
+            # Inspect only the constructor selector for privacy: a public
+            # factory can legitimately take an underscore-prefixed parameter.
+            /^[[:space:]]*(external[[:space:]]+)?(const[[:space:]]+)?factory[[:space:]]+[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?[[:space:]]*\(/ {
+                selector = $0
+                sub(/^[[:space:]]*(external[[:space:]]+)?(const[[:space:]]+)?factory[[:space:]]+/, "", selector)
+                sub(/[[:space:]]*\(.*/, "", selector)
+                if (selector ~ /^_/ || selector ~ /\._/) next
+                sub(/^[[:space:]]+/, "  ")
+                print fname ": " $0
+                next
+            }
             # Methods and top-level functions: a return type, a public name,
             # then a parameter list or type arguments.
             /^[[:space:]]*(static |external )*[A-Za-z0-9_<>?, ]+ [a-z][A-Za-z0-9_]*[(<]/ {
