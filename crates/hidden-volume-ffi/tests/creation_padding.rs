@@ -2,7 +2,7 @@
 use hidden_volume::Container;
 use hidden_volume::padding::PaddingPolicy;
 use hidden_volume_ffi::{
-    ArgonPreset, PaddingPreset, PreparedCompactionHandle, SpaceHandle, WriteOp,
+    ArgonPreset, AsyncSpaceHandle, PaddingPreset, PreparedCompactionHandle, SpaceHandle, WriteOp,
 };
 
 fn policy(path: &str) -> PaddingPolicy {
@@ -92,4 +92,74 @@ fn prepared_compaction_preserves_explicit_no_padding_and_data() {
         reopened.get(1, b"key".to_vec()).unwrap(),
         Some(b"value".to_vec())
     );
+}
+
+#[tokio::test]
+async fn async_creation_persists_each_policy_and_keeps_legacy_default() {
+    let dir = tempfile::tempdir().unwrap();
+    for (index, (preset, expected)) in [
+        (PaddingPreset::None, PaddingPolicy::None),
+        (
+            PaddingPreset::Bucket256Kib,
+            PaddingPolicy::BucketGrowth { bucket_chunks: 64 },
+        ),
+        (
+            PaddingPreset::Bucket1Mib,
+            PaddingPolicy::BucketGrowth { bucket_chunks: 256 },
+        ),
+        (
+            PaddingPreset::Bucket16Mib,
+            PaddingPolicy::BucketGrowth {
+                bucket_chunks: 4096,
+            },
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let path = dir
+            .path()
+            .join(format!("async-{index}.hv"))
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let space = AsyncSpaceHandle::create_with_padding(
+            path.clone(),
+            b"fixture".to_vec(),
+            ArgonPreset::Min,
+            0,
+            1,
+            preset,
+        )
+        .await
+        .unwrap();
+        space
+            .commit(vec![WriteOp::Put {
+                namespace: 1,
+                key: b"key".to_vec(),
+                value: b"value".to_vec(),
+            }])
+            .await
+            .unwrap();
+        drop(space);
+        assert_eq!(policy(&path), expected);
+        let reopened = AsyncSpaceHandle::open(path, b"fixture".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened.get(1, b"key".to_vec()).await.unwrap(),
+            Some(b"value".to_vec())
+        );
+    }
+    let path = dir
+        .path()
+        .join("async-default.hv")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let space = AsyncSpaceHandle::create(path.clone(), b"fixture".to_vec(), ArgonPreset::Min, 0, 1)
+        .await
+        .unwrap();
+    drop(space);
+    assert_eq!(policy(&path), PaddingPolicy::DEFAULT);
 }
