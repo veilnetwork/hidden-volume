@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-11-17T14:55:53Z
+# Captured: 2026-11-17T15:04:39Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -548,6 +548,7 @@ lib.rs:   pub fn vacuum_after_open(&self) -> HvResult<u64> {
 lib.rs:   pub fn erase_namespace(&self, namespace: u8) -> HvResult<u64> {
 lib.rs: pub struct AsyncSpaceHandle {
 lib.rs:   pub async fn create(
+lib.rs:   pub async fn create_with_padding(
 lib.rs:   pub async fn open(path: String, password: Vec<u8>) -> HvResult<Arc<Self>> {
 lib.rs:   pub async fn add_space(path: String, password: Vec<u8>) -> HvResult<Arc<Self>> {
 lib.rs:   pub async fn open_with_keys(path: String, keys: Vec<u8>) -> HvResult<Arc<Self>> {

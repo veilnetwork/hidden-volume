@@ -1930,6 +1930,33 @@ impl AsyncSpaceHandle {
         })
     }
 
+    async fn create_with_policy(
+        path: String,
+        password: Vec<u8>,
+        argon: ArgonPreset,
+        initial_garbage_chunks: u64,
+        superblock_replicas: u8,
+        padding_policy: PaddingPolicy,
+    ) -> HvResult<Arc<Self>> {
+        // Both constructors transfer the zeroizing password into the blocking
+        // closure. As with the existing UniFFI async constructors, this
+        // prologue runs on first poll; the scaffolding dispatches immediately.
+        let password = zeroize::Zeroizing::new(password);
+        let p = PathBuf::from(path);
+        let opts = ContainerOptions {
+            argon2: argon.to_params(),
+            initial_garbage_chunks,
+            padding_policy,
+            superblock_replicas: superblock_replicas.max(1),
+        };
+        let inner = run_blocking(move || -> HvResult<OwnedSpace> {
+            let container = Box::new(Container::create_with_options(&p, opts)?);
+            Ok(OwnedSpace::wrap_create(container, &password)?)
+        })
+        .await?;
+        Ok(Self::new(inner))
+    }
+
     /// Run `f` against the locked space through this handle's ledger.
     ///
     /// `f` receives the cancel token this call was dispatched under.
@@ -2002,20 +2029,37 @@ impl AsyncSpaceHandle {
         // than building one it might abandon — the unpolled drop is reachable
         // for a Rust caller of this crate, and that caller has
         // `AsyncSpace` (report27 H03).
-        let password = zeroize::Zeroizing::new(password);
-        let p = PathBuf::from(path);
-        let opts = ContainerOptions {
-            argon2: argon.to_params(),
+        Self::create_with_policy(
+            path,
+            password,
+            argon,
             initial_garbage_chunks,
-            padding_policy: PaddingPolicy::DEFAULT,
-            superblock_replicas: superblock_replicas.max(1),
-        };
-        let inner = run_blocking(move || -> HvResult<OwnedSpace> {
-            let container = Box::new(Container::create_with_options(&p, opts)?);
-            Ok(OwnedSpace::wrap_create(container, &password)?)
-        })
-        .await?;
-        Ok(Self::new(inner))
+            superblock_replicas,
+            PaddingPolicy::DEFAULT,
+        )
+        .await
+    }
+
+    /// Async equivalent of [`SpaceHandle::create_with_padding`]. The explicit
+    /// policy is persisted before returning and is retained by compaction.
+    #[uniffi::constructor]
+    pub async fn create_with_padding(
+        path: String,
+        password: Vec<u8>,
+        argon: ArgonPreset,
+        initial_garbage_chunks: u64,
+        superblock_replicas: u8,
+        padding: PaddingPreset,
+    ) -> HvResult<Arc<Self>> {
+        Self::create_with_policy(
+            path,
+            password,
+            argon,
+            initial_garbage_chunks,
+            superblock_replicas,
+            padding.to_policy(),
+        )
+        .await
     }
 
     /// Async equivalent of [`SpaceHandle::open`]. Argon2id KDF and the
