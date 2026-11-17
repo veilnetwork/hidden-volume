@@ -2,7 +2,7 @@
 
 🇬🇧 **English** · [🇷🇺 Русский](../../ru/security/threat-model.md)
 
-**Status.** Working document, current as of crate v2.7.x. The shape
+**Status.** Working document, current as of crate v2.8.x. The shape
 does not change between releases — only specific findings are filled in.
 This line described the project as pre-release long after v2 shipped,
 which reads as a document nobody has revisited (report16 HV16-L1). No
@@ -89,6 +89,19 @@ The library exposes per-space KV (`Tx::put` / `delete` / `get` /
 decoded-batch caches are call-local. Cache hits retain namespace and log-reference
 digest checks; they do not confer authorization or persist across calls. This API
 does not change the container format or the isolation boundary between spaces.
+
+The FFI `create_with_padding` constructors and Dart `HvSpace.create(padding:)`
+persist an explicitly selected policy at creation. The original constructors
+retain the hidden-storage default. Choosing `None` keeps encryption and
+integrity but does not obscure file growth; a host's visible catalog or separate
+per-identity files are outside the single-container deniability claim.
+
+Dart's known-key integrity proof opens with already-authorized keys and checks
+the authenticated tree without arming deferred maintenance. It still takes an
+exclusive read/write open, is content-dependent rather than constant-duration,
+and proves neither freshness nor future ownership. Worker-local prepared
+compaction owns the same native capability through repair, commit and abort;
+it does not introduce another container format or unlock unknown spaces.
 
 ### 1.2 What `hidden-volume` is NOT
 
