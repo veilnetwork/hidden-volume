@@ -8,7 +8,7 @@
 # сигнатур публичного Rust API. Отдельной русской версии нет — содержимое
 # является кодом, а не прозой. Канонический путь: этот файл.
 #
-# Captured: 2026-11-12T20:31:00Z
+# Captured: 2026-11-17T14:55:53Z
 # Method:   scripts/dump-public-api.sh — grep-extracted from each crate's
 #           src/. cargo public-api would be more rigorous but its rustdoc-
 #           json dependency requires nightly Rust; this project's MSRV is
@@ -522,6 +522,7 @@ lib.rs: pub struct AbandonedOperation {
 lib.rs: pub struct IntegrityResult {
 lib.rs: pub struct SpaceHandle {
 lib.rs:   pub fn create(
+lib.rs:   pub fn create_with_padding(
 lib.rs:   pub fn add_space(path: String, password: Vec<u8>) -> HvResult<std::sync::Arc<Self>> {
 lib.rs:   pub fn open_with_keys(path: String, keys: Vec<u8>) -> HvResult<std::sync::Arc<Self>> {
 lib.rs:   pub fn space_keys(&self) -> HvResult<Vec<u8>> {
@@ -602,7 +603,12 @@ prepared_compaction.rs:   pub fn abort(&self) -> HvResult<()> {
 dart: hidden_volume (flutter plugin)
 ==========================================
 
+hidden_volume.dart: bool verifySpaceKeys({required String path, required Uint8List keys}) {
 hidden_volume.dart: class HvSpace {
+hidden_volume.dart:   factory HvSpace.create({
+hidden_volume.dart:   factory HvSpace.open({
+hidden_volume.dart:   factory HvSpace.addSpace({
+hidden_volume.dart:   factory HvSpace.openWithKeys({
 hidden_volume.dart:   int commit(List<ffi.HvWriteOp> ops) => _inner.commit(ops);
 hidden_volume.dart:   Uint8List? get(int namespace, Uint8List key) => _inner.get(namespace, key);
 hidden_volume.dart:   int commitSeq() => _inner.commitSeq();
@@ -626,6 +632,7 @@ hidden_volume.dart:   void close() {
 hidden_volume.dart: void changePasswords(String path, List<ffi.HvPasswordRotation> rotations) =>
 hidden_volume.dart: void compactKnown(String path, List<Uint8List> passwords) =>
 hidden_volume.dart: class HvMultiSpace {
+hidden_volume.dart:   factory HvMultiSpace.open({required String path}) =>
 hidden_volume.dart:   int openSpace(Uint8List keys) => _inner.openSpace(keys);
 hidden_volume.dart:   int spaceCount() => _inner.spaceCount();
 hidden_volume.dart:   void acknowledgeHardeningError(int id) =>
@@ -865,11 +872,17 @@ src/bindings.dart: void changePasswords(String path, List<HvPasswordRotation> ro
 src/bindings.dart:   rustCall<void>((s) {
 src/bindings.dart: void compactKnown(String path, List<Uint8List> passwords) {
 src/bindings.dart:   rustCall<void>((s) {
+src/bindings.dart: final class HvPreparedCompaction {
+src/bindings.dart:   final String stagedPath;
+src/bindings.dart:   factory HvPreparedCompaction.prepare(
+src/bindings.dart:   void commit() {
+src/bindings.dart:   void close() {
 src/bindings.dart: Future<void> compactKnownPreparedAsync(
 src/bindings.dart:   final copies = [
 src/bindings.dart: void requireOptU64PairForTest(int? a, String an, int? b, String bn) {
 src/bindings.dart: class SpaceHandleBindings {
 src/bindings.dart:   static SpaceHandleBindings create({
+src/bindings.dart:   static SpaceHandleBindings createWithPadding({
 src/bindings.dart:   static SpaceHandleBindings open({
 src/bindings.dart:   static SpaceHandleBindings addSpace({
 src/bindings.dart:   static SpaceHandleBindings openWithKeys({

@@ -23,6 +23,12 @@ mkdir -p "$work/lib"
 
 cat >"$work/lib/fixture.dart" <<'DART'
 class PublicThing {
+  factory PublicThing() => throw UnimplementedError();
+  factory PublicThing.visibleFactory() => throw UnimplementedError();
+  factory PublicThing.withPrivateParameter(Object _value) => throw UnimplementedError();
+  const factory PublicThing.constantFactory() = _Implementation;
+  external factory PublicThing.externalFactory();
+  factory PublicThing._privateFactory() => throw UnimplementedError();
   int plainMethod(int a) => 1;
   Uint8List? digitInTheType(int ns, Uint8List key) => null;
   List<Uint8List> genericWithDigits(int ns) => const [];
@@ -36,6 +42,7 @@ class PublicThing {
 }
 
 class _PrivateThing {
+  factory _PrivateThing.notPublicFactory() => throw UnimplementedError();
   int notSurface(int a) => a;
 }
 DART
@@ -45,6 +52,11 @@ HV_API_DART_LIB="$work/lib" HV_API_OUT="$out" ./scripts/dump-public-api.sh >/dev
 
 fail=0
 must_see=(
+  "factory PublicThing("
+  "PublicThing.visibleFactory"
+  "PublicThing.withPrivateParameter"
+  "PublicThing.constantFactory"
+  "PublicThing.externalFactory"
   "plainMethod"
   "digitInTheType"
   "genericWithDigits"
@@ -63,7 +75,7 @@ for name in "${must_see[@]}"; do
   fi
 done
 
-must_not_see=("_privateMethod" "_privateWithDigits" "notSurface")
+must_not_see=("_privateMethod" "_privateWithDigits" "notSurface" "_privateFactory" "notPublicFactory")
 for name in "${must_not_see[@]}"; do
   if grep -q "$name" "$out"; then
     echo "::error::the extractor claims $name is public API" >&2
