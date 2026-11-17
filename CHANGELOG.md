@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## 2.8.0 — 2026-11-17
+
 ### Added
 
 - A separate FFI space constructor and optional Dart `HvSpace.create(padding:)`
@@ -9,6 +11,19 @@
   creation retains the default policy. Unlike a session-only override, the
   explicit choice survives cold reopen and native compaction. Updated Dart
   bindings require the rebuilt native library and its new constructor checksum.
+- Mirror explicit persisted padding in the asynchronous FFI constructor while
+  retaining the original creation default.
+- Let worker-local callers own prepared compaction through repair, publication
+  and abort. Add a known-key integrity proof that does not run deferred
+  maintenance while checking the source selected for migration.
+
+### Build validation
+
+- Include public Dart factory constructors in the API snapshot guard and run
+  its parser regression tests in CI.
+
+The container format is unchanged. Applications using the new entrypoints must
+ship the rebuilt native library together with their matching bindings.
 
 
 ## 2.7.2 — 2026-11-12
